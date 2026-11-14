@@ -6,6 +6,7 @@ import { PHASE_DECISION, askPhaseOwner } from '../common/turn';
 import type { AmmoKind, GunDef, IftResult, Mount } from '../common/statics';
 import {
   FP,
+  firedOwnFpThisPhase,
   fpfCheck,
   iftColumn,
   markFirers,
@@ -46,7 +47,7 @@ import {
   vehicleIfe,
   actionIllegal,
 } from '../sk1/status';
-import { smoke58Counters, smoke58Markers, terrainOf } from '../sk1/terrain';
+import { isWoodsRoad, smoke58Counters, smoke58Markers, terrainOf } from '../sk1/terrain';
 import { AMMO_NAME, AMMO_OUT, ammoColumn, ammoKinds, ammoOut, ammoStatus, defaultAmmo, isSmokeAmmo, leavesResidual, specialAmmoOf } from './ammo';
 import { caChangeDrm, inCoveredArc, mountLabel, nearestSpine, spineChange } from './arc';
 import { emplacementThDrm, revealGun } from './guns';
@@ -325,6 +326,17 @@ export function swDirectorIllegal(env: QueryEnv, leader: PieceId, side: SideId, 
  * a Mortar that moved can be lined up in the AFPh, and only the shot itself says it cannot fire).
  * Not for a vehicle's Main Armament, which the vehicle rules judge.
  */
+/**
+ * A HS or crew fires one weapon "but forfeits its own FP" (SK4 4.0): in a fire phase it uses one or the other. Having
+ * fired its own FP this phase it may not fire a Gun, Mortar or LATW too, not even later in the MPh, since only Small
+ * Arms, MG and IFE fire as Subsequent First Fire (ASLRB A8.3). A squad fires one weapon at no cost to its own FP.
+ */
+function ownFpSpent(env: QueryEnv, manner: Piece, what: string): string | null {
+  const kind = mmc(env, manner)?.kind;
+  if ((kind !== 'hs' && kind !== 'crew') || !firedOwnFpThisPhase(env, manner.id)) return null;
+  return `A ${kind === 'hs' ? 'half-squad' : 'crew'} that fired its own FP this phase may not also fire its ${what}`;
+}
+
 export function ordnanceWeaponIllegal(env: QueryEnv, weapon: PieceId, mode: FireMode, side: SideId): string | null {
   const g = env.state.pieces[weapon];
   const def = g ? ordnanceOf(env, g) : null;
@@ -335,6 +347,8 @@ export function ordnanceWeaponIllegal(env: QueryEnv, weapon: PieceId, mode: Fire
   const manner = pieceOf(env, g.loc.by);
   if (!mmc(env, manner) && !(def.light && smc(env, manner))) return 'Only a MMC may fire a Gun';
   if (!isGoodOrder(env, manner)) return `The ${def.light ? 'possessing' : 'manning'} unit is not in Good Order`;
+  const spent = ownFpSpent(env, manner, what);
+  if (spent) return spent;
   if (isMalf(g)) return `The ${what} is malfunctioned`;
   const turned = caTurnedIllegal(env, g) ?? caTurnedIllegal(env, manner);
   if (turned) return turned;
@@ -360,6 +374,8 @@ function ordnanceIllegal(env: QueryEnv, shot: OrdnanceShot, mode: FireMode, side
     manner = pieceOf(env, g.loc.by);
     // A Light Mortar is fired by a squad, HS or SMC (SK4 4.5); a Gun by a MMC.
     if (!mmc(env, manner) && !(def.light && smc(env, manner))) return 'Only a MMC may fire a Gun';
+    const spent = ownFpSpent(env, manner, what);
+    if (spent) return spent;
     // A BAZ is fired by any unbroken Infantry MMC, or by two SMC; never by a single SMC (SK4 4.4.1). A PIAT
     // may be used by a SMC at full effect (4.4.5), a PF by a SMC that passes its PF check (+2, 4.4.2).
     if (def.latw && def.type !== 'PIAT' && def.type !== 'PF' && smc(env, manner) && !personnelAt(env, locOf(env.state, manner)!, side).some((p) => p.id !== manner.id && smc(env, p) && isGoodOrder(env, p) && !isPinned(p))) {
@@ -455,11 +471,26 @@ function ordnanceIllegal(env: QueryEnv, shot: OrdnanceShot, mode: FireMode, side
 const otherSmcHelps = (env: QueryEnv, sc: ShotCtx) =>
   personnelAt(env, locOf(env.state, pieceOf(env, sc.firer)) ?? sc.hex, sc.side).some((p) => p.id !== sc.firer && smc(env, p) && isGoodOrder(env, p) && !isPinned(p));
 
-/** Case 8: the Covered Arc change DRM, doubled for a firer in a building. */
-const caDrm = (env: QueryEnv, hex: HexId, mount: Mount, spines: number) => caChangeDrm(mount, spines) * (isBuildingHex(env, hex) ? 2 : 1);
+const WOODS_LIKE = new Set(['woods', 'jungle', 'jungle-light', 'bamboo']);
+/**
+ * Woods (under PTO Terrain jungle and bamboo, "treated as woods", SK4 8.2.1), a building or rubble: where the To Hit
+ * chart's "woods/building" cases bite (case 1 +3, case 8 doubled, case 10 +4; ASLRB C5.11 "woods/building/rubble").
+ */
+export const woodsBuildingOrRubble = (env: QueryEnv, hex: HexId): boolean => {
+  const t = terrainOf(env, hex).id;
+  return WOODS_LIKE.has(t) || t.startsWith('rubble') || isBuildingHex(env, hex);
+};
+const closeName = (env: QueryEnv, hex: HexId) => (isBuildingHex(env, hex) ? 'a building' : terrainOf(env, hex).id.startsWith('rubble') ? 'rubble' : terrainOf(env, hex).name.toLowerCase());
+/**
+ * Case 8 doubles for a firer in woods, a building or rubble, but not for a vehicle on the road in a Woods-Road hex
+ * (ASLRB C5.11; the engine keeps vehicles on the road there).
+ */
+const caDoubled = (env: QueryEnv, hex: HexId, vehicle: boolean) => woodsBuildingOrRubble(env, hex) && !(vehicle && isWoodsRoad(env, hex));
+/** Case 8: the Covered Arc change DRM, doubled for a firer in woods, a building or rubble. */
+const caDrm = (env: QueryEnv, hex: HexId, mount: Mount, spines: number, vehicle: boolean) => caChangeDrm(mount, spines) * (caDoubled(env, hex, vehicle) ? 2 : 1);
 const ifeCaDrm = (env: QueryEnv, attack: FireAttackCtx) => {
   const hex = hexOf(env.state, pieceOf(env, attack.caChange!.weapon));
-  return hex ? caDrm(env, hex, attack.caChange!.mount, attack.caChange!.spines) : caChangeDrm(attack.caChange!.mount, attack.caChange!.spines);
+  return hex ? caDrm(env, hex, attack.caChange!.mount, attack.caChange!.spines, true) : caChangeDrm(attack.caChange!.mount, attack.caChange!.spines);
 };
 
 const isBuildingHex = (env: QueryEnv, hex: HexId) => !!statics(env).map.hex(hex)?.buildingId || terrainOf(env, hex).id.startsWith('building');
@@ -512,7 +543,7 @@ export function ifeDeclaration(env: QueryEnv, shot: OrdnanceShot, sc: ShotCtx): 
 function placeOrdnanceResidual(ctx: Ctx, target: HexId, column: number, outsidePoints: number, bonusColumns = 0) {
   const fp = residualFpLeft(ctx, column, outsidePoints, bonusColumns);
   const existing = (ctx.state.hexMarkers[target]?.['residualFp'] as number | undefined) ?? 0;
-  if (fp > existing) ctx.emit('hex.marker', { hex: target, key: 'residualFp', value: fp });
+  if (fp > existing) ctx.emit('hex.marker', { hex: target, key: 'residualFp', value: fp, residual: { column, outside: outsidePoints, bonus: bonusColumns } });
 }
 
 /**
@@ -975,9 +1006,9 @@ export const ordnanceModule: RuleModule = {
     th(
       'caChange',
       'case 8',
-      (sc, env) => `+${caDrm(env, sc.hex, sc.def.mount, sc.spines)} Covered Arc change (${sc.spines} hexspine${sc.spines === 1 ? '' : 's'}, ${mountLabel(sc.def.mount)}${isBuildingHex(env, sc.hex) ? ', ×2 in a building' : ''})`,
+      (sc, env) => `+${caDrm(env, sc.hex, sc.def.mount, sc.spines, !!sc.def.vehicle)} Covered Arc change (${sc.spines} hexspine${sc.spines === 1 ? '' : 's'}, ${mountLabel(sc.def.mount)}${caDoubled(env, sc.hex, !!sc.def.vehicle) ? `, ×2 in ${closeName(env, sc.hex)}` : ''})`,
       (sc) => sc.spines > 0,
-      (sc, env) => caDrm(env, sc.hex, sc.def.mount, sc.spines),
+      (sc, env) => caDrm(env, sc.hex, sc.def.mount, sc.spines, !!sc.def.vehicle),
     );
     th('smoke', 'case 7', '-2 Smoke at under 13 hexes', (sc) => isSmokeAmmo(sc.ammo) && sc.range < 13, () => -2);
     th('apcr-range', 'case 11', (sc) => `+1 ${AMMO_NAME[sc.ammo]} at 13 hexes or more`, (sc) => (sc.ammo === 'APCR' || sc.ammo === 'APDS') && sc.range >= 13, () => 1);
@@ -993,8 +1024,7 @@ export const ordnanceModule: RuleModule = {
     th('targetSize', 'case 22', (sc, env) => `${targetSizeDrm(sc, env) > 0 ? '+' : ''}${targetSizeDrm(sc, env)} target size`, (sc, env) => targetSizeDrm(sc, env) !== 0, targetSizeDrm);
 
     function afphDrm(sc: ShotCtx, env: QueryEnv): number {
-      const t = terrainOf(env, sc.hex);
-      return t.id === 'woods' || t.id.startsWith('building') ? 3 : 2;
+      return woodsBuildingOrRubble(env, sc.hex) ? 3 : 2;
     }
     function hazardousMover(sc: ShotCtx): boolean {
       return !!sc.moving && sc.moving.length > 0 && sc.moving.every((u) => !!u) && !!sc.movingInfo && (sc.movingInfo as { hazardous?: boolean }).hazardous === true;

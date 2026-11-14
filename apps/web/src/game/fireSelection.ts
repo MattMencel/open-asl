@@ -1,5 +1,5 @@
 import type { Piece, PieceId, QueryEnv } from '@asl/engine';
-import { defOf, fireMarker, isGoodOrder, isRofShot, ordnanceOf, swHeldBy } from '@asl/rules';
+import { defOf, fireMarker, isGoodOrder, isRofShot, ordnanceOf, swHeldBy, vehicle } from '@asl/rules';
 
 /**
  * What a click on an own stack picks up in a fire phase, so the stack is ready to shoot as
@@ -22,7 +22,11 @@ export function fireSelectable(env: QueryEnv, here: Piece[], opts: { firstFire: 
   // A unit that has fired keeps offering the SW it has not fired, and one that kept its Rate of Fire (left
   // unmarked, SK1 1.2.4): a squad may fire its own FP and its SW in separate attacks (SK1 3.2, 4.2; player
   // report 2026-11-06: a Para's FT after the squad fired). The rules judge whether its holder still may.
-  return here.filter((p) => isGoodOrder(env, p)).flatMap((p) => (!done(p) ? [p.id, ...swReady(p)] : swReady(p)));
+  const pick = (ps: Piece[]) => ps.filter((p) => isGoodOrder(env, p)).flatMap((p) => (!done(p) ? [p.id, ...swReady(p)] : swReady(p)));
+  // Beside Infantry that may fire, a vehicle and the weapons it holds stay out: its MG/IFE form Fire Groups only with
+  // each other (SK4 3.2), and it fires from its own entries (MA, MGs, IFE + MGs). A vehicle alone in the hex is picked up.
+  const infantry = pick(here.filter((p) => !vehicle(env, p)));
+  return infantry.length ? infantry : pick(here);
 }
 
 /**

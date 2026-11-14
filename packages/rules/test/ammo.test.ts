@@ -278,6 +278,24 @@ describe('To Hit cases 8 and 11', () => {
     const fenv = far.engine.env(far.state);
     expect(fenv.explain('ordnance.thDrm', shotContextFor(fenv, { weapon: 'g', target: 'yX5', targetType: 'ITT', ammo: 'APCR' }), 0).value).toBe(1);
   });
+
+  it('case 8 doubles in woods, jungle and rubble too ("woods/building/rubble", ASLRB C5.11), not in Open Ground', () => {
+    const turn = (terrain: string | null) => {
+      const g = gunGame({ def: 'ge.AT75Lsa', target: 'yN5', squads: { b1: 'yN5' }, ca: 3, terrain: terrain ? { yK5: { terrain } } : {} });
+      const ca = spineFor(g.engine, g.state, 'yK5', 'yN5', 3);
+      const env = g.engine.env(g.state);
+      const note = env.explain('ordnance.thDrm', shotContextFor(env, { weapon: 'g', target: 'yN5', targetType: 'ITT', ca }), 0).trace.find((t) => t.id === 'sk2.th.caChange')!;
+      return { drm: (note.after as number) - (note.before as number), label: note.label as string, base: caChangeDrm('NT', spineChange(3, ca)) };
+    };
+    for (const [terrain, where] of [['woods', /×2 in woods/], ['jungle', /×2 in/], ['rubble-stone', /×2 in rubble/]] as const) {
+      const r = turn(terrain);
+      expect(r.drm, terrain).toBe(2 * r.base);
+      expect(r.label, terrain).toMatch(where);
+    }
+    const open = turn(null);
+    expect(open.drm).toBe(open.base);
+    expect(open.label).not.toMatch(/×2/);
+  });
 });
 
 describe('Intensive Fire limits (SK4 3.2.4)', () => {

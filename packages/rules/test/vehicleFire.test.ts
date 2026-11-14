@@ -6,6 +6,7 @@ import { sk2CoreModules } from '../src/sk2';
 import { sk3CoreModules } from '../src/sk3';
 import { caChangeDrm, inCoveredArc, nearestSpine, smoke58Counters, spineChange, statics, turretTurnFor } from '../src';
 import { T3, tcaOf } from '../src/sk3/status';
+import { T2 } from '../src/sk2/status';
 import { RU_VS_GE, act, makeEngine, type PieceSpec } from './fixtures';
 
 /*
@@ -212,6 +213,35 @@ describe('vehicular machine guns (SK4 7.8)', () => {
     s = r.state;
     void moveState;
   });
+  it('the MA may fire Bounding First Fire after its MGs, from their hex; keeping ROF then earns no Advancing Fire', () => {
+    // SK4 3.3.2.2: "all other Weapons must be fired from the same hex as the first MA shot", and only a vehicle that fired
+    // just its MA in the MPh and kept ROF fires again in the AFPh. MG DR 6+5 (no effect); MA TH 6+1 (colored 1 keeps ROF 1).
+    const { engine, state } = game([t34('yM9'), { id: 'sq', def: 'ge.467', side: 'ge', hex: 'yM6' }], [6, 5, 6, 1, 6, 6, 6, 6, 6, 6, 6, 6]);
+    let s = play(engine, state, { type: 'vmove.start', vehicle: 't34' }, { type: 'move.step', to: 'yM8' }, { type: 'vmove.stop' });
+    s = passDff(engine, act(engine, s, { type: 'vmove.bffMg', decl: { units: [], sw: ['t34.bmg', 't34.cmg'], target: 'yM6' } }).state);
+    const ma = { type: 'vmove.bff', shot: { weapon: 't34', target: 'yM6', targetType: 'ITT' } };
+    expect(engine.validate(s, { ...ma, side: 'ru', decisionId: engine.currentDecision(s)!.id } as never)).toBeNull();
+    const r = act(engine, s, ma);
+    expect(ev(r, 'sk2.ordnance.shot')[0]).toMatchObject({ weapon: 't34', mode: 'bounding' });
+    expect(ev(r, 'sk2.ordnance.rof')[0]).toMatchObject({ weapon: 't34', kept: true });
+    s = play(engine, passDff(engine, r.state), { type: 'vmove.end' });
+    for (let i = 0; i < 6 && s.phase !== 'AFPh'; i++) s = passDff(engine, act(engine, s, { type: 'endPhase' }).state);
+    expect(s.phase).toBe('AFPh');
+    const afph = engine.validate(s, { type: 'fire.ordnance', shot: { weapon: 't34', target: 'yM6', targetType: 'ITT' }, side: 'ru', decisionId: engine.currentDecision(s)!.id } as never);
+    expect(afph).toMatch(/no Advancing Fire/);
+    // The AFPh over, the markers come off: the record of this MPh's fire does not outlive it.
+    s = passDff(engine, act(engine, s, { type: 'endPhase' }).state);
+    expect(s.pieces['t34']!.tags[T3.bff]).toBeUndefined();
+    expect(s.pieces['t34.bmg']!.tags['fire']).toBeUndefined();
+  });
+  it('after its MGs fired, the first MA shot of the MPh is from their hex', () => {
+    const { engine, state } = game([t34('yM9'), { id: 'sq', def: 'ge.467', side: 'ge', hex: 'yM5' }], [6, 6, 6, 6, 6, 6]);
+    let s = play(engine, state, { type: 'vmove.start', vehicle: 't34' }, { type: 'move.step', to: 'yM8' });
+    s = passDff(engine, act(engine, s, { type: 'vmove.bffMg', decl: { units: [], sw: ['t34.bmg', 't34.cmg'], target: 'yM5' } }).state);
+    s = play(engine, s, { type: 'move.step', to: 'yM7' });
+    const ma = { type: 'vmove.bff', shot: { weapon: 't34', target: 'yM5', targetType: 'ITT' }, side: 'ru', decisionId: engine.currentDecision(s)!.id };
+    expect(engine.validate(s, ma as never)).toMatch(/MGs fired from M8/);
+  });
   it('a mover wrecked on its way is no target for the fire that follows (it would take Morale Checks, break and be offered rally)', () => {
     const { engine, state } = game([t34('yM8', { wreck: true }), { id: 'ru', def: 'ru.447', side: 'ru', hex: 'yM8' }, pziv('yM4')], []);
     const atk = buildAttack(engine.env(state), { units: [], sw: ['pziv.cmg'], target: 'yM8' }, 'first', 'ge', ['t34', 'ru']);
@@ -382,6 +412,19 @@ describe('turning the turret to fire (SK4 3.2.4 case 8; ASL D3.51 Maintaining CA
     expect(labels(ev(ma, 'sk2.ordnance.shot')[0]!)).toContain(`+${drm} Covered Arc change (the turret turned earlier this phase)`);
   });
 
+  it('doubled in woods (ASLRB C5.11 "woods/building/rubble"), but not on the road of a Woods-Road hex', () => {
+    const cmgDrm = (terrain: Record<string, { terrain: string; features?: string[] }>) => {
+      const { engine, state } = makeEngine({ pieces: [t34('yM8'), { id: 'sq', def: 'ge.467', side: 'ge', hex: 'yM10' }], scenario: RU_VS_GE, extra, startPhase: 'PFPh', dice: [4, 4, 4, 4], terrain });
+      const tca = turretTurnFor(engine.env(state), { sw: ['t34.cmg'], target: 'yM10' })!;
+      const r = act(engine, state, { type: 'fire', decl: { units: [], sw: ['t34.cmg'], target: 'yM10', tca } });
+      return { labels: labels(ev(r, 'sk1.fire.attack')[0]!), base: caChangeDrm('RST', spineChange(0, tca)) };
+    };
+    const woods = cmgDrm({ yM8: { terrain: 'woods' } });
+    expect(woods.labels).toContain(`+${2 * woods.base} Covered Arc change`);
+    const road = cmgDrm({ yM8: { terrain: 'woods', features: ['road:dirt', 'woods-road'] } });
+    expect(road.labels).toContain(`+${road.base} Covered Arc change`);
+  });
+
   it('the MA turns first: the CMG firing after it in that TCA pays the same penalty on the IFT, the BMG does not', () => {
     const { engine, state } = setup([4, 4, 4, 4, 4, 4, 4, 4]);
     const tca = turretTurnFor(engine.env(state), { sw: ['t34.cmg'], target: 'yM10' })!;
@@ -476,5 +519,75 @@ describe('an NT vehicle firing outside its CA (SK4 3.3.2.1)', () => {
     expect(tcaOf(t.engine.env(t.r.state), after)).toBe(0);
     expect(ev(t.r, 'sk2.ordnance.shot')).toHaveLength(0);
     expect(after.tags['fire']).toBeUndefined();
+  });
+});
+
+describe('turning without MP at the end of a fire phase (SK4 3.3.2, ASLRB C3.22)', () => {
+  const GE_FIRST = { ...RU_VS_GE, firstSide: 'ge' };
+  const stug = (hex: string, tags: Record<string, string | number | boolean> = {}): PieceSpec => ({ id: 'stug', def: 'ge.stug3g', side: 'ge', hex, tags: { vca: 0, ca: 0, ...tags } });
+  const geGame = (pieces: PieceSpec[], dice: number[], startPhase = 'MPh') => makeEngine({ pieces, scenario: GE_FIRST, extra, startPhase, dice });
+  const face = (engine: Engine, s: GameState, a: { vca?: number; tca?: number }, vehicle = 'stug') =>
+    engine.validate(s, { type: 'vehicle.face', vehicle, ...a, side: engine.currentDecision(s)!.owner, decisionId: engine.currentDecision(s)!.id } as never);
+  const toPhase = (engine: Engine, s: GameState, phase: string) => {
+    for (let i = 0; i < 20 && s.phase !== phase; i++) s = passDff(engine, act(engine, s, { type: 'endPhase' }).state);
+    return s;
+  };
+
+  it('a StuG that moved and did not fire turns its hull in the AFPh, then fires no more; the next Player Turn it moves and fires', () => {
+    const { engine, state } = geGame([stug('yM9'), { id: 'sq', def: 'ru.447', side: 'ru', hex: 'yH9' }], [6, 6, 6, 6, 6, 6, 6, 6]);
+    let s = play(engine, state, { type: 'vmove.start', vehicle: 'stug' }, { type: 'move.step', to: 'yM8' }, { type: 'vmove.stop' }, { type: 'vmove.end' });
+    s = toPhase(engine, s, 'AFPh');
+    // Offered (the wheel and the bot read `legal`), and accepted: its MA is bow-mounted and could still fire.
+    expect(engine.legalActions(s, 'ge').some((a) => a.type === 'vehicle.face' && a['vehicle'] === 'stug' && a['vca'] === 3)).toBe(true);
+    expect(face(engine, s, { vca: 3 })).toBeNull();
+    s = act(engine, s, { type: 'vehicle.face', vehicle: 'stug', vca: 3 }).state;
+    expect(s.pieces['stug']!.tags[T3.vca]).toBe(3);
+    expect(s.pieces['stug']!.tags['ca']).toBe(3);
+    // The change ends its fire this phase, MA and MGs; and it turns once.
+    const d = engine.currentDecision(s)!;
+    expect(engine.validate(s, { type: 'fire.ordnance', shot: { weapon: 'stug', target: 'yH9', targetType: 'ITT' }, side: 'ge', decisionId: d.id } as never)).toMatch(/turned its Covered Arc/);
+    expect(face(engine, s, { vca: 2 })).toMatch(/already turned/);
+    // Through the Russian Player Turn and back: the tags are gone, and it starts and drives on.
+    for (let i = 0; i < 40 && !(s.attacker === 'ge' && s.turn === 2 && s.phase === 'MPh'); i++) s = passDff(engine, act(engine, s, { type: engine.currentDecision(s)!.kind === 'firstFire' ? 'defPass' : 'endPhase' }).state);
+    expect(s.pieces['stug']!.tags[T2.caTurned]).toBeUndefined();
+    expect(s.pieces['stug']!.tags[T2.caLocked]).toBeUndefined();
+    s = play(engine, s, { type: 'vmove.start', vehicle: 'stug' }, { type: 'move.step', to: 'yL8' });
+    expect(s.pieces['stug']!.loc).toMatchObject({ hex: 'yL8' });
+  });
+
+  it('a turn at the end of the PFPh keeps the vehicle from moving this Player Turn (C3.22)', () => {
+    const { engine, state } = geGame([stug('yM9')], [6, 6], 'PFPh');
+    let s = act(engine, state, { type: 'vehicle.face', vehicle: 'stug', vca: 1 }).state;
+    expect(s.pieces['stug']!.tags[T2.caLocked]).toBe(true);
+    s = toPhase(engine, s, 'MPh');
+    const d = engine.currentDecision(s)!;
+    expect(engine.validate(s, { type: 'vmove.start', vehicle: 'stug', side: 'ge', decisionId: d.id } as never)).toMatch(/C3\.22/);
+  });
+
+  it('needs a weapon it could still fire: not after Bounding First Fire lost the MA its ROF; the BMG turns the hull only', () => {
+    // MA BFF, colored 6: ROF lost, so no MA in the AFPh, and having fired in its MPh no MGs either (SK4 3.3.2.2).
+    const { engine, state } = geGame([stug('yM9'), { id: 'sq', def: 'ru.447', side: 'ru', hex: 'yM6' }], [6, 6, 6, 6, 6, 6, 6, 6]);
+    let s = play(engine, state, { type: 'vmove.start', vehicle: 'stug' }, { type: 'vmove.stop' });
+    s = passDff(engine, act(engine, s, { type: 'vmove.bff', shot: { weapon: 'stug', target: 'yM6', targetType: 'ITT' } }).state);
+    s = play(engine, s, { type: 'vmove.end' });
+    s = toPhase(engine, s, 'AFPh');
+    expect(face(engine, s, { vca: 3 })).toMatch(/bow-mounted/);
+    // A T-34 in the PFPh whose MA and CMG have fired, its BMG ready: the hull may turn, the turret may not ("bow mounted
+    // NA for TCA"). With the CMG ready as well, the turret may turn too.
+    const pieces = [t34('yM9', { fire: 'prep' }), { id: 't34.cmg', def: 'ru.T34M43.cmg', side: 'ru', heldBy: 't34', tags: { fire: 'prep' } }];
+    const t = makeEngine({ pieces, scenario: RU_VS_GE, extra, startPhase: 'PFPh' });
+    expect(face(t.engine, t.state, { vca: 2 }, 't34')).toBeNull();
+    expect(face(t.engine, t.state, { tca: 2 }, 't34')).toMatch(/turret weapon/);
+    const cmgReady = makeEngine({ pieces: [t34('yM9', { fire: 'prep' })], scenario: RU_VS_GE, extra, startPhase: 'PFPh' });
+    expect(face(cmgReady.engine, cmgReady.state, { tca: 2 }, 't34')).toBeNull();
+  });
+
+  it('the defender turns at the end of the DFPh, not in the enemy fire phases', () => {
+    const { engine, state } = geGame([stug('yM9'), { id: 'ru', def: 'ru.447', side: 'ru', hex: 'yH2' }], [], 'DFPh');
+    expect(engine.currentDecision(state)!.owner).toBe('ru');
+    expect(engine.validate(state, { type: 'vehicle.face', vehicle: 'stug', vca: 2, side: 'ge', decisionId: engine.currentDecision(state)!.id } as never)).not.toBeNull();
+    const { engine: e2, state: s2 } = makeEngine({ pieces: [t34('yM9'), stug('yM2')], scenario: GE_FIRST, extra, startPhase: 'DFPh' });
+    expect(e2.currentDecision(s2)!.owner).toBe('ru');
+    expect(face(e2, s2, { vca: 2 }, 't34')).toBeNull();
   });
 });

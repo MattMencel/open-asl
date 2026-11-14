@@ -83,7 +83,7 @@ export interface ActiveRout {
   destinations: HexId[];
   /** Whether a building or woods hex was reachable at all. */
   sheltered: boolean;
-  /** The unit has reached a destination outside its starting building: it may only go on into further shelter hexes. */
+  /** The unit has reached shelter outside its starting building (`arrives`): it may only go on into further shelter hexes. */
   reached: boolean;
 }
 const routState = (env: QueryEnv) => env.state.ext[ROUT] as RoutState | undefined;
@@ -395,8 +395,22 @@ function afterStep(env: QueryEnv, v: RoutView, toLoc: LocId, cost: number): Rout
     level: levelOfLoc(toLoc),
     spent: v.spent + cost,
     seen: new Set([...v.seen, ...knownEnemyHexes(env, v.side, v.at)]),
-    reached: v.reached || (v.plan.sheltered && v.plan.destinations.has(to) && !inStartBuilding(env, v.start, to)),
+    reached: v.reached || arrives(env, v, v.at, to),
   };
+}
+
+/**
+ * Does the step from `from` into `to` bring the rout to shelter, after which it may go on only into further building or
+ * woods hexes (`canStop`)? Entering one of its destinations outside the starting building does. So does leaving another
+ * hex of the starting building (not beside an enemy) for a building or woods hex of something else: that hex was a legal
+ * end the unit was free not to ignore (SK1 3.6 "may ignore any building hex that is part of a building it is already
+ * in"), and from it the unit "can immediately enter another building or woods hex". A step from the starting building
+ * into Open Ground leaves the rout free to head for its destinations.
+ */
+function arrives(env: QueryEnv, v: RoutView, from: HexId, to: HexId): boolean {
+  if (!v.plan.sheltered || inStartBuilding(env, v.start, to)) return false;
+  if (v.plan.destinations.has(to)) return true;
+  return from !== v.start && inStartBuilding(env, v.start, from) && !enemyAdjacent(env, v.side, from) && isShelter(env, to);
 }
 
 /**
@@ -438,7 +452,7 @@ function reachableEnds(env: QueryEnv, v: RoutView, first = false): Set<HexId> {
       if (stepIllegal(env, v.side, h, n, seen, v.unit)) continue;
       const nc = c + routStepCost(env, v.unit, h, n);
       if (nc > v.mf) continue;
-      const nr = reached || (v.plan.sheltered && v.plan.destinations.has(n) && !inStartBuilding(env, v.start, n));
+      const nr = reached || arrives(env, v, h, n);
       if (canStop(env, { ...v, at: n, reached: nr })) {
         ends.add(n);
         if (first) return ends;
@@ -910,7 +924,7 @@ function enterHex(ctx: Ctx, act: ActiveRout, toLoc: LocId, cost: number, lowCraw
     path: [...act.path, toLoc],
     spent: act.spent + cost,
     seen: [...new Set([...act.seen, ...knownEnemyHexes(ctx, side, from)])].sort(),
-    reached: act.reached || (act.sheltered && act.destinations.includes(to) && !inStartBuilding(ctx, act.start, to)),
+    reached: act.reached || arrives(ctx, activeView(ctx, act), from, to),
   };
   let over = lowCrawl;
   let alive = true;
@@ -992,8 +1006,12 @@ function interdictionCheck(ctx: Ctx, unit: PieceId, leaderDrm: number): CheckOut
     const r = ctx.proc<CasualtyFn>(MP.casualtyReduce)(ctx, unit, 'Interdiction');
     return r === 'eliminated' ? 'eliminated' : 'reduced';
   }
-  // Passing by exactly the unit's morale is a pin result: the unit may not rout further.
-  if (final === morale) return 'pinned';
+  // Passing by exactly the unit's morale is a Pin result: the unit is pinned and "may not rout further that RtPh"
+  // (SK4 3.6; the hut rule speaks of "a pinned broken unit"). The Pin counter shows the player why it stopped.
+  if (final === morale) {
+    setTags(ctx, unit, { [T.pinned]: true, [T.pinnedThisTurn]: true });
+    return 'pinned';
+  }
   return 'passed';
 }
 

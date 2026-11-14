@@ -249,6 +249,9 @@ const firerLoc = (env: QueryEnv, id: PieceId): LocId => locOf(env.state, pieceOf
  */
 export const partLoc = (env: QueryEnv, part: FirePart): LocId => firerLoc(env, part.firer);
 /** The SW a unit holds that have already fired this phase, in attacks before this one (the fire log is per phase). */
+/** Whether a unit fired its own (inherent) FP in this phase: the fire log names it, as it names each SW it fires. */
+export const firedOwnFpThisPhase = (env: QueryEnv, unit: PieceId): boolean => Object.values(fireLog(env).pairs).some((ids) => ids.includes(unit));
+
 const swFiredEarlier = (env: QueryEnv, holder: PieceId, now: PieceId[]): number => {
   const fired = new Set(Object.values(fireLog(env).pairs).flat());
   return swHeldBy(env.state, holder).filter((s) => fired.has(s.id) && !now.includes(s.id)).length;
@@ -1143,13 +1146,14 @@ function resolveFire(
     const atrs = attack.parts.filter((p) => p.kind === 'sw' && isAtr(ctx, p.piece)).map((p) => p.piece);
     const outside = outsideDrm(drmRes, ['sk1.drm.hindrance', 'sk1.drm.cx', 'sk1.drm.leadership']);
     const bonus = ctx.query('fire.residualBonus', { target: decl.target, attack }, 0);
+    const columnFor = (keeping: PieceId[]) => iftColumn(ctx, attackFp(ctx, attack, [...malfunctioned, ...removed, ...keeping, ...atrs]), cowered ? cowerShift : 0);
     const left = (keeping: PieceId[]) => {
-      const col = iftColumn(ctx, attackFp(ctx, attack, [...malfunctioned, ...removed, ...keeping, ...atrs]), cowered ? cowerShift : 0);
+      const col = columnFor(keeping);
       return col === null ? 0 : residualFpLeft(ctx, col, outside, bonus);
     };
     residualFp = left(rofKept);
     const existing = (ctx.state.hexMarkers[decl.target]?.['residualFp'] as number | undefined) ?? 0;
-    if (residualFp > existing) ctx.emit('hex.marker', { hex: decl.target, key: 'residualFp', value: residualFp });
+    if (residualFp > existing) ctx.emit('hex.marker', { hex: decl.target, key: 'residualFp', value: residualFp, residual: { column: columnFor(rofKept)!, outside, bonus } });
     const choosers = rofKept.filter((id) => !atrs.includes(id));
     if (choosers.length) rofResidual = subsets(choosers).map((sws) => ({ sws, residual: left(rofKept.filter((id) => !sws.includes(id))) }));
   }

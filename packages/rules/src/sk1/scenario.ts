@@ -335,7 +335,34 @@ export function piecesToPlace(env: QueryEnv, d: Decision): Piece[] {
  * Hexes a piece may be placed in: its force's setup hexes (any map hex if unrestricted), or for
  * entering units the offboard hexes along their entry edge (beside the allowed entry hexes, if any).
  */
+/**
+ * The setup hexes of each piece, per game state: the setup screen asks for them for every counter on every hex it
+ * lights, and `placementIllegal` for every placement each time, so they are worked out once per state (a state is
+ * never changed in place; a new one gets new answers).
+ */
+const placementCache = new WeakMap<object, Map<PieceId, { list: HexId[]; set: Set<HexId> }>>();
+function cachedPlacement(env: QueryEnv, p: Piece): { list: HexId[]; set: Set<HexId> } {
+  let byPiece = placementCache.get(env.state);
+  if (!byPiece) placementCache.set(env.state, (byPiece = new Map()));
+  // The piece passed in may not be the state's own (a pending placement is a copy): keyed by what decides the answer.
+  const key = `${p.id}|${p.loc.kind === 'offboard' ? p.loc.edge : p.loc.kind}`;
+  let hit = byPiece.get(key);
+  if (!hit) {
+    const list = placementHexesOf(env, p);
+    byPiece.set(key, (hit = { list, set: new Set(list) }));
+  }
+  return hit;
+}
+
 export function placementHexes(env: QueryEnv, p: Piece): HexId[] {
+  // A copy: callers may sort or trim it.
+  return [...cachedPlacement(env, p).list];
+}
+
+/** Whether `hex` is one of the piece's setup hexes (`placementHexes`), without a scan of the list. */
+export const isPlacementHex = (env: QueryEnv, p: Piece, hex: HexId): boolean => cachedPlacement(env, p).set.has(hex);
+
+function placementHexesOf(env: QueryEnv, p: Piece): HexId[] {
   const map = statics(env).map;
   if (p.loc.kind === 'offboard' && p.loc.edge === 'setup') {
     // Not where no unit may enter (S19's flooded grain), whatever area the card names.
@@ -385,7 +412,7 @@ export function placementIllegal(env: QueryEnv, side: SideId, todo: Piece[], pla
       return 'Place every unit before confirming';
     }
     const hex = hexOfLoc(loc);
-    if (!placementHexes(env, p).includes(hex)) return `${hex} is not a setup hex for this unit`;
+    if (!isPlacementHex(env, p, hex)) return `${hex} is not a setup hex for this unit`;
     // Above ground level only where the hex has that Location (full ASL upper building levels), and only Infantry.
     if (!isGroundLoc(loc) && (!locExists(env, loc) || !isPersonnelDef(defOf(env, p)))) return `${p.id} cannot set up at ${loc}`;
     // Not in a hex the enemy already holds, where overlapping setup areas meet (S7): play would open in Melee. A

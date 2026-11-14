@@ -22,6 +22,7 @@ export * from './facing';
 export * from './toKill';
 export * from './shotOutlook';
 export * from './vehicleFire';
+export * from './vehicleFacing';
 export * from './wrecks';
 export * from './vehicleMg';
 export * from './paatc';

@@ -201,6 +201,16 @@ describe('Rout Phase', () => {
     const alone = act(engine, state, first).state;
     expect(alone.pieces['a1']!.loc).toEqual({ kind: 'hex', hex: 'yM5' });
     expect(activeRout(engine.env(alone))).toBeUndefined();
+    // The Pin result is placed (SK4 3.6 "suffers a pin result"), so the board says why the rout stopped; it comes off
+    // when the Player Turn ends, as any Pin does.
+    expect(alone.pieces['a1']!.tags['pinned']).toBe(true);
+    let next = alone;
+    for (let i = 0; i < 20 && next.attacker === state.attacker; i++) {
+      const d = engine.currentDecision(next)!;
+      next = act(engine, next, { type: 'endPhase', side: d.owner }).state;
+    }
+    expect(next.attacker).not.toBe(state.attacker);
+    expect(next.pieces['a1']!.tags['pinned']).toBeUndefined();
     const together = act(engine, state, { ...first, leaders: ['aL'] }).state;
     expect(together.pieces['aL']!.loc).toEqual({ kind: 'hex', hex: 'yM5' });
     expect(activeRout(engine.env(together))).toMatchObject({ unit: 'a1', escort: ['aL'] });
@@ -523,5 +533,46 @@ describe('Rout within the starting building (tester report, 2026-11-03)', () => 
     // Out through K6/K7 (open) away from the Russians: a legal first step, not only L7.
     const targets = stepTargets(engine, s, 'ge', 'g1');
     expect(targets.some((h) => h.startsWith('zK'))).toBe(true);
+  });
+
+  // M6 starts in the same building, a Russian squad beside it in L5 (another in O2). Its nearest shelters are
+  // M7 (its own building) and the building across the road (O6, O7); M8, another building one hex past M7, is farther.
+  const fromM6 = () =>
+    makeEngine({
+      board: 'z',
+      scenario: { ...RU_VS_GE, firstSide: 'ru' },
+      startPhase: 'RtPh',
+      terrain: {
+        zL5: { terrain: 'building-stone', buildingId: 'z-B31' },
+        zL6: { terrain: 'building-stone', buildingId: 'z-B31' },
+        zL7: { terrain: 'building-stone', buildingId: 'z-B31' },
+        zM6: { terrain: 'building-stone', buildingId: 'z-B31' },
+        zM7: { terrain: 'building-stone', buildingId: 'z-B31' },
+        zL8: { terrain: 'building-stone', buildingId: 'z-B27' },
+        zM8: { terrain: 'building-stone', buildingId: 'z-B33' },
+        zO6: { terrain: 'building-stone', buildingId: 'z-B37' },
+        zO7: { terrain: 'building-stone', buildingId: 'z-B37' },
+      },
+      pieces: [
+        { id: 'g1', def: 'ge.467', side: 'ge', hex: 'zM6', tags: { broken: true, dm: true } },
+        { id: 'r1', def: 'ru.447', side: 'ru', hex: 'zL5' },
+        { id: 'r2', def: 'ru.447', side: 'ru', hex: 'zO2' },
+      ],
+    });
+
+  it('from M7, a hex of its own building it was free not to ignore, the rout goes straight on into the M8 building (SK1 3.6 "can immediately enter another building")', () => {
+    const { engine, state: s } = fromM6();
+    const s1 = act(engine, s, stepTo(engine, s, 'ge', 'g1', 'zM7')!).state;
+    expect(engine.legalActions(s1, 'ge').some((a) => a.type === 'rout.stop' && a['unit'] === 'g1')).toBe(true);
+    expect(stepTargets(engine, s1, 'ge', 'g1')).toContain('zM8');
+    expect([...activeRoutEnds(engine.env(s1))!]).toContain('zM8');
+    const s2 = act(engine, s1, stepTo(engine, s1, 'ge', 'g1', 'zM8')!).state;
+    expect(s2.pieces['g1']!.loc).toEqual({ kind: 'hex', hex: 'zM8' });
+    // In M8 it has reached shelter outside its building: it may stop, or go on only into more building or woods.
+    expect(engine.legalActions(s2, 'ge').some((a) => a.type === 'rout.stop' && a['unit'] === 'g1')).toBe(true);
+    for (const h of stepTargets(engine, s2, 'ge', 'g1')) expect(['zL8', 'zM7', 'zL7']).toContain(h);
+    const done = act(engine, s2, engine.legalActions(s2, 'ge').find((a) => a.type === 'rout.stop')!).state;
+    expect(activeRout(engine.env(done))).toBeFalsy();
+    expect(done.pieces['g1']!.loc).toEqual({ kind: 'hex', hex: 'zM8' });
   });
 });

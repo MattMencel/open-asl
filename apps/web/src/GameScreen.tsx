@@ -543,6 +543,17 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
     const left = smokeThrowers();
     return smokeNext && left.includes(smokeNext) ? smokeNext : left[0];
   };
+  /**
+   * Placing a DC into `hex` (SK4 4.3, ASLRB A23.3): the action, or null when the moving stack carries none. An enemy AFV
+   * there is the target (a PAATC first); right-click the hex to place it in the hex instead.
+   */
+  const dcPlacement = (hex: HexId): (Omit<Action, 'side' | 'decisionId'> & { vehicle?: PieceId }) | null => {
+    if (!ms) return null;
+    const dc = ms.units.flatMap((u) => swHeldBy(state, u)).find((s) => (defOf(env, s) as { type?: string }).type === 'DC');
+    if (!dc) return null;
+    const afv = Object.values(state.pieces).find((p) => p.side !== owner && p.loc.kind === 'hex' && p.loc.hex === hex && vehicleDef(env, p) && !p.tags['wreck']);
+    return { type: 'move.placeDc', dc: dc.id, target: hex, ...(afv ? { vehicle: afv.id } : {}) };
+  };
   const throwSmoke = (plan: SmokeThrow[]) => {
     setMode('normal');
     run(plan.length === 1 ? { type: 'move.smoke', ...plan[0]! } : { type: 'move.smoke', throws: plan }, true);
@@ -1716,14 +1727,26 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
    * MPh: why the moving stack may not step into the neighbouring hex under the pointer (a stack
    * under Assault Movement may be offered one hex of six, and the player needs to see why).
    */
-  const moveHover = useMemo(() => {
+  const moveHover = useMemo((): { text: string; barred: boolean } | null => {
     if (phase !== 'MPh' || !ms?.hex || !hoverHex || decision?.kind !== 'phase' || !owner || decision.owner !== owner) return null;
     if (!statics.map.neighbors(ms.hex).includes(hoverHex)) return null;
+    // Choosing a DC target the question is the placement, not a step: a DC goes into an enemy-occupied hex the stack
+    // may not enter (SK4 4.3, ASLRB A23.3), for the MF entering it would cost.
+    if (mode === 'dc') {
+      const place = dcPlacement(hoverHex);
+      if (!place) return null;
+      const err = session.check(place);
+      if (err) return { text: plain(err) ?? err, barred: true };
+      const placer = (state.pieces[place['dc'] as PieceId]!.loc as { by: PieceId }).by;
+      const cost = env.query('move.cost', { unit: placer, from: ms.hex, to: hoverHex, viaRoad: false }, 0);
+      const afv = place.vehicle ? state.pieces[place.vehicle] : undefined;
+      return { text: `Place the DC here: ${cost} MF${afv ? `, against the ${pieceLabel(env, afv).replace(/^\S+ /, '')} (a PAATC first)` : ''}`, barred: false };
+    }
     const err = session.check({ type: 'move.step', to: hoverHex });
     if (!err || !session.check({ type: 'move.step', to: hoverHex, woods: true })) return null;
-    return plain(err) ?? err;
+    return { text: plain(err) ?? err, barred: true };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [phase, ms, hoverHex, decision, owner, session, env]);
+  }, [phase, ms, hoverHex, decision, owner, session, env, mode]);
 
   // Off-board artillery (SSR): each side's mission on its way and the salvo that landed this Player Turn, for the map.
   const obaShown = useMemo(
@@ -1898,10 +1921,15 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
         return { selectedHex, highlights, selectedPieces: selected, los: null, badges: anchorBadges };
       }
       const candidates = picked ? todo.filter((p) => p.id === picked) : todo.filter((p) => !pending[p.id]);
-      // Green = where that counter may legally go now (area, per-hex limits, stacking).
+      // Green = where that counter may legally go now (area, per-hex limits, stacking); with none picked up, where
+      // some counter may, so a hex already green is not checked again for the next one (S26 has ~760 setup hexes).
+      const green = new Set<HexId>();
       for (const p of candidates)
         for (const h of placementHexes(env, p))
-          if (!placementIllegal(env, placing.owner, todo, { ...pending, [p.id]: h }, true)) highlights.set(h, GREEN);
+          if (!green.has(h) && !placementIllegal(env, placing.owner, todo, { ...pending, [p.id]: h }, true)) {
+            green.add(h);
+            highlights.set(h, GREEN);
+          }
       // Blue = the map hexes a group with a restricted entry ("on or west of J10") may come onto the board by,
       // so its offboard spot is chosen with the way in in view (an offboard hex can touch a hex it may not enter).
       if (placing.kind === 'offboardSetup')
@@ -2010,10 +2038,17 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
     if (smokeAt && ms?.hex)
       for (const h of [ms.hex, ...statics.map.neighbors(ms.hex)]) if (!session.check({ type: 'move.smoke', throws: [...smokePlan, { unit: smokeAt, target: h }] })) highlights.set(h, AMBER);
     if (mode === 'smoke') for (const t of smokePlan) badges.push({ hex: t.target, text: `smoke: ${pieceLabel(env, state.pieces[t.unit]).replace(/^\S+ /, '')}` });
+    // Choosing a DC target: the adjacent hexes the DC may be placed in (amber), enemy-held ones included (SK4 4.3), and
+    // not the steps, as for Smoke.
+    if (mode === 'dc' && ms?.hex)
+      for (const h of statics.map.neighbors(ms.hex)) {
+        const place = dcPlacement(h);
+        if (place && !session.check(place)) highlights.set(h, AMBER);
+      }
     for (const a of legal) {
       // Full ASL: the stairs of the stack's own hex are a wheel entry, not a green hex (ASLRB B23.4).
       // A Bypass is a corner handle, not a green hex; the obstacle a stack in Bypass may enter is green (full ASL).
-      if ((a.type === 'move.step' || a.type === 'move.manhandle') && mode !== 'smoke' && !a['bypass'] && (hexOfLoc(a['to'] as string) !== ms?.hex || (ms?.bypass && a['to'] === ms.bypass.hex))) highlights.set(hexOfLoc(a['to'] as string), GREEN);
+      if ((a.type === 'move.step' || a.type === 'move.manhandle') && mode !== 'smoke' && mode !== 'dc' && !a['bypass'] && (hexOfLoc(a['to'] as string) !== ms?.hex || (ms?.bypass && a['to'] === ms.bypass.hex))) highlights.set(hexOfLoc(a['to'] as string), GREEN);
       // Rally Phase: every hex holding a broken unit that may attempt to rally right now.
       if (a.type === 'rally.selfRally' || a.type === 'rally.rally') {
         const h = hexOfId(state, a['unit'] as string);
@@ -2181,10 +2216,8 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
         setMode('normal');
       }
       if (mode === 'dc') {
-        const dc = ms.units.flatMap((u) => swHeldBy(state, u)).find((s) => (defOf(env, s) as { type?: string }).type === 'DC');
-        // An enemy AFV in the hex: the DC is placed against it (right-click the hex to place it in the hex instead; SK4 4.3).
-        const afv = Object.values(state.pieces).find((p) => p.side !== owner && p.loc.kind === 'hex' && p.loc.hex === hex && vehicleDef(env, p) && !p.tags['wreck']);
-        if (dc) run({ type: 'move.placeDc', dc: dc.id, target: hex, ...(afv ? { vehicle: afv.id } : {}) }, true);
+        const place = dcPlacement(hex);
+        if (place) run(place, true);
         setMode('normal');
         return;
       }
@@ -2897,7 +2930,7 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
             );
         }
         if (movers.flatMap((u) => swHeldBy(state, u.id)).some((s) => (defOf(env, s) as { type?: string }).type === 'DC'))
-          items.push(action('Place DC…', () => setMode(mode === 'dc' ? 'normal' : 'dc'), { icon: '✸', active: mode === 'dc', hint: 'Then click the target hex (an enemy AFV there is the target: a PAATC first, SK4 4.3)' }));
+          items.push(action('Place DC…', () => setMode(mode === 'dc' ? 'normal' : 'dc'), { icon: '✸', active: mode === 'dc', hint: 'Then click an amber hex: an adjacent hex, enemy-held ones included, for the MF entering it would cost (an enemy AFV there is the target: a PAATC first, SK4 4.3)' }));
         if (ms.hex) {
           // Recovery (and so capture of an enemy weapon, SK1 5.5 / ASLRB A21.1) by a moving unit of the player's choosing
           // (ticking a mover here means leaving it behind, so there is no shortcut by selection).
@@ -3070,6 +3103,29 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
           if (vd.smoke?.length && vd.smoke[0]!.kind !== 'sM') {
             const sErr = plain(session.check({ type: 'defSmoke', vehicle: v.id }));
             items.push(action(vehicleEntry(v, pile, `smoke dispenser (${vd.smoke[0]!.kind}${vd.smoke[0]!.n})`), () => run({ type: 'defSmoke', vehicle: v.id }), { icon: '☁', disabled: !!sErr, hint: sErr ?? 'Dispersed Smoke in its own hex on a DR ≤ its number (+1 BU); not a weapon, it may still fire' }));
+          }
+        }
+      // The end-of-phase turn without MP (SK4 3.3.2): hull and turret each pick a hexspine on the map; the vehicle then fires
+      // no more this phase, and a PFPh turn keeps it from moving (ASLRB C3.22).
+      if (!declared && decision.kind === 'phase' && (phase === 'PFPh' || phase === 'DFPh' || phase === 'AFPh'))
+        for (const v of unitsHere.filter((p) => p.side === owner && vehicleDef(env, p) && !p.tags['wreck'])) {
+          const pile = unitsHere.filter((p) => p.side === owner && vehicleDef(env, p) && !p.tags['wreck']).length > 1;
+          const vca = Number(v.tags['vca'] ?? 0);
+          const tca = Number(v.tags['ca'] ?? vca);
+          const after = phase === 'PFPh' ? 'it fires no more this phase and does not move this Player Turn (ASLRB C3.22)' : 'it fires no more this phase';
+          const parts: { what: string; key: 'vca' | 'tca'; current: number; icon: string }[] = [{ what: 'Vehicle Covered Arc', key: 'vca', current: vca, icon: '◠' }];
+          if (vehicleDef(env, v)!.turret !== 'NT') parts.push({ what: 'Turret Covered Arc', key: 'tca', current: tca, icon: '◎' });
+          for (const part of parts) {
+            const act = (spine: number) => ({ type: 'vehicle.face', vehicle: v.id, [part.key]: spine });
+            const open = [0, 1, 2, 3, 4, 5].some((s) => s !== part.current && !session.check(act(s)));
+            const why = open ? null : plain(session.check(act((part.current + 1) % 6)));
+            items.push(
+              action(vehicleEntry(v, pile, part.key === 'vca' ? 'turn hull (end of phase)…' : 'turn turret (end of phase)…'), () => setRing({ hex, piece: v.id, what: part.what, current: part.current, note: `no MP; ${after}`, action: (spine) => (spine === part.current ? null : act(spine)) }), {
+                icon: part.icon,
+                disabled: !open,
+                hint: why ?? `Turn without MP at the end of the phase (SK4 3.3.2), as it could still fire; ${after}. Pick a hexspine on the map`,
+              }),
+            );
           }
         }
       // A vehicle's machine guns fire together, on the IFT (SK4 7.8).
@@ -3667,7 +3723,7 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
             {statics.map.hex(hoverHex)?.features.length ? ` · ${statics.map.hex(hoverHex)!.features.join(', ')}` : ''}
             {control[hoverHex] && <span className={`ctl side-${control[hoverHex]}`}> · {sideName(control[hoverHex])} control</span>}
             {routHover && <span className={`rout-why ${routHover.barred ? 'barred' : 'end'}`}>{routHover.text}</span>}
-            {moveHover && <span className="rout-why barred">{moveHover}</span>}
+            {moveHover && <span className={`rout-why ${moveHover.barred ? 'barred' : 'end'}`}>{moveHover.text}</span>}
           </div>
         )}
         {peek && !unitsHidden && !peekTerrain && !wheel && !caFor && !ring && (
@@ -4373,6 +4429,11 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
                         </p>
                       ) : (
                         <p className="hint wheel-hint">
+                          {ms?.vehicle?.stopped && !ms.vehicle.started && (
+                            <>
+                              <b>Stopped:</b> right-click the vehicle and <b>Start again (1 MP)</b> before turning the hull or driving on (ASLRB D2.12: a vehicle not in Motion pays a start MP to enter a hex or change its VCA).{' '}
+                            </>
+                          )}
                           Click a green hex ahead to drive on (within the Vehicle Covered Arc). The <b>HULL</b> handles beside the vehicle turn the hull (1 MP per hexspine) and the <b>TURRET</b> ones the turret (free); or click a neighbouring hex outside the arc to turn the hull that way, or press <b>Q</b>/<b>E</b> and <b>A</b>/<b>D</b>. Right-click the vehicle to <b>stop</b>, go <b>CE/BU</b>, fire <b>Bounding First Fire</b> or <b>end the move</b>. Stopped, it may <b>Delay</b> any number of MP in one go (<b>S</b> for 1 MP, or the Delay row above); a vehicle that never stops ends in Motion (SK4 3.3.2).
                         </p>
                       )}
@@ -4559,7 +4620,7 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
                         })()
                       ) : (
                         <p className="hint">
-                          Click the DC target hex. <a onClick={() => setMode('normal')}>Cancel</a>
+                          Click the DC target hex (amber; an enemy AFV there is the target). <a onClick={() => setMode('normal')}>Cancel</a>
                         </p>
                       )}
                     </>

@@ -400,6 +400,48 @@ export const DEV_FIXTURES: DevFixture[] = [
       f.until('MPh', { turn: 2, attacker: 'ge' });
     },
   },
+  {
+    id: 'demo-armor-infantry-with-afv',
+    scenarioId: 'demo-armor',
+    title: 'Infantry stacked with a tank',
+    description:
+      'American Turn 2 Prep Fire Phase. The 6-6-7 and the 8-1 stand in L6 with the M4A2(L). Right-click L6: Fire (the stack) is the Infantry, the tank fires from its own entries (MA, MGs, IFE + MGs); tick units in the stack card to put a Fire Group together across them.',
+    build(f) {
+      f.until('MPh', { turn: 1, attacker: 'am' });
+      f.move([f.unit('am', 'am.667'), f.unit('am', 'am.L81')], ['yL6']);
+      f.until('PFPh', { turn: 2, attacker: 'am' });
+    },
+  },
+  {
+    id: 's35-dc-dug-in',
+    scenarioId: 'sk-s35',
+    title: 'DC on the dug-in T-34',
+    description:
+      'German Turn 3 Movement Phase. The 8-3-8 with the DC and the 8-0 stand in the J3 stone building; the dug-in T-34 M41 is in J4 next door. Start the stack moving, pick Place DC… on the wheel and click J4: the DC is predesignated against the T-34 (a PAATC first, SK4 4.3).',
+    build(f) {
+      f.setup('ru', { [f.unit('ru', 'ru.T34M41')]: 'zJ4' });
+      const sq = f.unit('ge', 'ge.838', 2);
+      const ld = f.unit('ge', 'ge.L80');
+      const dflt = f.engine.legalActions(f.state, 'ge').find((x) => x.type === 'setup.offboard');
+      if (!dflt) throw new Error('Fixture: no default German offboard setup');
+      const { side: _s, decisionId: _d, ...rest } = dflt as Action & { placements: Record<PieceId, HexId> };
+      f.act({ ...rest, placements: { ...rest.placements, [sq]: 'zK0', [ld]: 'zK0' } });
+      f.until('MPh', { turn: 1, attacker: 'ge' });
+      f.move([sq, ld], ['zK1', 'zK2', 'zJ2']);
+      f.until('MPh', { turn: 2, attacker: 'ge' });
+      f.move([sq, ld], ['zJ3']);
+      // The Turn 3 German reinforcements are set up offboard where the engine's default puts them.
+      for (let guard = 0; guard < 2000 && !(f.state.phase === 'MPh' && f.state.turn === 3 && f.state.attacker === 'ge'); guard++) {
+        const entry = f.decision.kind === 'offboardSetup' ? f.engine.legalActions(f.state, f.decision.owner).find((x) => x.type === 'setup.offboard') : undefined;
+        if (!entry) {
+          f.pass();
+          continue;
+        }
+        const { side: _s2, decisionId: _d2, ...placed } = entry;
+        f.act(placed as Omit<Action, 'side' | 'decisionId'>);
+      }
+    },
+  },
 ];
 
 /** The dev fixtures of a scenario. */

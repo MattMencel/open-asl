@@ -24,6 +24,11 @@ describe('S8 Gavin-Maloney Force entry', () => {
     expect(entry).not.toContain('yGG5');
     for (const h of entry) expect(beside, h).toContain(h);
     for (const h of hexes) expect(map.offboardNeighbors(h).onboard.some((n) => entry.includes(n)), h).toBe(true);
+    // The answer is worked out once per state; a caller changing the list it gets does not change the next answer.
+    const again = placementHexes(env, gavin);
+    hexes.length = 0;
+    expect(placementHexes(env, gavin)).toEqual(again);
+    expect(again.length).toBeGreaterThan(0);
   });
 
   it('enters from an east-edge offboard hex into GG4, not GG5', () => {

@@ -1,7 +1,7 @@
 import type { Ctx, HexId, Piece, PieceId, QueryEnv, RuleModule, SideId } from '@asl/engine';
-import { byId, defOf, hexOf, isVehicleDef, otherSide, personnelAt, statics, swHeldBy } from '../common/pieces';
+import { byId, defOf, hexOf, isVehicleDef, otherSide, personnelAt, statics, swHeldBy, unitsAt } from '../common/pieces';
 import { FP, iftColumn, type ApplyResultFn } from '../sk1/fire';
-import { hasLos, isVisibleTo, visibleEnemyAt } from '../sk1/known';
+import { hasLos, isVisibleTo } from '../sk1/known';
 import { MOVE_ENTER, moveInternals, moveState, type MoveEnterFn } from '../sk1/movement';
 import { ROUT_ENTER, type RoutEnterFn } from '../sk1/rout';
 import { gun, isGoodOrder, mmc, pieceOf, setTags, smc } from '../sk1/status';
@@ -205,9 +205,11 @@ export const hipModule: RuleModule = {
     });
 
     // ---------------------------------------------------------------- attacks against hidden units
-    // Small arms vs a hex whose enemies the firer cannot see: Area Fire, half FP (one or two columns down).
+    // Small arms vs a hex whose enemies the firer cannot see: Area Fire, half FP (one or two columns down). Only hidden
+    // units: a concealed one is out of sight too, but its "?" is on the board and concealment halves that fire itself
+    // (SK4 8.3.2); halving it here as well would quarter it.
     r.procedure<ApplyResultFn>(FP.applyResult, (next) => (ctx, attack, column, baseFinal, out) => {
-      const hidden = attack.targets.filter((u) => !isVisibleTo(ctx, pieceOf(ctx, u), attack.side));
+      const hidden = attack.targets.filter((u) => isHidden(pieceOf(ctx, u)) && !isVisibleTo(ctx, pieceOf(ctx, u), attack.side));
       if (hidden.length === 0 || attack.ordnance) {
         next?.(ctx, attack, column, baseFinal, out);
         return;
@@ -222,7 +224,9 @@ export const hipModule: RuleModule = {
       query: 'ordnance.thDrm',
       ref: 'SK4 6.4 (case 23)',
       label: '+2 firing at a hex with no known enemy',
-      when: (sc, env) => !sc.moving && visibleEnemyAt(env, sc.target, sc.side).length === 0,
+      // An empty hex as far as the firer can tell: nothing there but hidden units. A concealed stack's "?" is on the
+      // board, and its +2 is concealment's own (SK4 8.3.2); the chart has one case for both, so they never stack.
+      when: (sc, env) => !sc.moving && unitsAt(env, sc.target, otherSide(env.state, sc.side)).every(isHidden),
       apply: (v) => v + 2,
     });
 

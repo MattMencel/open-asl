@@ -5,10 +5,10 @@ import { PHASE_DECISION } from '../common/turn';
 import { FP, firedAt, isRofShot, type FireAttackCtx, type FireDeclaration, type FireMode, type FirePart, type ResolveFireFn } from '../sk1/fire';
 import { moveState, movingInfo, moveInternals } from '../sk1/movement';
 import { fireMarker, pieceOf, setTags, sw, vehicleIfe } from '../sk1/status';
-import { terrainOf } from '../sk1/terrain';
+import { isWoodsRoad, terrainOf } from '../sk1/terrain';
 import { caChangeDrm, inCoveredArc, nearestSpine, spineChange } from '../sk2/arc';
-import { OP, type OrdnanceFireFn, type ShotCtx } from '../sk2/ordnance';
-import { ACQ_CLEAR, T2, coveredArc, ordnanceOf } from '../sk2/status';
+import { OP, woodsBuildingOrRubble, type OrdnanceFireFn, type ShotCtx } from '../sk2/ordnance';
+import { ACQ_CLEAR, T2, caTurnedIllegal, coveredArc, ordnanceOf } from '../sk2/status';
 import { T3, crewCanAct, inMotion, isCe, isWreck, tcaOf, vcaOf, vehicle, type VehicleMgKind } from './status';
 import { movingVehicle } from './vehicleMove';
 import { firerNonStoppedVehicle } from './vehicleFire';
@@ -74,11 +74,14 @@ function turnThisPhase(env: QueryEnv, v: Piece): { spines: number; paid: string[
   return { spines: (v.tags[TURN.spines] as number | undefined) ?? 0, paid: String(v.tags[TURN.paid] ?? '').split(',').filter(Boolean) };
 }
 
-/** Case 8 for a turret turned `spines` hexspines: by turret type, doubled for a vehicle in a building. */
+/**
+ * Case 8 for a turret turned `spines` hexspines: by turret type, doubled for a vehicle in woods, a building or rubble,
+ * though not on the road of a Woods-Road hex (ASLRB C5.11).
+ */
 function turretDrm(env: QueryEnv, v: Piece, spines: number): number {
   const hex = hexOf(env.state, v);
-  const building = !!hex && (!!statics(env).map.hex(hex)?.buildingId || terrainOf(env, hex).id.startsWith('building'));
-  return caChangeDrm(vehicle(env, v)!.turret, spines) * (building ? 2 : 1);
+  const close = !!hex && woodsBuildingOrRubble(env, hex) && !isWoodsRoad(env, hex);
+  return caChangeDrm(vehicle(env, v)!.turret, spines) * (close ? 2 : 1);
 }
 
 /** The vehicle whose turret weapons (CMG, RMG, its turreted MA's IFE) take part in an attack, with those weapons. */
@@ -132,6 +135,9 @@ export function vehicleMgIllegal(env: QueryEnv, decl: FireDeclaration, mode: Fir
   if (v.side !== side) return 'Not your vehicle';
   if (isWreck(v)) return 'A wreck does not fire';
   if (!crewCanAct(v)) return v.tags[T3.shock] ? 'A Shocked crew cannot fire' : 'A Stunned crew cannot fire this Player Turn';
+  // Turned without MP at the end of this phase (SK4 3.3.2): it fires no more in it.
+  const turned = caTurnedIllegal(env, v);
+  if (turned) return turned;
   const at = hexOf(env.state, v)!;
   const map = statics(env).map;
   const target = map.hex(hexOfLoc(decl.target));

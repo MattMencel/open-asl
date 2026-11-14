@@ -267,6 +267,9 @@ export function vehicleCannotStart(env: QueryEnv, id: PieceId): string | null {
   if (p.loc.kind === 'offboard' && !p.loc.hex) return 'The vehicle has not been set up offboard';
   // A vehicle that Prep Fired (MA or MG) does not move (SK4 3.3); a Bogged one may try to free itself only if it did not fire.
   if (fireMarker(p) || swHeldBy(env.state, id).some((w) => fireMarker(w))) return 'The vehicle fired in the PFPh';
+  // Its Covered Arc changed without MP at the end of the PFPh: no movement this Player Turn (ASLRB C3.22, "even a
+  // vehicular Gun"; SK4 3.3.2 is silent).
+  if (p.tags[T2.caLocked]) return 'It turned without MP at the end of the PFPh and does not move this Player Turn (ASLRB C3.22)';
   return null;
 }
 

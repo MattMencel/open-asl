@@ -43,6 +43,12 @@ describe('PTO Terrain map transform', () => {
     const deep = [...o.hexes()].find((h) => h.terrain === 'jungle' && !h.features.includes('path') && o.neighbors(h.id).every((n) => !plain.roadHexside(h.id, n)))!;
     expect(o.neighbors(deep.id).some((n) => o.pathHexside(deep.id, n))).toBe(false);
   });
+  it('a road crossing a woods hex away from its centre dot is a path too ("all roads in woods/jungle hexes", SK4 8.2.1)', () => {
+    // Board o's trail runs through the woods of C5, D4 and H6 without touching their centre dots.
+    for (const id of ['oC5', 'oD4', 'oH6']) expect(plain.hex(id)!.features.includes('woods-road'), id).toBe(false);
+    for (const [a, b] of [['oB5', 'oC5'], ['oC5', 'oD4'], ['oD4', 'oE4'], ['oG7', 'oH6']] as const) expect(o.pathHexside(a, b), `${a}|${b}`).toBe(true);
+    expect(o.hex('oC5')!.features).toContain('path');
+  });
 });
 
 describe('PTO Terrain pixel LOS on board o', () => {

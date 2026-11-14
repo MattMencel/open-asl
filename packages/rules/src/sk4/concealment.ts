@@ -92,8 +92,21 @@ export function gainConcealment(ctx: Ctx, units: PieceId[], reason: string) {
 
 const isConcealmentTerrain = (env: QueryEnv, hex: HexId) => env.query('hex.concealmentTerrain', { hex }, !!terrainOf(env, hex).concealment);
 
-/** Open Ground for Interdiction purposes (SK1 3.6): the hex's terrain, or a Woods-Road entered along its road. */
-const openForInterdiction = (env: QueryEnv, hex: HexId, viaRoad: boolean) => env.query('hex.openGround', { hex }, false) || (viaRoad && isWoodsRoad(env, hex));
+/**
+ * Is a unit of `side` entering `hex` in Open Ground "as defined for purposes of Interdiction" (SK4 8.3) in the LOS of a
+ * Good Order enemy? That is a hex where an enemy could apply the -1 FFMO DRM (SK4 3.6), and "the FFMO DRM is negated if
+ * there is a Hindrance between": so Open Ground terrain (or a Woods-Road entered along its road, out of the woods) seen
+ * by a Good Order enemy along an unhindered LOS. SMOKE in the hex itself hinders that LOS too (ASLRB A4.6: a Hindrance
+ * "between the target and firer or in the target Location itself" negates FFMO).
+ */
+function seenInTheOpen(env: QueryEnv, hex: HexId, side: SideId, viaRoad: boolean): boolean {
+  const open = env.query('hex.openGround', { hex }, false);
+  if (!open && !(viaRoad && isWoodsRoad(env, hex))) return false;
+  return enemyLosTo(env, hex, side, 'goodOrder').some((e) => {
+    const los = env.query('los.trace', { from: locOf(env.state, e)!, to: hex }, { clear: true, hindrance: 0, parts: [] });
+    return los.clear && los.hindrance === 0 && (open || !los.woods?.includes(hex));
+  });
+}
 
 export type ConcealAction = Action & { type: 'conceal.drop'; units: PieceId[] };
 
@@ -347,7 +360,7 @@ export const concealmentModule: RuleModule = {
       if (!cur) return;
       const seenAt = [...(ms.hex ? [ms.hex] : []), toHex];
       if (!cur.assault) dropConcealment(ctx, cur.units, 'moved', seenAt);
-      else if (openForInterdiction(ctx, toHex, cur.viaRoad)) dropConcealment(ctx, cur.units, 'open', [toHex]);
+      else if (seenInTheOpen(ctx, toHex, ctx.state.attacker, cur.viaRoad)) dropConcealment(ctx, cur.units, 'open');
     });
     // Advancing into Open Ground in the LOS of a Good Order enemy (8.3.2).
     r.on<{ id: PieceId; loc: { kind: string; hex?: HexId } }>({
@@ -357,7 +370,7 @@ export const concealmentModule: RuleModule = {
         if (!concealmentActive(ctx) || ctx.state.phase !== 'APh' || ev.payload.loc.kind !== 'hex' || !ev.payload.loc.hex) return;
         const p = ctx.state.pieces[ev.payload.id];
         if (!p || !isInfantry(ctx, p) || !isConcealed(p)) return;
-        if (openForInterdiction(ctx, ev.payload.loc.hex, false)) dropConcealment(ctx, [p.id], 'open', [ev.payload.loc.hex]);
+        if (seenInTheOpen(ctx, ev.payload.loc.hex, p.side, false)) dropConcealment(ctx, [p.id], 'open');
       },
     });
     // A router trying to enter a concealed stack's hex: the "?" comes off and the rout ends there (8.3.4).
@@ -559,6 +572,14 @@ export const concealmentModule: RuleModule = {
       handler(ctx, ev) {
         if (!concealmentActive(ctx) || !ctx.state.pieces[ev.payload.unit]) return;
         if (ev.payload.reason === 'seen' || ev.payload.reason === 'advanced') gainConcealment(ctx, [ev.payload.unit], 'hip');
+        // A hidden unit that moves or advances is first placed on board beneath a "?", and the normal concealment rules
+        // then apply (ASLRB A12.32; SK4 is silent). In the MPh the move's own check takes it off if a Good Order enemy
+        // sees the move (sk4.concealment's MOVE_ENTER, after the step that revealed it); an advance loses it in Open Ground.
+        if (ev.payload.reason === 'moved' && (ctx.state.phase === 'MPh' || ctx.state.phase === 'APh')) {
+          gainConcealment(ctx, [ev.payload.unit], 'hip');
+          const hex = hexOf(ctx.state, pieceOf(ctx, ev.payload.unit));
+          if (ctx.state.phase === 'APh' && hex && seenInTheOpen(ctx, hex, pieceOf(ctx, ev.payload.unit).side, false)) dropConcealment(ctx, [ev.payload.unit], 'open');
+        }
       },
     });
   },

@@ -49,7 +49,7 @@ export const firePhaseKey = (env: { state: { turn: number; attacker: string; pha
  * a friendly fire phase"; so a Gun turned mid-PFPh may not fire at the new facing without case 8).
  */
 export const caTurnedIllegal = (env: { state: { turn: number; attacker: string; phase: string } }, p: Piece): string | null =>
-  p.tags[T2.caTurned] === firePhaseKey(env) ? 'It turned its Covered Arc without firing, which ends its fire this phase (SK4 3.2.4)' : null;
+  p.tags[T2.caTurned] === firePhaseKey(env) ? 'It turned its Covered Arc without firing, which ends its fire this phase (SK4 3.2.4, 3.3.2)' : null;
 
 /** The hex a Gun is in (its possessor's when held). */
 export const gunHex = (env: QueryEnv, g: Piece) => hexOf(env.state, g);

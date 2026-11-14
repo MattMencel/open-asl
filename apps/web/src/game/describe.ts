@@ -12,7 +12,6 @@ const resultText = (r: IftResult) =>
 
 /** Why a SW did not keep its Rate of Fire (SK1 1.2.4, 3.2). */
 const ROF_LOSS: Record<string, string> = {
-  exceeded: 'colored dr above the ROF',
   cowered: 'the attack cowered (original doubles, no leader directing), so every firer is marked',
   pinned: 'a pinned unit\'s SW cannot retain ROF',
   fpf: 'Final Protective Fire never retains ROF',
@@ -222,8 +221,24 @@ export function describeEvents(env: QueryEnv, events: LoggedEvent[], viewer: Sid
           out.push({ seq: e.seq, kind: 'fire', text: `  ${name(k.sw)} keeps ROF (colored dr ${colored} ≤ ${k.rof}): it may fire again this phase` });
         }
         for (const l of p['lost'] as { sw: string; rof: number; why: string }[]) {
-          out.push({ seq: e.seq, kind: 'fire', text: `  ${name(l.sw)} loses ROF: ${ROF_LOSS[l.why] ?? l.why}` });
+          out.push({ seq: e.seq, kind: 'fire', text: `  ${name(l.sw)} loses ROF: ${l.why === 'exceeded' ? `colored dr ${colored} > ${l.rof}` : (ROF_LOSS[l.why] ?? l.why)}` });
         }
+        break;
+      }
+      case 'hex.marker': {
+        // A Residual FP counter (SK4 3.3.5, ASLRB A8.26): its size and, where the rules recorded it, how it was found.
+        if (p['key'] !== 'residualFp' || !p['value']) break;
+        const r = p['residual'] as { column: number; outside: number; bonus: number } | undefined;
+        let why = '';
+        if (r) {
+          const cols = (env.statics as { tables: { iftColumns: number[] } }).tables.iftColumns;
+          const half = cols.filter((c) => c <= Math.min(12, Math.floor(r.column / 2))).pop() ?? 0;
+          const parts = [`half the ${r.column} column: ${half}`];
+          if (r.outside) parts.push(`−${r.outside} column${r.outside === 1 ? '' : 's'} for +${r.outside} DRM from outside the hex`);
+          if (r.bonus) parts.push(`+${r.bonus} column${r.bonus === 1 ? '' : 's'} (Air Burst)`);
+          why = ` (${parts.join(', ')})`;
+        }
+        out.push({ seq: e.seq, kind: 'fire', text: `  Residual FP ${p['value']} left in ${hexLabel(p['hex'] as string)}${why}` });
         break;
       }
       case 'sk1.fire.rofDeclined':
@@ -530,6 +545,43 @@ export function describeEvents(env: QueryEnv, events: LoggedEvent[], viewer: Sid
         break;
       case 'dice.rolled': {
         const label = p['label'] as string;
+        // Random Selection (ASLRB A.9): one dr per unit, highest selected, ties rolled again among the tied. The rules
+        // record each dr alone, so the selection's rolls are read together here: one line, round by round, at its first.
+        const sel = /^(.+): random selection \((.+)\)$/.exec(label);
+        if (sel) {
+          const prev = events[i - 1];
+          const prevSel = prev?.type === 'dice.rolled' ? /^(.+): random selection \(/.exec((prev.payload as { label: string }).label) : null;
+          if (prevSel?.[1] === sel[1]) break;
+          const rolls: { id: string; v: number }[] = [];
+          for (let j = i; j < events.length; j++) {
+            const f = events[j]!;
+            const m = f.type === 'dice.rolled' ? /^(.+): random selection \((.+)\)$/.exec((f.payload as { label: string }).label) : null;
+            if (!m || m[1] !== sel[1]) break;
+            rolls.push({ id: m[2]!, v: (f.payload as { dice: number[] }).dice[0]! });
+          }
+          if (rolls.some((r) => hiddenFrom(r.id))) break;
+          // A round ends where a unit rolls again; a round whose highest dr is shared is followed by a re-roll of
+          // the tied units (or, under full ASL A.9, all of them are selected).
+          const rounds: { id: string; v: number }[][] = [];
+          for (const r of rolls) {
+            const cur = rounds[rounds.length - 1];
+            if (!cur || cur.some((x) => x.id === r.id)) rounds.push([r]);
+            else cur.push(r);
+          }
+          const tops = rounds.map((round) => {
+            const max = Math.max(...round.map((x) => x.v));
+            return round.filter((x) => x.v === max).map((x) => x.id);
+          });
+          const reRoll = (k: number) => k > 0 && tops[k - 1]!.length > 1 && rounds[k]!.every((x) => tops[k - 1]!.includes(x.id));
+          const picked: string[] = [];
+          tops.forEach((top, k) => {
+            if (top.length === 1) picked.push(top[0]!);
+            else if (!reRoll(k + 1)) picked.push(...top);
+          });
+          const text = rounds.map((round, k) => `${reRoll(k) ? 'tie, re-roll: ' : k > 0 ? 'next: ' : ''}${round.map((x) => `${name(x.id)} ${x.v}`).join(', ')}`).join(' · ');
+          out.push({ seq: e.seq, kind: 'info', text: `  ${sel[1]}, Random Selection (highest dr): ${text} → ${picked.map(name).join(', ')}` });
+          break;
+        }
         // Interdiction (SK1 3.6): the rules record only the dice, so the outcome is read from what
         // followed (Casualty Reduction, elimination) or else from the roll against broken morale.
         const intd = /^Interdiction NMC for (.+)$/.exec(label);
@@ -626,8 +678,8 @@ export function describeEvents(env: QueryEnv, events: LoggedEvent[], viewer: Sid
       case 'sk2.ordnance.rof': {
         const kept = p['kept'] as boolean;
         const why = p['why'] as string | null;
-        const ROF_WHY: Record<string, string> = { exceeded: 'colored dr above the ROF', intensive: 'Intensive Fire never retains ROF', malfunction: 'the Gun malfunctioned', pinned: 'a pinned crew\'s Gun cannot retain ROF' };
-        out.push({ seq: e.seq, kind: 'fire', text: `  ${name(p['weapon'] as string)} ${kept ? `keeps ROF (colored dr ${p['colored']} ≤ ${p['rof']}): it may fire again this phase` : `loses ROF${why ? `: ${ROF_WHY[why] ?? why}` : ''}`}` });
+        const ROF_WHY: Record<string, string> = { intensive: 'Intensive Fire never retains ROF', malfunction: 'the Gun malfunctioned', pinned: 'a pinned crew\'s Gun cannot retain ROF' };
+        out.push({ seq: e.seq, kind: 'fire', text: `  ${name(p['weapon'] as string)} ${kept ? `keeps ROF (colored dr ${p['colored']} ≤ ${p['rof']}): it may fire again this phase` : `loses ROF${why === 'exceeded' ? `: colored dr ${p['colored']} > ${p['rof']}` : why ? `: ${ROF_WHY[why] ?? why}` : ''}`}` });
         break;
       }
       case 'sk2.acquired': {
@@ -814,6 +866,11 @@ export function describeEvents(env: QueryEnv, events: LoggedEvent[], viewer: Sid
         const reason = p['reason'] as string;
         if (reason === 'setup') break;
         out.push({ seq: e.seq, kind: 'info', text: `  ↻ ${name(p['gun'] as string)} turns ${p['spines']} hexspine${p['spines'] === 1 ? '' : 's'}${reason === 'fire' ? ' to fire' : reason === 'noAmmo' ? ' back: no ammo, so it never turned' : reason === 'manhandle' ? ' as it is pushed' : ' (end of the fire phase: it cannot move this Player Turn)'}` });
+        break;
+      }
+      case 'sk3.vehicle.faced': {
+        const parts = [p['vca'] !== undefined ? 'its hull' : '', p['tca'] !== undefined ? 'its turret' : ''].filter(Boolean).join(' and ');
+        out.push({ seq: e.seq, kind: 'info', text: `  ↻ ${name(p['vehicle'] as string)} turns ${parts} without MP (end of the fire phase: it fires no more this phase${p['noMove'] ? ' and does not move this Player Turn' : ''})` });
         break;
       }
       case 'sk2.gun.captured':

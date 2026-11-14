@@ -206,7 +206,9 @@ export function buildMap(
   if (opts.pto) {
     const o: PtoMapOptions = typeof opts.pto === 'object' ? opts.pto : {};
     const PTO: Record<string, string> = { woods: o.light ? 'jungle-light' : 'jungle', brush: 'bamboo', orchard: 'palm', grain: o.kunaiJungle ? 'jungle' : 'kunai' };
-    const isWoodsRoad = (h: string) => !!terrain[h]?.features?.includes('woods-road');
+    // "All roads in woods/jungle hexes are paths" (SK4 8.2.1): a Woods-Road, and a woods hex a road crosses away from
+    // its centre dot (the board names it woods, and the road hexsides give it a road).
+    const isWoodsRoad = (h: string) => !!terrain[h]?.features?.includes('woods-road') || (terrain[h]?.terrain === 'woods' && hasRoad(terrain[h]));
     // Woods-Roads are paths: a road hexside into or out of one (SK4 8.2.1 Paths: Infantry enter a jungle hex along it for 1 MF).
     paths = o.roads ? [] : roads.filter(([a, b]) => isWoodsRoad(a) || isWoodsRoad(b));
     const hexesOfBuilding = new Map<string, number>();

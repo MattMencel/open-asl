@@ -7,13 +7,14 @@ import { hasLos } from '../sk1/known';
 import { moveState } from '../sk1/movement';
 import { fireMarker, inMelee, pieceOf, setTags } from '../sk1/status';
 import { terrainOf } from '../sk1/terrain';
-import type { OrdnanceShot, ShotCtx } from '../sk2/ordnance';
+import { woodsBuildingOrRubble, type OrdnanceShot, type ShotCtx } from '../sk2/ordnance';
 import { T3, crewCanAct, inMotion, isCe, isMovingTarget, isWreck, vehicle } from './status';
 import { T } from '../sk1/status';
 import { applyVehicleEffect, crewTakesResult } from './vehicleStatus';
 import { closeTerrain, turnRiskingBog } from './vehicleMove';
-import { T2 } from '../sk2/status';
+import { T2, caTurnedIllegal } from '../sk2/status';
 import { hitLocation } from './facing';
+import { installVehicleFacing } from './vehicleFacing';
 
 /*
  * Fire by and at vehicles (SK4 3.2.4, 7.2, 7.7, 7.11, 7.12; To Hit cases 10, 13, 15, 22, 24, 25).
@@ -40,11 +41,17 @@ export function maIllegal(env: QueryEnv, shot: OrdnanceShot, mode: FireMode): st
   if (!crewCanAct(p)) return p.tags[T3.shock] ? 'A Shocked crew cannot fire' : 'A Stunned crew cannot fire this Player Turn';
   if (isCe(p) && (d.turret === 'RST' || d.turret === '1MT')) return 'A Restricted Slow Traverse or One Man Turret cannot fire its MA while Crew Exposed: Button Up first';
   if (mode === 'prep' && inMotion(p)) return 'A vehicle in Motion may not Prep Fire: it must move first';
+  // Turned without MP at the end of this phase (SK4 3.3.2): it fires no more in it.
+  const turned = caTurnedIllegal(env, p);
+  if (turned) return turned;
   // With an enemy unit in its Location (or in Melee) the vehicle fires into that Location only (SK4 3.2.2.1, 3.8;
   // ASLRB A7.212).
   const at = locOf(env.state, p);
   if (at && shot.target !== at && (inMelee(env, at) || unitsAt(env, at, otherSide(env.state, p.side)).length > 0)) return 'An enemy unit is in its hex: the Main Armament may only fire at that hex';
   if (mode === 'advancing' && p.tags[T3.bff] && !p.tags[T3.bffRof]) return 'The vehicle fired Bounding First Fire this MPh (and lost ROF or fired another weapon)';
+  // A vehicle fires in both the MPh and the AFPh only if it fired just its MA in the MPh and kept ROF (SK4 3.3.2.2): MGs
+  // that fired first and an MA that kept ROF after them do not qualify.
+  if (mode === 'advancing' && p.tags[T3.bff] && swHeldBy(env.state, p.id).some((w) => fireMarker(w) === 'bff')) return 'The vehicle fired its MGs as Bounding First Fire this MPh: no Advancing Fire';
   // Same fire phase as its MGs, MPh and DFPh counting as one (7.8).
   const mgClass = swHeldBy(env.state, p.id).map((w) => fireMarker(w)).filter(Boolean).map((m) => (m === 'prep' ? 'PFPh' : m === 'adv' ? 'AFPh' : 'DF'))[0];
   const myClass = mode === 'prep' ? 'PFPh' : mode === 'advancing' ? 'AFPh' : 'DF';
@@ -53,9 +60,13 @@ export function maIllegal(env: QueryEnv, shot: OrdnanceShot, mode: FireMode): st
     const ms = moveState(env);
     if (!ms?.vehicle || ms.units[0] !== p.id) return 'Bounding First Fire is for the vehicle that is moving';
     if (!ms.vehicle.started && !ms.vehicle.stopped) return 'Start the vehicle first';
-    // With ROF kept the MA carries no fire marker yet: the BFF tag says it has fired this MPh.
-    if (p.tags[T3.bff] && !p.tags[T3.bffRof]) return 'The MA fired Bounding First Fire and lost ROF';
-    if (p.tags[T3.bff] && ms.vehicle.sinceBff === 0) return 'Spend another MP before firing again';
+    // With ROF kept the MA carries no fire marker yet: `maBff` says the MA has fired this MPh. The vehicle's BFF tag
+    // alone is not enough: its MGs firing first set it too, and the MA may still fire after them (SK4 3.3.2.2).
+    if (ms.vehicle.maBff && !p.tags[T3.bffRof]) return 'The MA fired Bounding First Fire and lost ROF';
+    if (ms.vehicle.maBff && ms.vehicle.sinceBff === 0) return 'Spend another MP before firing again';
+    // Its MGs fired first: the first MA shot is from their hex, as "all other Weapons must be fired from the same hex as
+    // the first MA shot" (SK4 3.3.2.2). After it, an MA that kept ROF may fire again from another hex (ASLRB D3.3, C2.24).
+    if (!ms.vehicle.maBff && ms.vehicle.bffFrom && ms.hex !== ms.vehicle.bffFrom) return `Its MGs fired from ${ms.vehicle.bffFrom.replace(/^[a-z]/, '')}: in its MPh a vehicle fires every weapon from the hex of its first MA shot`;
   }
   return null;
 }
@@ -132,6 +143,8 @@ export const vehicleFireModule: RuleModule = {
   summary: 'Main Armament fire, the vehicle To Hit cases, and IFT fire against vehicles and their crews.',
   requires: ['sk2.ordnance', 'sk3.vehicleStatus'],
   install(r) {
+    // The end-of-phase turn without MP (SK4 3.3.2) lives here so the module list, and so the ruleset hash, stays as it was.
+    installVehicleFacing(r);
     r.event<{ vehicle: PieceId; column: number; dr: [number, number]; drm: number; location: 'hull' | 'turret'; result: IftResult; effect: 'kill' | 'shock' | 'immobilized' | 'none' }>({ type: 'sk3.areaHit', apply() {} });
 
     // ---------------------------------------------------------------- the Main Armament
@@ -171,7 +184,7 @@ export const vehicleFireModule: RuleModule = {
     // ---------------------------------------------------------------- To Hit cases
     const th = (id: string, ref: string, label: string | ((sc: ShotCtx, env: QueryEnv) => string), when: (sc: ShotCtx, env: QueryEnv) => boolean, drm: (sc: ShotCtx, env: QueryEnv) => number) =>
       r.contribute({ id: `sk3.th.${id}`, query: 'ordnance.thDrm', ref, label, when, apply: (v, sc, env) => v + drm(sc, env) });
-    th('withinHex', 'case 10', (sc, env) => `+${terrainOf(env, sc.hex).id === 'woods' || !!statics(env).map.hex(sc.hex)?.buildingId ? 4 : 2} fire within the hex`, (sc) => sc.range === 0, (sc, env) => (terrainOf(env, sc.hex).id === 'woods' || !!statics(env).map.hex(sc.hex)?.buildingId ? 4 : 2));
+    th('withinHex', 'case 10', (sc, env) => `+${woodsBuildingOrRubble(env, sc.hex) ? 4 : 2} fire within the hex`, (sc) => sc.range === 0, (sc, env) => (woodsBuildingOrRubble(env, sc.hex) ? 4 : 2));
     th('bu', 'case 13', '+1 Buttoned Up', (sc, env) => !!firerVehicleOf(sc, env) && !isCe(firerVehicleOf(sc, env)!), () => 1);
     th('stun', 'case 15', '+1 Stun', (sc, env) => firerVehicleOf(sc, env)?.tags[T3.stun] === 'plus1', () => 1);
     th('bounding', 'case 14', (sc, env) => `+${boundingDrm(sc, env)} Bounding ${sc.mode === 'bounding' ? 'First ' : ''}Fire (${vehicle(env, firerVehicleOf(sc, env)!)!.turret === 'NT' ? 'NT' : 'turret'}${sc.mode === 'bounding' ? `, ${mpInLosOf(env, firerVehicleOf(sc, env)!, sc.target)} MP in the target's LOS` : ''})`, (sc, env) => boundingDrm(sc, env) > 0, boundingDrm);
@@ -289,7 +302,7 @@ export const vehicleFireModule: RuleModule = {
       if (!p || !vehicle(ctx, p)) return;
       setTags(ctx, p.id, { [T3.bff]: true });
       const ms = moveState(ctx);
-      if (ms?.vehicle && ms.units[0] === p.id) ctx.emit('sk1.move.state', { state: { ...ms, vehicle: { ...ms.vehicle, sinceBff: 0, bffFrom: ms.hex ?? undefined } } });
+      if (ms?.vehicle && ms.units[0] === p.id) ctx.emit('sk1.move.state', { state: { ...ms, vehicle: { ...ms.vehicle, sinceBff: 0, bffFrom: ms.vehicle.bffFrom ?? ms.hex ?? undefined, maBff: true } } });
     };
     r.on<{ weapon: PieceId; mode: string; outcome: string }>({
       id: 'sk3.vehicleFire.bff',

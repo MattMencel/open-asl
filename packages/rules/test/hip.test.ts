@@ -38,6 +38,33 @@ describe('Hidden Initial Placement (SK4 6.4)', () => {
     expect(engine.legalActions(state, 'ge').filter((a) => a.type === 'fire').map((a) => (a as unknown as { decl: { target: string } }).decl.target)).not.toContain('yM5');
   });
 
+  it('is not the closest Known Enemy Unit for Subsequent First Fire: a nearer hidden crew does not bar the shot at the mover', () => {
+    // SK1 3.3.1 limits Subsequent First Fire to the range of the closest Known Enemy Unit; a KEU is an unconcealed
+    // enemy unit in the firer's LOS (SK4 glossary), which a hidden Gun crew (SK4 6.4) is not. The British move:
+    // their hidden crew sits in woods two hexes from a German marked First Fire, their squad walks past three off.
+    const { engine, state } = makeEngine({
+      scenario: { ...GE_VS_BR, firstSide: 'br' },
+      extra,
+      terrain: { yM5: { terrain: 'woods' } },
+      startPhase: 'MPh',
+      dice: [3, 3, 3, 3, 3, 3],
+      pieces: [...hidden('yM5'), { id: 'b1', def: 'br.458', side: 'br', hex: 'yH7' }, { id: 'e1', def: 'ge.467', side: 'ge', hex: 'yM7', tags: { fire: 'first' } }],
+    });
+    let s = act(engine, state, { type: 'move.start', units: ['b1'] }).state;
+    s = settle(engine, s);
+    s = act(engine, s, { type: 'move.step', to: 'yI7' }).state;
+    s = settle(engine, s);
+    s = act(engine, s, { type: 'move.step', to: 'yJ7' }).state;
+    const d = engine.currentDecision(s)!;
+    expect(d).toMatchObject({ kind: 'firstFire', owner: 'ge' });
+    const shot = { type: 'defFire', decl: { units: ['e1'], sw: [], target: 'yJ7' }, side: 'ge', decisionId: d.id } as unknown as Action;
+    expect(engine.validate(s, shot)).toBeNull();
+    expect(s.pieces['c1']!.tags['hip']).toBe(true);
+    // Once revealed, the crew is a Known Enemy Unit and the farther mover may not be the target.
+    const revealed = { ...s, pieces: { ...s.pieces, c1: { ...s.pieces['c1']!, tags: {} }, g40: { ...s.pieces['g40']!, tags: { ca: 0, emplaced: true } } } };
+    expect(engine.validate(revealed, shot)).toBe('Subsequent First Fire must target the closest Known Enemy Unit');
+  });
+
   it('is found in Open Ground by a Good Order enemy within 16 hexes with a LOS', () => {
     const { engine, state } = makeEngine({ scenario: GE_VS_BR, extra, startPhase: 'MPh', pieces: [...hidden('yM5'), { id: 'e1', def: 'ge.467', side: 'ge', hex: 'yA1' }] });
     // Nobody has seen it yet (the German is 12+ hexes off... in LOS on the fixture grid: it is seen at the first phase start).

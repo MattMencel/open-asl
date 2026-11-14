@@ -24,6 +24,43 @@ const testFire: RuleModule = {
 const terrain = { yP5: { terrain: 'building-stone' }, yO5: { terrain: 'orchard' } };
 
 describe('game log', () => {
+  it('says how much Residual FP an attack left and why (ASLRB A8.26: one column less per point of DRM from outside the hex)', () => {
+    const { engine, state } = makeEngine({
+      terrain,
+      extra: [testFire],
+      pieces: [
+        { id: 'a1', def: 'am.747', side: 'am', hex: 'yN5' },
+        { id: 'g1', def: 'ge.447', side: 'ge', hex: 'yP5' },
+      ],
+      // 7 FP on the 6 column through the O5 orchard (+1 Hindrance, outside the target hex) into the P5 building (+3 TEM).
+      dice: [6, 5],
+    });
+    const t = act(engine, state, { type: 'test.fire', mode: 'first', decl: { units: ['a1'], sw: [], target: 'yP5' } });
+    const lines = describeEvents(engine.env(t.state), t.events).map((l) => l.text.trim());
+    expect(lines).toContainEqual('Residual FP 1 left in P5 (half the 6 column: 2, −1 column for +1 DRM from outside the hex)');
+  });
+
+  it('writes a Random Selection as one line, round by round: ties rolled again, and who was selected (ASLRB A.9)', () => {
+    const { engine, state } = makeEngine({
+      terrain,
+      pieces: [
+        { id: 'h1', def: 'ge.447', side: 'ge', hex: 'yP5' },
+        { id: 'h2', def: 'ge.467', side: 'ge', hex: 'yP5' },
+        { id: 'l1', def: 'ge.L91', side: 'ge', hex: 'yP5' },
+      ],
+    });
+    const roll = (seq: number, id: string, v: number) => ({ seq, type: 'dice.rolled', payload: { label: `KIA result: random selection (${id})`, dice: [v] } });
+    // 1KIA on three units: 6, 4, 6 ties h1 and the leader; they roll 2, 2 (a tie again), then 1, 3: the leader.
+    const events = [roll(1, 'h1', 6), roll(2, 'h2', 4), roll(3, 'l1', 6), roll(4, 'h1', 2), roll(5, 'l1', 2), roll(6, 'h1', 1), roll(7, 'l1', 3)];
+    const lines = describeEvents(engine.env(state), events as never).map((l) => l.text.trim());
+    expect(lines).toEqual([
+      'KIA result, Random Selection (highest dr): German 4-4-7 6, German 4¹-6-7 4, German 9-1 leader 6 · tie, re-roll: German 4-4-7 2, German 9-1 leader 2 · tie, re-roll: German 4-4-7 1, German 9-1 leader 3 → German 9-1 leader',
+    ]);
+    // 2KIA: a clean first pick, then the next one among the rest.
+    const two = describeEvents(engine.env(state), [roll(1, 'h1', 5), roll(2, 'h2', 2), roll(3, 'l1', 1), roll(4, 'h2', 4), roll(5, 'l1', 6)] as never).map((l) => l.text.trim());
+    expect(two).toEqual(['KIA result, Random Selection (highest dr): German 4-4-7 5, German 4¹-6-7 2, German 9-1 leader 1 · next: German 4¹-6-7 4, German 9-1 leader 6 → German 4-4-7, German 9-1 leader']);
+  });
+
   it('says when a PTC has no effect on a unit already pinned, so the pins of an earlier attack do not read as the PTC’s', () => {
     const { engine, state } = makeEngine({
       terrain,

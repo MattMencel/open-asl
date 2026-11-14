@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Action, Ctx, Engine, GameState, RuleModule } from '@asl/engine';
-import { FP, isCaptured, squadEquivalents, type FireDeclaration, type FireMode, type ResolveFireFn } from '../src';
+import { FP, isCaptured, sk2CoreModules, squadEquivalents, type FireDeclaration, type FireMode, type ResolveFireFn } from '../src';
 import { GE_VS_BR, act, makeEngine } from './fixtures';
 
 const testFire: RuleModule = {
@@ -95,6 +95,71 @@ describe('Crews (SK4 1.2.2, 3.3.1, 5.1)', () => {
       ],
     });
     expect(() => act(engine, state, { type: 'test.fire', mode: 'prep', decl: { units: ['c1'], sw: ['lmg'], target: 'yO5' } })).toThrow(/crew firing a weapon forfeits/);
+  });
+
+  // SK4 4.0: a HS/crew fires one Weapon "but forfeits its own FP"; it uses its own FP or a Weapon in a fire phase, not
+  // both. Only Small Arms and MG may fire as Subsequent First Fire (ASLRB A8.3, whose example lets a crew that First
+  // Fired its own FP Subsequent First Fire its LMG), so a crew that fired its own FP never fires its Gun that phase.
+  describe('a crew that fired its own FP this phase', () => {
+    const gunGame = (startPhase: string, firstSide: string, extraPieces: { id: string; def: string; side: string; hex: string }[] = []) =>
+      makeEngine({
+        scenario: { ...GE_VS_BR, firstSide },
+        extra: [...sk2CoreModules, testFire],
+        startPhase,
+        dice: [6, 5, 6, 5, 6, 5, 6, 5],
+        pieces: [
+          { id: 'c1', def: 'br.228c', side: 'br', hex: 'yN5' },
+          { id: 'gun', def: 'br.AA40L', side: 'br', heldBy: 'c1', tags: { ca: 0 } },
+          { id: 'g1', def: 'ge.467', side: 'ge', hex: 'yN3' },
+          ...extraPieces,
+        ],
+      });
+    const gunShots = (engine: Engine, s: GameState, type: string) => engine.legalActions(s, 'br').filter((a) => a.type === type && (a as unknown as { shot: { weapon: string } }).shot.weapon === 'gun');
+
+    it('may not fire its Gun in the same PFPh; its next fire phase it may', () => {
+      const { engine, state } = gunGame('PFPh', 'br');
+      const shot = gunShots(engine, state, 'fire.ordnance')[0]!;
+      expect(shot).toBeDefined();
+      let s = act(engine, state, { type: 'test.fire', mode: 'prep', decl: { units: ['c1'], sw: [], target: 'yN3' } }).state;
+      expect(gunShots(engine, s, 'fire.ordnance')).toEqual([]);
+      expect(() => act(engine, s, { type: 'fire.ordnance', shot: (shot as unknown as { shot: unknown }).shot })).toThrow(/fired its own FP/);
+      // On through the British Player Turn into the German one: in the DFPh the crew fires its Gun again.
+      for (let i = 0; i < 30 && !(s.attacker === 'ge' && s.phase === 'DFPh'); i++) {
+        const d = engine.currentDecision(s)!;
+        s = act(engine, s, { type: d.kind === 'firstFire' ? 'defPass' : 'endPhase', side: d.owner }).state;
+      }
+      expect(s.phase).toBe('DFPh');
+      expect(gunShots(engine, s, 'fire.ordnance').length).toBeGreaterThan(0);
+    });
+
+    it('may not fire its Gun later in the same MPh either (a Gun has no Subsequent First Fire)', () => {
+      const { engine, state } = gunGame('MPh', 'ge');
+      let s = act(engine, state, { type: 'move.start', units: ['g1'] }).state;
+      s = act(engine, s, { type: 'move.step', to: 'yN4' }).state;
+      expect(engine.currentDecision(s)!.kind).toBe('firstFire');
+      expect(gunShots(engine, s, 'defFire.ordnance').length).toBeGreaterThan(0);
+      s = act(engine, s, { type: 'defFire', decl: { units: ['c1'], sw: [], target: 'yN4' } }).state;
+      while (engine.currentDecision(s)?.kind === 'firstFire') s = act(engine, s, { type: 'defPass' }).state;
+      s = act(engine, s, { type: 'move.step', to: 'yO4' }).state;
+      expect(engine.currentDecision(s)!.kind).toBe('firstFire');
+      expect(gunShots(engine, s, 'defFire.ordnance')).toEqual([]);
+    });
+
+    it('in the PFPh it may not fire its LMG after its own FP either', () => {
+      const { engine, state } = makeEngine({
+        scenario: { ...GE_VS_BR, firstSide: 'br' },
+        extra: [...sk2CoreModules, testFire],
+        startPhase: 'PFPh',
+        dice: [6, 5, 6, 5],
+        pieces: [
+          { id: 'c1', def: 'br.228c', side: 'br', hex: 'yN5' },
+          { id: 'lmg', def: 'br.LMG', side: 'br', heldBy: 'c1' },
+          { id: 'g1', def: 'ge.467', side: 'ge', hex: 'yN3' },
+        ],
+      });
+      const s = act(engine, state, { type: 'test.fire', mode: 'prep', decl: { units: ['c1'], sw: [], target: 'yN3' } }).state;
+      expect(() => act(engine, s, { type: 'test.fire', mode: 'prep', decl: { units: [], sw: ['lmg'], target: 'yN3' } })).toThrow(/fired its own FP/);
+    });
   });
 
   it('a weapon of any nationality the side fields is not captured', () => {

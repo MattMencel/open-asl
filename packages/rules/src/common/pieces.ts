@@ -121,7 +121,11 @@ export interface PieceEvents {
   'piece.replaced': { id: PieceId; defId: string; from?: string; reason?: 'elr' | 'cr' | 'commissar' | 'ssr' | 'deploy' | 'step' | 'rally' | 'recombine' };
   'piece.eliminated': { id: PieceId; reason: string };
   /** null removes the marker. */
-  'hex.marker': { hex: HexId; key: string; value: Scalar };
+  /**
+   * `residual`: for a Residual FP counter, how its size was found (ASLRB A8.26): the IFT column of the attack, the
+   * points of positive DRM from outside the target hex, and any columns added back (Air Bursts). For the log only.
+   */
+  'hex.marker': { hex: HexId; key: string; value: Scalar; residual?: { column: number; outside: number; bonus: number } };
 }
 
 /** Generic piece/marker events shared by every ruleset. */

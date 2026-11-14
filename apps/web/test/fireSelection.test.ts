@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { Action, Engine, GameState, PieceId } from '@asl/engine';
-import { ALL_SCENARIOS, newSk1Game } from '@asl/content';
+import type { Action, Engine, GameState, Piece, PieceId } from '@asl/engine';
+import { ALL_SCENARIOS, DEMO_VEHICLES_SCENARIO, newGame, newSk1Game } from '@asl/content';
 import { defOf } from '@asl/rules';
 import { act, makeEngine } from '../../../packages/rules/test/fixtures';
 import { fireLeaders, fireSelectable } from '../src/game/fireSelection';
@@ -130,5 +130,31 @@ describe('fire selection (what a click on an own stack picks up)', () => {
       }
     }
     expect(checked).toBeGreaterThan(0);
+  });
+  it("leaves a tank and its MGs out of the stack's Fire: a vehicle's MG/IFE form Fire Groups only with each other (SK4 3.2)", () => {
+    // A crew with a MMG and a 9-1 stacked with a Sherman in the PFPh: the stack's Fire is the Infantry and its MMG; the
+    // tank fires from its own entries (MA, MGs, IFE + MGs).
+    const { engine, state: s0 } = newGame(DEMO_VEHICLES_SCENARIO, 'fs', { los: 'grid' });
+    const P = (id: string, defId: string, side: string, loc: Piece['loc'], tags: Piece['tags'] = {}): [string, Piece] => [id, { id, defId, side, loc, tags }];
+    const state: GameState = {
+      ...s0,
+      turn: 2,
+      phase: 'PFPh',
+      attacker: 'am',
+      pieces: Object.fromEntries([
+        P('crew', 'am.228c', 'am', { kind: 'hex', hex: 'yP5' }),
+        P('mmg', 'am.MMG', 'am', { kind: 'held', by: 'crew' }),
+        P('ldr', 'am.L91', 'am', { kind: 'hex', hex: 'yP5' }),
+        P('tank', 'am.M4A3', 'am', { kind: 'hex', hex: 'yP5' }, { vca: 0, ca: 0 }),
+        P('tank.bmg', 'am.M4A3.bmg', 'am', { kind: 'held', by: 'tank' }),
+        P('tank.cmg', 'am.M4A3.cmg', 'am', { kind: 'held', by: 'tank' }),
+        P('g1', 'ge.467', 'ge', { kind: 'hex', hex: 'yN5' }),
+      ]),
+      decisions: [{ id: 'd1', kind: 'phase', owner: 'am', deadlineClass: 'turn' }],
+    };
+    expect(selection(engine, state, 'am', 'yP5').sort()).toEqual(['crew', 'ldr', 'mmg']);
+    // Alone in its hex, the tank is picked up with its MGs (its MA's IFE and MGs fire together, SK4 7.8).
+    const alone = { ...state, pieces: Object.fromEntries(Object.entries(state.pieces).filter(([id]) => !['crew', 'mmg', 'ldr'].includes(id))) };
+    expect(selection(engine, alone, 'am', 'yP5').sort()).toEqual(['tank', 'tank.bmg', 'tank.cmg']);
   });
 });

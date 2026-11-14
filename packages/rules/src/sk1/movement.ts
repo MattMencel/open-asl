@@ -1,7 +1,7 @@
 import type { Action, Ctx, HexId, Piece, PieceId, QueryEnv, RuleModule, Scalar, SideId } from '@asl/engine';
 import { byId, defOf, hexOf, isFixedWeapon, isVehicleDef, otherSide, personnelAt, statics, swHeldBy, unpossessedSwAt } from '../common/pieces';
 import { AP, type PaatcFn } from './advance';
-import { visibleEnemyAt, knownEnemyAt } from './known';
+import { knownEnemyAt, knownEnemyUnits, visibleEnemyAt } from './known';
 import { PHASE_DECISION, askPhaseOwner } from '../common/turn';
 import { FP, attackFp, buildAttack, directorsOf, firerLos, discloseDrm, iftColumn, simpleDeclarations, type FireAttackCtx, type FireDeclaration, type FireMode, type ResolveFireFn, type ApplyResultFn, weaponRange } from './fire';
 import { P as MP, type FlushFn, type UnitFn } from './morale';
@@ -177,6 +177,8 @@ export interface VehicleMoveState {
   /** Bounding First Fire this MPh: the hex the first MA shot was fired from, and MP spent since the last shot (another is needed to fire again). */
   bffFrom?: HexId;
   sinceBff?: number;
+  /** The MA itself has fired Bounding First Fire this MPh (its MGs firing alone set only `bffFrom`); whether it kept ROF is the vehicle's `bffRof` tag. */
+  maBff?: boolean;
   /** Tried its smoke dispenser this MPh. */
   smokeTried?: boolean;
   /** Ending the move: when the defender has had its say, the stack is finished (`halted` does the rest). */
@@ -1549,11 +1551,11 @@ export function firstFireIllegal(env: QueryEnv, ms: MoveState, decl: FireDeclara
       const dist = map.distance(at, ms.hex);
       const range = mmc(env, p)?.range ?? weaponRange(env, id);
       if (dist > range) return 'Subsequent First Fire is limited to normal range';
-      // Not at a range greater than the closest Known Enemy Unit.
-      const enemy = env.state.attacker;
+      // Not at a range greater than the closest Known Enemy Unit: an unconcealed enemy unit in the firer's LOS
+      // (SK4 glossary). A hidden Gun and crew (SK4 6.4) or a concealed stack (SK4 8.3) nearer than the target
+      // is not one, so it does not bar the shot.
       const closest = Math.min(
-        ...Object.values(env.state.pieces)
-          .filter((x) => x.side === enemy && x.loc.kind === 'hex' && (mmc(env, x) || smc(env, x) || (isVehicleDef(defOf(env, x)) && x.tags['wreck'] !== true)))
+        ...knownEnemyUnits(env, side)
           .map((x) => locOf(env.state, x)!)
           .filter((h) => env.query('los.trace', { from, to: h }, { clear: true, hindrance: 0, parts: [] }).clear)
           .map((h) => map.distance(at, hexOfLoc(h))),

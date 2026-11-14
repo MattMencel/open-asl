@@ -860,6 +860,9 @@ export function useGameFx(env: QueryEnv, log: LoggedEvent[], decision: Decision 
         case 'sk2.gun.ca':
           if (p['reason'] !== 'setup') snd('ui.flip', 0);
           break;
+        case 'sk3.vehicle.faced':
+          snd('ui.flip', 0);
+          break;
         case 'sk2.gun.manhandle': {
           const gun = p['gun'] as PieceId;
           const outcome = p['outcome'] as string;

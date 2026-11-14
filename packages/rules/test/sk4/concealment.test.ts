@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Action, Ctx, Decision, Engine, GameState, RuleModule } from '@asl/engine';
-import { CONCEAL_RTPH_DECISION, FP, P as MP, SETUP_PLACED, UNKNOWN_DEF_ID, concealmentModule, isKnownTo, isVisibleTo, moveState, redactState, sk2CoreModules, sk3CoreModules, type CasualtyFn, type FireDeclaration, type FireMode, type ResolveFireFn, type SetupAction, type SetupPlacedFn, type UnitFn } from '../../src';
+import { CONCEAL_RTPH_DECISION, FP, P as MP, SETUP_PLACED, UNKNOWN_DEF_ID, concealmentModule, hiddenUnitsModule, hexOf, isKnownTo, isVisibleTo, moveState, redactState, sk2CoreModules, sk3CoreModules, type CasualtyFn, type FireDeclaration, type FireMode, type ResolveFireFn, type SetupAction, type SetupPlacedFn, type UnitFn } from '../../src';
 import { RU_VS_GE, act, makeEngine, type PieceSpec } from '../fixtures';
 
 /** Test-only actions: resolve a fire declaration; run the setup-placed and scenario-begin procedures. */
@@ -152,11 +152,22 @@ describe('Concealment (SK4 8.3): loss in the LOS of a Good Order enemy', () => {
         });
       },
     };
-    // The spy sits under the concealment wrapper (installed before it), so it sees the two inner calls.
-    const { engine, state } = makeEngine({ scenario: { ...RU_VS_GE, firstSide: 'ge', ssr: [SSR] }, extra: [...sk2CoreModules, ...sk3CoreModules, spy, concealmentModule, testHooks], terrain: BUILDINGS, startPhase: 'PFPh', dice: [3, 3], pieces: [ge('g', 'yK6'), ge('g2', 'yK6'), sq('a', 'yK5', { concealed: true }), sq('c', 'yK5')] });
+    // The spy is installed first, under every other wrapper, so it sees the columns the attacks are resolved on.
+    const { engine, state } = makeEngine({ scenario: { ...RU_VS_GE, firstSide: 'ge', ssr: [SSR] }, extra: [spy, ...sk2CoreModules, ...sk3CoreModules, concealmentModule, testHooks], terrain: BUILDINGS, startPhase: 'PFPh', dice: [3, 3], pieces: [ge('g', 'yK6'), ge('g2', 'yK6'), sq('a', 'yK5', { concealed: true }), sq('c', 'yK5')] });
     act(engine, state, { type: 'test.fire', decl: { units: ['g', 'g2'], sw: [], target: 'yK5' }, mode: 'prep' });
-    expect(columns.map((x) => x.targets)).toEqual([['c'], ['a']]);
-    expect(columns[1]!.column).toBeLessThan(columns[0]!.column);
+    // Halved once: the 12 column for the Known squad, the 6 column for the concealed one (not halved again as hidden).
+    expect(columns).toEqual([{ targets: ['c'], column: 12 }, { targets: ['a'], column: 6 }]);
+  });
+
+  it('a Gun firing at a concealed stack takes the concealed-target +2 only, never the empty-hex +2 as well (one To Hit case)', async () => {
+    const { engine, state } = game([sq('a', 'yK5', { concealed: true }), { id: 'crew', def: 'ge.228c', side: 'ge', hex: 'yK8' }, { id: 'gun', def: 'ge.AT75L', side: 'ge', heldBy: 'crew', tags: { ca: 0 } }], 'PFPh', { firstSide: 'ge' });
+    const env = engine.env(state);
+    const { shotContext } = await import('../../src');
+    for (const targetType of ['ITT', 'ATT'] as const) {
+      const trace = env.explain('ordnance.thDrm', shotContext(env, { weapon: 'gun', target: 'yK5', targetType, ca: 0 }, 'prep', 'ge'), 0).trace.filter((x) => !x.suppressedBy);
+      expect(trace.some((x) => x.id === 'sk4.th.concealed-target')).toBe(true);
+      expect(trace.some((x) => x.id === 'sk2.th.hip-target')).toBe(false);
+    }
   });
 
   it('Non-Assault Movement in LOS drops it; Assault Movement into cover keeps it; into Open Ground drops it; out of LOS it keeps it', () => {
@@ -183,6 +194,28 @@ describe('Concealment (SK4 8.3): loss in the LOS of a Good Order enemy', () => {
     let s = play(engine, state, { type: 'move.start', units: ['a'], assault: true });
     s = settle(engine, play(engine, s, { type: 'move.step', to: 'yK5' }));
     expect(concealed(s.pieces['a'])).toBe(true);
+  });
+
+  it('Assault Movement into Open Ground holding Smoke keeps the "?": the Smoke hinders every LOS into the hex, so no enemy could apply FFMO and it is not Open Ground for Interdiction (SK4 8.3, 3.6; ASLRB A4.6)', () => {
+    const { engine, state } = game([sq('c', 'yP5', { concealed: true }), sq('d', 'yP5', { concealed: true }), ge('g', 'yK9')], 'MPh');
+    const smoked = { ...state, hexMarkers: { ...state.hexMarkers, yP6: { smoke58: 'smoke', smoke58Disp: true } } } as GameState;
+    let s = play(engine, smoked, { type: 'move.start', units: ['c'], assault: true });
+    s = settle(engine, play(engine, s, { type: 'move.step', to: 'yP6' }));
+    expect(concealed(s.pieces['c'])).toBe(true);
+    s = settle(engine, play(engine, s, { type: 'move.end' }));
+    // Its stackmate Assault Moves into the clear open hex beside it, in the German's unhindered LOS: the "?" comes off.
+    s = play(engine, s, { type: 'move.start', units: ['d'], assault: true });
+    s = settle(engine, play(engine, s, { type: 'move.step', to: 'yO6' }));
+    expect(concealed(s.pieces['d'])).toBe(false);
+  });
+
+  it('advancing into Open Ground holding Smoke keeps the "?"; into clear Open Ground it comes off (SK4 8.3)', () => {
+    const { engine, state } = game([sq('c', 'yP5', { concealed: true }), sq('d', 'yP5', { concealed: true }), ge('g', 'yK9')], 'APh');
+    const smoked = { ...state, hexMarkers: { ...state.hexMarkers, yP6: { smoke58: 'smoke', smoke58Disp: true } } } as GameState;
+    let s = play(engine, smoked, { type: 'advance', units: ['c'], to: 'yP6' });
+    expect(concealed(s.pieces['c'])).toBe(true);
+    s = play(engine, s, { type: 'advance', units: ['d'], to: 'yO6' });
+    expect(concealed(s.pieces['d'])).toBe(false);
   });
 
   it('breaking drops the "?" whoever can see; so does a wound', () => {
@@ -336,5 +369,51 @@ describe('Concealment (SK4 8.3.3): Guns and HIP', () => {
     expect(s.pieces['g40']!.tags['hip']).toBeUndefined();
     expect(concealed(s.pieces['c1'])).toBe(true);
     expect(concealed(s.pieces['g40'])).toBe(true);
+  });
+
+  // ASLRB A12.32 (SK4 is silent): a hidden unit that moves or advances is first placed on board beneath a "?"; the normal
+  // concealment rules then decide whether it keeps it.
+  const HIDDEN_RU = { module: 'hidden-units', params: { side: 'ru', notOpenGround: true, rule: 'SSR' }, text: 'SSR' };
+  const hipGame = (pieces: PieceSpec[], startPhase: string, terrain: Record<string, { terrain: string; buildingId?: string }> = BUILDINGS) =>
+    makeEngine({ scenario: { ...RU_VS_GE, firstSide: 'ru', ssr: [SSR, HIDDEN_RU] }, extra: [...extra, hiddenUnitsModule], terrain, startPhase, pieces });
+
+  it('a hidden unit that moves out of the LOS of every Good Order enemy comes on board concealed and keeps the "?", into the next Player Turn', () => {
+    const { engine, state } = hipGame([sq('h', 'yM5', { hip: true }), ge('g', 'yK9', { broken: true })], 'MPh');
+    let s = play(engine, state, { type: 'move.start', units: ['h'] });
+    const t = act(engine, s, { type: 'move.step', to: 'yM6' });
+    expect(events(t, 'sk2.hip.unitRevealed')).toMatchObject([{ unit: 'h', reason: 'moved' }]);
+    s = settle(engine, t.state);
+    expect(s.pieces['h']!.tags['hip']).toBeUndefined();
+    expect(concealed(s.pieces['h'])).toBe(true);
+    expect(isVisibleTo(engine.env(s), s.pieces['h']!, 'ge')).toBe(false);
+    s = settle(engine, play(engine, s, { type: 'move.end' }));
+    // On through the German Player Turn into the next Russian one: still under its "?", and it moves again.
+    for (let i = 0; i < 40 && !(s.turn === 2 && s.attacker === 'ru' && s.phase === 'MPh'); i++) {
+      const d = engine.currentDecision(s)!;
+      s = act(engine, s, { type: d.kind === 'firstFire' ? 'defPass' : d.kind === CONCEAL_RTPH_DECISION ? 'conceal.keep' : 'endPhase', side: d.owner }).state;
+    }
+    expect(s.phase).toBe('MPh');
+    expect(concealed(s.pieces['h'])).toBe(true);
+    s = settle(engine, play(engine, s, { type: 'move.start', units: ['h'] }, { type: 'move.step', to: 'yM7' }));
+    expect(hexOf(s, s.pieces['h']!)).toBe('yM7');
+    expect(concealed(s.pieces['h'])).toBe(true);
+  });
+
+  it('a hidden unit that moves in the LOS of a Good Order enemy loses the "?" it was placed under, as any concealed unit would', () => {
+    const { engine, state } = hipGame([sq('h', 'yM5', { hip: true }), ge('g', 'yK9')], 'MPh');
+    const s = settle(engine, play(engine, state, { type: 'move.start', units: ['h'] }, { type: 'move.step', to: 'yM6' }));
+    expect(s.pieces['h']!.tags['hip']).toBeUndefined();
+    expect(concealed(s.pieces['h'])).toBe(false);
+  });
+
+  it('a hidden unit that advances keeps the "?" unless it advances into Open Ground in the LOS of a Good Order enemy', () => {
+    const terrain = { ...BUILDINGS, yM6: { terrain: 'woods' } };
+    const { engine, state } = hipGame([sq('h', 'yM5', { hip: true }), sq('h2', 'yK5', { hip: true }), ge('g', 'yK9')], 'APh', terrain);
+    let s = play(engine, state, { type: 'advance', units: ['h'], to: 'yM6' });
+    expect(s.pieces['h']!.tags['hip']).toBeUndefined();
+    expect(concealed(s.pieces['h'])).toBe(true);
+    s = play(engine, s, { type: 'advance', units: ['h2'], to: 'yK6' });
+    expect(s.pieces['h2']!.tags['hip']).toBeUndefined();
+    expect(concealed(s.pieces['h2'])).toBe(false);
   });
 });

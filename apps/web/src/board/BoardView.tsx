@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { Application, Assets, Container, Graphics, Rectangle, Sprite, Text, Texture } from 'pixi.js';
 import { cubeDistance, cubeNeighbors, type GameState, type HexId, type Piece, type QueryEnv, type SideId } from '@asl/engine';
-import { GEO, coveredArc, defOf, gun as gunDef, gunHex, hexOf as hexOfPiece, inCoveredArc, isCaptured, isWeaponDef, isWreck, spineDirections, swHeldBy, tcaOf, vcaOf, vehicle as vehicleDef, type MapHex, type ObjectiveArea, type Statics, acquisitionOf, gunIdents, ordnanceOf, SMOKE58, stackOrder, hexOfLoc, levelOfLoc, locKey } from '@asl/rules';
+import { GEO, coveredArc, defOf, gun as gunDef, gunHex, hexOf as hexOfPiece, inCoveredArc, isCaptured, isWeaponDef, isWreck, spineDirections, swHeldBy, tcaOf, vcaOf, vehicle as vehicleDef, type MapHex, type ObjectiveArea, type Statics, acquisitionOf, gunIdents, ordnanceOf, SMOKE58, hexOfLoc, levelOfLoc, locKey } from '@asl/rules';
 import { CAVE_GONE, UNKNOWN_DEF_ID, cavesParams, caveLoc, cornerOffset, hexPixel, isCaveLoc, moveState, shownFireMarker, smokeGrenades } from '@asl/rules';
 import { playableBounds, playableRect, printedRect, type CropPlacement } from './crop';
 import { boardImage, counterImage, cxMarker, loadTurrets, markerImage, splitTurret } from '../game/assets';
@@ -11,6 +11,7 @@ import type { BoardFx } from '../fx/useGameFx';
 import type { WeatherFxKind } from '../game/weatherView';
 import { smoke58Chits } from '../game/smoke';
 import { releaseCaptureSource, setCaptureSource } from './capture';
+import { personnelStack } from './stacking';
 
 /** dataTransfer type for counters dragged from the setup tray. */
 export const DRAG_TYPE = 'application/x-asl-piece';
@@ -2075,15 +2076,8 @@ export function BoardView({
       // order (a leader on top of the MMC he is stacked on, SK1 3.8).
       stack.push(...list.filter((p) => isWeaponDef(defOf(env, p))));
       const people = list.filter((p) => !isWeaponDef(defOf(env, p)));
-      // A side's vehicle (the big counter) lies under its Infantry; its MGs are part of it, not counters.
-      const personnel = [...new Set(people.map((p) => p.side))]
-        .sort()
-        .flatMap((side) => {
-          const mine = people.filter((p) => p.side === side);
-          // Vehicles only pile up offboard (or wrecked): the selected one rises to the top of the pile.
-          const vehicles = mine.filter((p) => vehicleDef(env as never, p)).sort((a, b) => Number(!!o.selectedPieces?.has(a.id)) - Number(!!o.selectedPieces?.has(b.id)));
-          return [...vehicles, ...stackOrder(env as never, mine.filter((p) => !vehicleDef(env as never, p)))];
-        });
+      // A side's vehicle lies under its Infantry (its MGs are part of it, not counters), its "?" under its Known units.
+      const personnel = personnelStack(env as never, people, o.selectedPieces);
       for (const p of personnel) {
         const held = Object.values(s.pieces).filter((x) => x.loc.kind === 'held' && x.loc.by === p.id && !isFixedMg(defOf(env, x)));
         stack.push(p);
@@ -2150,8 +2144,9 @@ export function BoardView({
         const veh = d.kind === 'vehicle' ? d : null;
         const hexCube = h.cube;
         // A vehicle's pictured front points along its Vehicle Covered Arc, a Gun's barrel along its CA (SK4 3.2.4, ASLRB C3.2).
+        // A wreck keeps the VCA it had when it was destroyed (its wreck side is printed facing the same way).
         const turn = !tex || !hexCube ? 0
-          : veh && !isWreck(p) ? spineAngle(hexCube, vcaOf(p)) - ART_FRONT + xf.current.angle
+          : veh ? spineAngle(hexCube, vcaOf(p)) - ART_FRONT + xf.current.angle
           : d.kind === 'gun' ? spineAngle(hexCube, coveredArc(p)) - ART_FRONT + xf.current.angle
           : 0;
         // Drop shadow: turned with the counter, but still cast down and to the right.
