@@ -17,6 +17,8 @@ const HINDRANCE_ID: Record<number, string> = { 24: 'grain', 25: 'brush' };
 /** The VASL codes a printed terrain is drawn with, for an SSR that turns its art into a hindrance. */
 const ART_CODES: Record<string, number[]> = { woods: [60, 61], brush: [25], grain: [24], orchard: [63] };
 const WOODS = new Set(ART_CODES['woods']);
+/** Building art (stone 40/41, wooden 50/51, the multi-building hexes 203/206): what still stands over a rubbled ground level. */
+const BUILDING_ART = new Set([40, 41, 50, 51, 203, 206]);
 /** Road art (dirt, paved): an Orchard-Road hex is a tree-lined road, and a thread on these pixels is on its road. */
 const ROAD = new Set([65, 66]);
 const isOrchardRoad = (h: MapHex) => h.features.includes('orchard-road');
@@ -179,9 +181,14 @@ export function pixelTracers(
   /** Wooden building art (the depictions a hut hex is judged by). */
   const WOOD_BUILDING = new Set([50, 51, 203]);
   const locate = (x: number, y: number): { pb: PlacedBoard; i: number } | null => {
+    // The board whose rectangle holds the point. A board may sit half a board along (S25: "0.5,0"), so this is not
+    // the board at floor(x / width); a point off every board's edge (the far edge hexes) falls back to that lookup.
     const bx = Math.min(Math.floor(x / width), Math.max(...placements.map((p) => p.x)));
     const by = Math.floor(y / height);
-    const pb = placements.find((p) => p.x === bx && p.y === by) ?? placements.find((p) => p.x === bx - 1 && p.y === by);
+    const pb =
+      placements.find((p) => x >= p.x * width && x < (p.x + 1) * width && y >= p.y * height && y < (p.y + 1) * height) ??
+      placements.find((p) => p.x === bx && p.y === by) ??
+      placements.find((p) => p.x === bx - 1 && p.y === by);
     if (!pb) return null;
     let lx = Math.min(pb.raster.w - 1, Math.max(0, Math.round(x - pb.x * width)));
     let ly = Math.min(pb.raster.h - 1, Math.max(0, Math.round(y - pb.y * height)));
@@ -474,6 +481,18 @@ function losAtTracer(t: {
         // Terrain obstacles: at the level of their hex's centre dot throughout the depiction (B10.1).
         const base = Math.max(e, owner.elevation ?? 0);
         const code = t.terrainAt(x, y);
+        // A hex rubbled in play (B24.2): an Inherent half-level obstacle throughout, and its building art as high as the
+        // levels still standing under the rubble (an intact ground level plus the half level of rubble on it).
+        const rubbledHex = o.rubbled ? owners.find((w) => o.rubbled![w.id] !== undefined) : undefined;
+        if (rubbledHex) {
+          const r = o.rubbled![rubbledHex.id]!;
+          const height = BUILDING_ART.has(code) && r.art !== undefined ? r.art : r.hex;
+          const top = Math.max(e, rubbledHex.elevation ?? 0) + height;
+          const effect = obstacleEffect(top, lo, hi);
+          if (effect === 'blocks') return blocked(x, y, rubbledHex, 'rubble');
+          if (effect === 'over') passOver(x, y, rubbledHex, 'rubble', top, false);
+          continue;
+        }
         const inherentObs = t.inherentObstacle ? owners.find(t.inherentObstacle) : undefined;
         if (inherentObs || t.obstacle.has(code)) {
           const isWoods = !inherentObs && WOODS.has(code);
@@ -510,7 +529,7 @@ function losAtTracer(t: {
           }
         }
       }
-      for (const ob of over.values()) {
+      for (const ob of o.noBlind ? [] : over.values()) {
         if (blindHexesBehind(ob, hi, lo, to.elevation ?? 0, map.distance(ob.hex, to.id))) {
           return { clear: false, crossed, ...(ob.at ? { blockedAt: ob.at } : {}), obstacle: { hex: ob.hex, terrain: ob.terrain, blind: true }, ...(ob.crest ? { crest: true } : {}) };
         }

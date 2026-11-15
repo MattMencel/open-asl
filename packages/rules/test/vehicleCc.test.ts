@@ -290,4 +290,20 @@ describe('Flamethrowers, DCs and Open-Topped AFVs (SK4 4.2, 4.3, 7.13)', () => {
     expect(validate(pf.engine, pf.state, { type: 'fire', decl: { units: [], sw: ['ot.cmg'], target: 'yM7' } })).toMatch(/bow MG/);
     expect(validate(pf.engine, pf.state, { type: 'fire', decl: { units: [], sw: ['ot.bmg'], target: 'yM7' } })).toBeNull();
   });
+
+  it('a Buttoned Up Open-Topped crew is vulnerable to TPBF from its own hex, with the CE DRM (SK4 7.13, ASLRB A7.211)', () => {
+    // A 4-4-7 in the Buttoned Up OT AFV's hex: 4 FP x3 = 12 column, +2 CE DRM on the crew; DR 4 + 2 = 6 is a 1MC,
+    // which the crew (morale 8) then takes: a DR of 10 fails it.
+    const { engine, state } = makeEngine({ pieces: [{ id: 'ot', def: 'ge.otv', side: 'ge', hex: 'yM5', tags: { vca: 3, ca: 3 } }, sq('ru', 'yM5')], scenario: RU_VS_GE, extra, startPhase: 'PFPh', dice: [2, 2, 5, 5] });
+    expect(state.pieces['ot']!.tags[T3.ce]).not.toBe(true);
+    const r = act(engine, state, { type: 'fire', decl: { units: ['ru'], sw: [], target: 'yM5' } });
+    expect(ev(r, 'sk1.fire.attack')[0]).toMatchObject({ fp: 12 });
+    const res = ev(r, 'sk1.fire.result').find((x) => x['unit'] === 'ot')!;
+    expect(res['drm']).toBe(2);
+    expect(ev(r, 'sk3.vehicle.check')[0]).toMatchObject({ vehicle: 'ot', kind: 'MC', passed: false });
+    // Fired on from another hex, the Buttoned Up crew is safe as before.
+    const far = makeEngine({ pieces: [{ id: 'ot', def: 'ge.otv', side: 'ge', hex: 'yM5', tags: { vca: 3, ca: 3 } }, sq('ru', 'yM6')], scenario: RU_VS_GE, extra, startPhase: 'PFPh', dice: [1, 1] });
+    const r2 = act(far.engine, far.state, { type: 'fire', decl: { units: ['ru'], sw: [], target: 'yM5' } });
+    expect(ev(r2, 'sk1.fire.result').find((x) => x['unit'] === 'ot')!['result']).toEqual({ kind: 'none' });
+  });
 });

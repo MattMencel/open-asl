@@ -22,6 +22,41 @@ function hexPath(ctx: CanvasRenderingContext2D, cx: number, cy: number) {
   ctx.closePath();
 }
 
+/** The corners of the hex outline `hexPath` draws, in order. */
+function hexCorners(cx: number, cy: number): [number, number][] {
+  const rx = GEO.px.hexWidth * (2 / 3);
+  const ry = GEO.px.hexHeight / 2;
+  return [
+    [cx - rx, cy],
+    [cx - rx / 2, cy - ry],
+    [cx + rx / 2, cy - ry],
+    [cx + rx, cy],
+    [cx + rx / 2, cy + ry],
+    [cx - rx / 2, cy + ry],
+  ];
+}
+
+/**
+ * The border of an area of hexes: the hex sides that belong to only one of its hexes. A wash alone
+ * can vanish on art of the same colour (a green area on a green board reads as reaching one hexrow
+ * further than it does), so every area also gets its outline.
+ */
+function areaBorder(centres: { x: number; y: number }[]): [number, number, number, number][] {
+  const sides = new Map<string, { seg: [number, number, number, number]; n: number }>();
+  for (const c of centres) {
+    const pts = hexCorners(c.x, c.y);
+    for (let i = 0; i < 6; i++) {
+      const [ax, ay] = pts[i]!;
+      const [bx, by] = pts[(i + 1) % 6]!;
+      const key = `${Math.round((ax + bx) / 2)},${Math.round((ay + by) / 2)}`;
+      const s = sides.get(key);
+      if (s) s.n++;
+      else sides.set(key, { seg: [ax, ay, bx, by], n: 1 });
+    }
+  }
+  return [...sides.values()].filter((s) => s.n === 1).map((s) => s.seg);
+}
+
 const load = (url: string) =>
   new Promise<HTMLImageElement | null>((resolve) => {
     const img = new Image();
@@ -101,13 +136,31 @@ export function MapPreview({ scenario: sc, width = 440, height = 420, onSize }: 
         }
         ctx.fillStyle = color;
         ctx.globalAlpha = 0.38;
+        const centres: { x: number; y: number }[] = [];
         for (const id of f.setup.hexes) {
           const c = at(id);
           if (!c) continue;
+          centres.push(c);
           hexPath(ctx, c.x, c.y);
           ctx.fill();
         }
         ctx.globalAlpha = 1;
+        // The area's edge: a dark line under a line in the side's colour, clear on any art.
+        const border = areaBorder(centres);
+        for (const [w, stroke] of [
+          [12, 'rgba(0,0,0,0.55)'],
+          [6, color],
+        ] as const) {
+          ctx.lineWidth = w;
+          ctx.strokeStyle = stroke;
+          ctx.lineCap = 'round';
+          ctx.beginPath();
+          for (const [ax, ay, bx, by] of border) {
+            ctx.moveTo(ax, ay);
+            ctx.lineTo(bx, by);
+          }
+          ctx.stroke();
+        }
       }
       // Objectives.
       for (const area of objectiveAreas(sc, map)) {

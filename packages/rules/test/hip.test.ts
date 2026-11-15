@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Action, Ctx, Engine, GameState, RuleModule } from '@asl/engine';
-import { FP, isVisibleTo, sk2CoreModules, type FireDeclaration, type FireMode, type ResolveFireFn } from '../src';
+import { FP, inCoveredArc, isVisibleTo, sk2CoreModules, statics, type FireDeclaration, type FireMode, type ResolveFireFn } from '../src';
 import { GE_VS_BR, act, makeEngine } from './fixtures';
 
 const testFire: RuleModule = {
@@ -173,4 +173,53 @@ describe('Hidden Initial Placement (SK4 6.4)', () => {
     expect(env.query('cc.ambushDrm', { hex: 'yM5', side: 'br', units: ['c1'] }, 0)).toBe(-2);
     expect(env.query('cc.ambushDrm', { hex: 'yM5', side: 'ge', units: ['e1'] }, 0)).toBe(0);
   });
+
+  describe('firing on the IFT reveals the Gun and its crew (ASLRB A12.121, A12.2, A12.34)', () => {
+    const woods = { yM5: { terrain: 'woods' as const } };
+    const brFirst = { ...GE_VS_BR, firstSide: 'br' as const };
+
+    it('the crew firing its own FP in Prep Fire', () => {
+      const { engine, state } = makeEngine({ scenario: brFirst, extra, terrain: woods, startPhase: 'PFPh', pieces: [...hidden('yM5'), { id: 'e1', def: 'ge.467', side: 'ge', hex: 'yK5' }] });
+      const t = act(engine, state, { type: 'test.fire', mode: 'prep', decl: { units: ['c1'], sw: [], target: 'yK5' } });
+      expect(t.events.find((e) => e.type === 'sk2.hip.revealed')!.payload).toMatchObject({ gun: 'g40', crew: 'c1', hex: 'yM5', reason: 'fire' });
+      expect(t.state.pieces['c1']!.tags['hip']).toBeUndefined();
+      expect(t.state.pieces['g40']!.tags['hip']).toBeUndefined();
+      expect(isVisibleTo(engine.env(t.state), t.state.pieces['c1']!, 'ge')).toBe(true);
+    });
+
+    it('the Gun firing its IFE (SK4 6.8)', () => {
+      const probe = makeEngine({ scenario: brFirst, extra, terrain: woods, startPhase: 'PFPh', pieces: hidden('yM5') });
+      const map = statics(probe.engine.env(probe.state)).map;
+      const ca = [0, 1, 2, 3, 4, 5].find((c) => inCoveredArc(map.hex('yM5')!.cube, c, map.hex('yK5')!.cube))!;
+      const { engine, state } = makeEngine({ scenario: brFirst, extra, terrain: woods, startPhase: 'PFPh', pieces: [...hidden('yM5', { ca }), { id: 'e1', def: 'ge.467', side: 'ge', hex: 'yK5' }] });
+      const t = act(engine, state, { type: 'test.fire', mode: 'prep', decl: { units: [], sw: ['g40'], target: 'yK5' } });
+      expect(t.state.pieces['c1']!.tags['hip']).toBeUndefined();
+      expect(t.state.pieces['g40']!.tags['hip']).toBeUndefined();
+    });
+
+    it('a hidden crew in Defensive First Fire, then on into the next Player Turn', () => {
+      const { engine, state } = makeEngine({ scenario: GE_VS_BR, extra, terrain: woods, startPhase: 'MPh', dice: [4, 4, 4, 4, 4, 4, 4, 4], pieces: [...hidden('yM5'), { id: 'e1', def: 'ge.467', side: 'ge', hex: 'yJ5' }] });
+      let s = act(engine, state, { type: 'move.start', units: ['e1'] }).state;
+      s = act(engine, s, { type: 'move.step', to: 'yK5' }).state;
+      const d = engine.currentDecision(s)!;
+      expect(d).toMatchObject({ kind: 'firstFire', owner: 'br' });
+      expect(s.pieces['c1']!.tags['hip']).toBe(true);
+      const t = act(engine, s, { type: 'defFire', decl: { units: ['c1'], sw: [], target: 'yK5' } });
+      expect(t.events.some((e) => e.type === 'sk2.hip.revealed')).toBe(true);
+      s = t.state;
+      expect(s.pieces['c1']!.tags['hip']).toBeUndefined();
+      expect(s.pieces['g40']!.tags['hip']).toBeUndefined();
+      // The rest of the turn and the British Player Turn: the crew stays revealed, a target, and may fire again.
+      s = settle(engine, s);
+      while (!(s.attacker === 'br' && s.phase === 'PFPh')) s = settle(engine, act(engine, s, { type: 'endPhase' }).state);
+      expect(s.pieces['c1']!.tags['hip']).toBeUndefined();
+      expect(isVisibleTo(engine.env(s), s.pieces['g40']!, 'ge')).toBe(true);
+      if (s.pieces['e1']?.loc.kind === 'hex' && s.pieces['c1']?.loc.kind === 'hex') {
+        const env = engine.env(s);
+        expect(env.query('fire.illegal', { decl: { units: ['c1'], sw: [], target: hexOfTest(s, 'e1') }, mode: 'prep', side: 'br' }, null)).toBeNull();
+      }
+    });
+  });
 });
+
+const hexOfTest = (s: GameState, id: string) => (s.pieces[id]!.loc as { hex: string }).hex;

@@ -78,7 +78,7 @@ const WOODS_LIKE = new Set(['woods', 'jungle', 'jungle-light', 'bamboo']);
 const isWoodsHex = (env: QueryEnv, hex: HexId) => WOODS_LIKE.has(terrainOf(env, hex).id) && !isWoodsRoad(env, hex);
 /** A PTO hut (SK4 8.2.1): a building hex vehicles enter at 2/4 MP without a Bog Check, collapsing it. */
 const isHutHex = (env: QueryEnv, hex: HexId) => !!terrainOf(env, hex).building;
-const isRubbleHex = (env: QueryEnv, hex: HexId) => terrainOf(env, hex).id === 'rubble-stone';
+const isRubbleHex = (env: QueryEnv, hex: HexId) => terrainOf(env, hex).id.startsWith('rubble');
 /** A Bog Check is taken entering woods or a building (SK4 7.6), or rubble (S35 SSR 1). */
 const bogTerrain = (env: QueryEnv, hex: HexId) => isWoodsHex(env, hex) || (isBuildingHex(env, hex) && !isHutHex(env, hex)) || isRubbleHex(env, hex);
 /** In woods or a building a VCA change costs double and risks Bog; a TCA change needs 2 MP (SK4 3.3.2). */
@@ -111,7 +111,7 @@ export function vehicleEntryCost(env: QueryEnv, p: Piece, from: HexId | null, to
   else if (t === 'grain') cost = d.tracked ? 1 : 4;
   else if (t === 'open' || t === 'orchard' || t === 'palm' || t === 'plowed' || t === 'shellholes') cost = d.tracked ? 1 : 3;
   // Stone rubble (S35 SSR 1: "vehicles pay ½ of their MP allotment and risk Bog with a +3 DRM").
-  else if (t === 'rubble-stone') cost = d.mp / 2;
+  else if (t.startsWith('rubble')) cost = d.mp / 2;
   else cost = Infinity;
   if (!alongRoad && !building) cost = env.query('vehicle.terrainMp', { vehicle: p.id, hex: to }, cost);
   if (!Number.isFinite(cost)) return cost;

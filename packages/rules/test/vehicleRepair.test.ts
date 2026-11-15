@@ -62,4 +62,14 @@ describe('Vehicle weapon repair (SK4 3.1 c)', () => {
     const d = engine.currentDecision(state)!;
     expect(engine.validate(state, { type: 'vehicle.repair', vehicle: 't34', weapon: 'ma', side: 'ru', decisionId: d.id } as never)).toMatch(/Shocked/);
   });
+
+  it('cannot bypass vehicle repair restrictions with the infantry SW repair action', () => {
+    const { engine, state } = game([t34(), tiger()], [4]);
+    const mg = Object.values(state.pieces).find(p => p.defId === 'ru.T34M43.cmg')!;
+    expect(mg).toBeDefined();
+    const broken = { ...state, pieces: { ...state.pieces, [mg.id]: { ...mg, tags: { ...mg.tags, malf: true } } } };
+    const d = engine.currentDecision(broken)!;
+    expect(engine.validate(broken, { type: 'vehicle.repair', vehicle: 't34', weapon: mg.id, side: 'ru', decisionId: d.id } as never)).toBeNull();
+    expect(engine.validate(broken, { type: 'rally.repair', unit: 't34', sw: mg.id, side: 'ru', decisionId: d.id } as never)).toMatch(/Infantry/);
+  });
 });

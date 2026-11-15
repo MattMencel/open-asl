@@ -81,11 +81,12 @@ export function applyVehicleEffect(ctx: Ctx, vehicleId: PieceId, effect: Vehicle
 /**
  * A Crew Exposed crew takes an IFT result (SK4 3.2.3, 7.10): a KIA or K Stuns the AFV with Recall
  * (STUN); a failed MC Stuns it; an original 12 on the MC is a STUN; a pin Buttons it Up; a PTC
- * failed Buttons it Up (a pinned CE crew must BU, 3.2.3).
+ * failed Buttons it Up (a pinned CE crew must BU, 3.2.3). `exposed`: a crew that is vulnerable though
+ * Buttoned Up, an Open-Topped one fired on from its own hex (SK4 7.13, ASLRB A7.211).
  */
-export function crewTakesResult(ctx: Ctx, vehicleId: PieceId, res: IftResult, reason: string) {
+export function crewTakesResult(ctx: Ctx, vehicleId: PieceId, res: IftResult, reason: string, exposed = false) {
   const p = pieceOf(ctx, vehicleId);
-  if (!isCe(p) || isWreck(p)) return;
+  if ((!isCe(p) && !exposed) || isWreck(p)) return;
   const d = vehicle(ctx, p)!;
   switch (res.kind) {
     case 'none':

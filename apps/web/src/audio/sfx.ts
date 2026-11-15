@@ -1,12 +1,15 @@
 /**
- * Every sound effect is synthesized on the fly from noise and oscillators, so the game ships
- * no audio files. Each effect is a function of (context, output bus, start time in seconds).
+ * Every sound effect can be synthesized on the fly from noise and oscillators: the fallback for
+ * an effect with no recording loaded (samples.ts). Each effect is a function of (context, output
+ * bus, start time in seconds).
  */
 export interface SfxParams {
   /** Nationality of whoever is firing ('am' | 'ge' | 'ru' | …): decides the small arms heard. */
   nation?: string;
   /** How much is firing: squads for small arms (a half-squad counts a half). */
   intensity?: number;
+  /** Bore of the gun firing, in mm. */
+  caliber?: number;
 }
 export type Sfx = (c: BaseAudioContext, out: AudioNode, t: number, p: SfxParams) => void;
 
@@ -267,6 +270,73 @@ type Nation = 'am' | 'ge' | 'ru' | 'other';
 const nation = (p: SfxParams): Nation => (p.nation === 'am' || p.nation === 'ge' || p.nation === 'ru' ? p.nation : 'other');
 const squads = (p: SfxParams) => Math.max(1, Math.min(4, Math.round(p.intensity ?? 1)));
 
+/** A gun's round by bore: a rifle shot's parts grown with the caliber, the boom long and the thump deep. */
+function cannonRound(caliber: number): Round {
+  const k = Math.min(1, Math.max(0, (caliber - 20) / 130));
+  return { crack: 1500 - 800 * k, crackDur: 0.03 + 0.03 * k, boom: 1800 - 900 * k, boomDur: 0.35 + 0.6 * k, boomGain: 1, thump: 85 - 45 * k, thumpDur: 0.3 + 0.5 * k, thumpGain: 1, echo: 1.2, gain: 0.75 };
+}
+
+/** A metallic ring: a few inharmonic partials that die at different rates, as struck plate does. */
+function clang(c: BaseAudioContext, out: AudioNode, t: number, base: number, gain: number) {
+  for (const [ratio, g, d] of [
+    [1, 1, 0.9],
+    [2.76, 0.6, 0.5],
+    [5.4, 0.35, 0.3],
+    [8.93, 0.2, 0.18],
+  ] as const)
+    tone(c, out, t, { freq: base * ratio * rnd(0.98, 1.02), dur: d, gain: gain * g, attack: 0.001 });
+  burst(c, out, t, { type: 'highpass', freq: 2000, dur: 0.03, gain: gain * 1.5, attack: 0.0005 });
+}
+
+/** A rocket or shell going by: band noise swept up or down and fading. */
+function whoosh(c: BaseAudioContext, out: AudioNode, t: number, from: number, to: number, dur: number, gain: number) {
+  burst(c, out, t, { freq: from, freqEnd: to, q: 2.5, dur, gain, attack: dur * 0.3 });
+}
+
+/**
+ * An engine: a sawtooth at the firing rate under a lowpass, its pitch and level following `points`
+ * ([seconds from t, Hz, level]), with the exhaust's rumble under it.
+ */
+function engine(c: BaseAudioContext, out: AudioNode, t: number, points: readonly (readonly [number, number, number])[], cutoff = 420) {
+  const end = points[points.length - 1]![0];
+  const osc = c.createOscillator();
+  osc.type = 'sawtooth';
+  const sub = c.createOscillator();
+  sub.type = 'square';
+  const f = c.createBiquadFilter();
+  f.type = 'lowpass';
+  f.frequency.value = cutoff;
+  f.Q.value = 2;
+  const g = c.createGain();
+  g.gain.setValueAtTime(0.0001, t);
+  osc.frequency.setValueAtTime(points[0]![1], t);
+  sub.frequency.setValueAtTime(points[0]![1] / 2, t);
+  for (const [at, hz, level] of points) {
+    osc.frequency.linearRampToValueAtTime(hz, t + at);
+    sub.frequency.linearRampToValueAtTime(hz / 2, t + at);
+    g.gain.linearRampToValueAtTime(Math.max(0.0001, level), t + at);
+  }
+  osc.connect(f);
+  sub.connect(f);
+  f.connect(g);
+  g.connect(out);
+  osc.start(t);
+  sub.start(t);
+  osc.stop(t + end + 0.05);
+  sub.stop(t + end + 0.05);
+  const peak = Math.max(...points.map((p) => p[2]));
+  burst(c, out, t, { type: 'lowpass', freq: 160, dur: end, gain: peak * 0.8, attack: Math.min(0.3, end / 3) });
+}
+
+/** Track links slapping the drive sprocket: short metallic clanks at `rate` a second. */
+function tracks(c: BaseAudioContext, out: AudioNode, t: number, dur: number, rate: number, gain: number) {
+  for (let at = t; at < t + dur; at += (1 / rate) * rnd(0.85, 1.15)) {
+    const k = Math.min(1, (at - t) / 0.3, (t + dur - at) / 0.3);
+    burst(c, out, at, { freq: rnd(1400, 2600), q: 4, dur: 0.025, gain: gain * k * rnd(0.6, 1) });
+    tone(c, out, at, { freq: rnd(500, 750), dur: 0.05, gain: gain * k * 0.3 });
+  }
+}
+
 function snareRoll(c: BaseAudioContext, out: AudioNode, t: number, dur: number, gain: number) {
   const n = Math.round(dur / 0.045);
   for (let i = 0; i < n; i++) {
@@ -445,6 +515,145 @@ export const SFX = {
     burst(c, v, t, { type: 'lowpass', freq: 4000, freqEnd: 60, dur: 1.1, gain: 1.2, attack: 0.002 });
     tone(c, v, t, { freq: 65, freqEnd: 24, dur: 1.0, gain: 0.9, attack: 0.002 });
     for (let i = 0; i < 8; i++) burst(c, out, t + rnd(0.3, 1.2), { type: 'lowpass', freq: rnd(300, 900), dur: 0.08, gain: 0.12 });
+  },
+
+  /* --- ordnance: Guns, a vehicle's Main Armament, and ordnance SW --- */
+  /** A small-bore gun (to 47 mm): a hard, flat crack. */
+  'fire.cannon.light': (c, out, t, p) => shot(c, out, t, cannonRound(p.caliber ?? 37)),
+  /** A field or tank gun of 50–80 mm. */
+  'fire.cannon': (c, out, t, p) => shot(c, out, t, cannonRound(p.caliber ?? 75)),
+  /** 85 mm and up: an 88, a howitzer, the KV-2's 152. */
+  'fire.cannon.heavy': (c, out, t, p) => shot(c, out, t, cannonRound(p.caliber ?? 105)),
+  /** A 20 mm cannon or a light flak gun: a clip of heavy rounds. */
+  'fire.autocannon': (c, out, t) => auto(c, out, t, cannonRound(20), 280, burstsOf(1, 3, 5), 0.8),
+  /** A mortar: the bomb dropped down the tube and the hollow pop as it leaves. */
+  'fire.mortar': (c, out, t) => {
+    burst(c, out, t, { type: 'highpass', freq: 2500, dur: 0.02, gain: 0.15 });
+    const v = voice(c, out, 0.7, 0.9);
+    tone(c, v, t + 0.35, { freq: 190, freqEnd: 70, dur: 0.25, gain: 1, attack: 0.002 });
+    burst(c, v, t + 0.35, { type: 'lowpass', freq: 1400, freqEnd: 150, dur: 0.3, gain: 0.8, attack: 0.002 });
+  },
+  /** A Bazooka or Panzerschreck: the ignition crack and the rocket's rush away. */
+  'fire.rocket': (c, out, t) => {
+    const v = voice(c, out, 0.6, 0.8);
+    burst(c, v, t, { type: 'highpass', freq: 500, dur: 0.02, gain: 1.4, attack: 0.0005 });
+    burst(c, v, t, { type: 'lowpass', freq: 2000, freqEnd: 200, dur: 0.25, gain: 0.8 });
+    whoosh(c, out, t + 0.02, 1800, 500, 0.9, 0.25);
+  },
+  /** A Panzerfaust: a recoilless bang and the bomb's short flight. */
+  'fire.pf': (c, out, t) => {
+    const v = voice(c, out, 0.65, 0.9);
+    burst(c, v, t, { type: 'highpass', freq: 400, dur: 0.015, gain: 1.6, attack: 0.0005 });
+    burst(c, v, t, { type: 'lowpass', freq: 2600, freqEnd: 120, dur: 0.45, gain: 1 });
+    tone(c, v, t, { freq: 110, freqEnd: 40, dur: 0.35, gain: 0.7 });
+    whoosh(c, out, t + 0.05, 1200, 400, 0.5, 0.15);
+  },
+  /** A PIAT: the spigot's spring slamming home, then the bomb's launch thump. */
+  'fire.piat': (c, out, t) => {
+    clang(c, out, t, 420, 0.06);
+    const v = voice(c, out, 0.55, 0.7);
+    tone(c, v, t + 0.01, { freq: 150, freqEnd: 50, dur: 0.25, gain: 1 });
+    burst(c, v, t + 0.01, { type: 'lowpass', freq: 900, dur: 0.15, gain: 0.7 });
+  },
+  /** An anti-tank rifle: one enormous rifle shot. */
+  'fire.atr': (c, out, t) => shot(c, out, t, ROUND.heavy, 1.3),
+  /** A shell striking armor: the clang of the plate and the thud through the hull. */
+  'impact.armor': (c, out, t) => {
+    clang(c, out, t, rnd(260, 340), 0.1);
+    const v = voice(c, out, 0.7, 0.6);
+    tone(c, v, t, { freq: 120, freqEnd: 45, dur: 0.3, gain: 1 });
+    burst(c, v, t, { type: 'lowpass', freq: 1500, freqEnd: 200, dur: 0.2, gain: 0.8 });
+  },
+  /** A shell that missed: it tears past and lands somewhere beyond. */
+  'impact.miss': (c, out, t) => {
+    whoosh(c, out, t, 2200, 600, 0.4, 0.12);
+    const v = voice(c, out, 0.35, 1);
+    burst(c, v, t + 0.45, { type: 'lowpass', freq: 600, freqEnd: 80, dur: 0.6, gain: 0.8 });
+    tone(c, v, t + 0.45, { freq: 60, freqEnd: 30, dur: 0.5, gain: 0.6 });
+  },
+
+  /* --- vehicles --- */
+  /** The starter turns the engine over until it catches, revs and settles. */
+  'vehicle.start': (c, out, t) => {
+    for (let i = 0; i < 6; i++) tone(c, out, t + i * 0.11, { freq: 55, freqEnd: 45, type: 'sawtooth', lowpass: 600, dur: 0.09, gain: 0.08 });
+    engine(c, out, t + 0.6, [
+      [0, 18, 0.05],
+      [0.2, 34, 0.2],
+      [0.6, 52, 0.26],
+      [1.2, 30, 0.16],
+      [2.2, 28, 0.0001],
+    ]);
+  },
+  /** Under way: the engine pulling, the tracks clanking over the sprockets. */
+  'vehicle.move': (c, out, t) => {
+    engine(c, out, t, [
+      [0, 30, 0.05],
+      [0.3, 42, 0.2],
+      [1.6, 44, 0.2],
+      [2.2, 38, 0.0001],
+    ]);
+    tracks(c, out, t + 0.1, 2, 9, 0.06);
+  },
+  /** An armored car: a higher, smoother engine and tires on the road, no track clatter. */
+  'vehicle.drive': (c, out, t) => {
+    engine(c, out, t, [
+      [0, 45, 0.05],
+      [0.4, 70, 0.16],
+      [1.6, 78, 0.16],
+      [2.2, 60, 0.0001],
+    ], 700);
+    burst(c, out, t, { type: 'bandpass', freq: 700, q: 0.7, dur: 2, gain: 0.04, attack: 0.4 });
+  },
+  /** Brought to a halt: the engine drops back to idle and the brakes squeal. */
+  'vehicle.stop': (c, out, t) => {
+    engine(c, out, t, [
+      [0, 44, 0.2],
+      [0.6, 26, 0.12],
+      [1.8, 24, 0.0001],
+    ]);
+    tone(c, out, t + 0.2, { freq: 1900, freqEnd: 1500, dur: 0.5, gain: 0.025, attack: 0.08 });
+    tracks(c, out, t, 0.6, 7, 0.05);
+  },
+  /** A pivot on the spot: one track driving, the other locked and grinding. */
+  'vehicle.turn': (c, out, t) => {
+    engine(c, out, t, [
+      [0, 32, 0.1],
+      [0.3, 46, 0.2],
+      [1.2, 46, 0.2],
+      [1.6, 34, 0.0001],
+    ]);
+    burst(c, out, t + 0.1, { freq: 900, q: 1.5, dur: 1.3, gain: 0.08, attack: 0.2 });
+    tracks(c, out, t, 1.5, 11, 0.07);
+  },
+  /** The turret traversing: a geared motor's whine. */
+  'vehicle.turret': (c, out, t) => {
+    tone(c, out, t, { freq: 180, freqEnd: 240, type: 'sawtooth', lowpass: 900, dur: 1.1, gain: 0.05, attack: 0.15 });
+    tone(c, out, t, { freq: 720, freqEnd: 960, dur: 1.1, gain: 0.015, attack: 0.15 });
+    clang(c, out, t + 1.25, 600, 0.03);
+  },
+  /** The engine stalls: it coughs and dies. */
+  'vehicle.stall': (c, out, t) => {
+    for (let i = 0; i < 5; i++) engine(c, out, t + i * 0.22, [[0, 30 - i * 3, 0.18 - i * 0.03], [0.15, 22 - i * 2, 0.0001]]);
+    burst(c, out, t + 0.05, { type: 'lowpass', freq: 400, dur: 0.06, gain: 0.25 });
+  },
+  /** Bogged: the engine screaming, the tracks churning mud. */
+  'vehicle.bog': (c, out, t) => {
+    engine(c, out, t, [
+      [0, 35, 0.1],
+      [0.4, 60, 0.25],
+      [1.5, 62, 0.25],
+      [2, 30, 0.0001],
+    ]);
+    burst(c, out, t + 0.2, { type: 'lowpass', freq: 500, dur: 1.6, gain: 0.15, attack: 0.3 });
+  },
+
+  /** A building collapsing into rubble (full ASL B24.11, B25.66): a deep rumble, masonry sliding, dust settling. */
+  'building.collapse': (c, out, t) => {
+    const v = voice(c, out, 0.9, 1.6);
+    burst(c, v, t, { type: 'lowpass', freq: 220, freqEnd: 40, dur: 1.9, gain: 1.3, attack: 0.03 });
+    tone(c, v, t, { freq: 42, freqEnd: 22, dur: 1.7, gain: 0.8, attack: 0.02 });
+    for (let i = 0; i < 14; i++) burst(c, out, t + rnd(0.05, 1.5), { type: 'bandpass', freq: rnd(500, 2600), dur: rnd(0.04, 0.12), gain: rnd(0.08, 0.22) });
+    burst(c, out, t + 1.2, { type: 'highpass', freq: 1800, dur: 1.2, gain: 0.12, attack: 0.2 });
   },
 
   /* --- results --- */

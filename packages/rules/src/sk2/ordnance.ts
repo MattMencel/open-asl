@@ -6,6 +6,7 @@ import { PHASE_DECISION, askPhaseOwner } from '../common/turn';
 import type { AmmoKind, GunDef, IftResult, Mount } from '../common/statics';
 import {
   FP,
+  discloseDrm,
   firedOwnFpThisPhase,
   fpfCheck,
   iftColumn,
@@ -16,10 +17,12 @@ import {
   residualFpLeft,
   type ApplyResultFn,
   type AttackResolvedFn,
+  type BeforeApplyFn,
   type FireAttackCtx,
   type FireDeclaration,
   type FireMode,
   type ResolveFireFn,
+  withoutSecrets,
 } from '../sk1/fire';
 import { PHASE_FIRE_MODE, fireTargets, phaseOwner } from '../sk1/firePhases';
 import { P as MP, type CasualtyFn, type CheckGroupFn, type FlushFn, type RandomSelectFn } from '../sk1/morale';
@@ -109,6 +112,8 @@ export interface ShotCtx {
   moving?: PieceId[];
   movingInfo?: FireAttackCtx['moving'];
   hindrance: number;
+  /** A preview before the shot is declared: nothing that needs the LOS is worked out (ASLRB A6.11; `FireAttackCtx`). */
+  losBlind?: boolean;
   nonQualified: boolean;
   captured: boolean;
   /** The ammunition the shot uses. */
@@ -621,13 +626,24 @@ function fireOrdnance(ctx: Ctx, shot: OrdnanceShot, mode: FireMode, opts: { movi
 
   // The To Hit roll.
   const thn = toHitNumber(ctx, sc)!;
-  const drmRes = ctx.explain('ordnance.thDrm', sc, 0);
-  const drm = drmRes.value;
+  const fullDrmRes = ctx.explain('ordnance.thDrm', sc, 0);
   const roll = ctx.roll(`To Hit ${shot.target}`);
   const [white, colored] = roll.dice as [number, number];
   const original = roll.total;
   // SK3 case 16 adds the lower die again for a Motion/Non-Stopped firer.
   const extra = ctx.query('ordnance.thExtra', { sc, dice: [white, colored] }, 0);
+  // A secret part of the DRM (an unrevealed fortified building's +1) is applied, and told of, only when it decides
+  // the hit or the Critical Hit; otherwise the shot is resolved with the visible DRM, which gives the same outcome.
+  const hitWith = (drm: number) => {
+    const f = original + drm + extra;
+    const h = f <= thn.th;
+    return { hit: h, ch: h && thn.ch > 0 && (shot.targetType === 'ATT' || shot.targetType === 'VTT' || sc.def.latw ? original === 2 : f <= thn.ch) };
+  };
+  const shownRes = withoutSecrets(fullDrmRes);
+  const full = hitWith(fullDrmRes.value);
+  const shown = hitWith(shownRes.value);
+  const drmRes = full.hit === shown.hit && full.ch === shown.ch ? shownRes : fullDrmRes;
+  const drm = drmRes.value;
   const final = original + drm + extra;
   const ammo = sc.ammo;
   const targets = blind ? [] : pfTarget(ctx, sc, shotTargets(ctx, side, shot.target, opts.moving, sc.targetVehicle));
@@ -837,7 +853,15 @@ function resolveHitBase(ctx: Ctx, sc: ShotCtx, h: HitInfo, targets: PieceId[], r
   });
   if (!planned.length) return [];
   const ift = ctx.roll(`${ch ? 'Critical Hit' : 'Hit'} on ${shot.target}`);
-  for (const { grp, column, attack, iftDrmRes, desperate } of planned) {
+  for (const { grp, column, attack, iftDrmRes: fullIftRes, desperate } of planned) {
+    // A secret part of the IFT DRM (a fortified building's reversed +1 on a Critical Hit) is disclosed only when it
+    // changes a result, or whether a broken target became DM (`discloseDrm`, as for small arms).
+    const nmcAt = (drm: number) => {
+      const k = statics(ctx).tables.ift(column, 2 + drm).kind;
+      return k !== 'none' && k !== 'PTC';
+    };
+    const forced = grp.units.some((u) => isBroken(pieceOf(ctx, u))) && nmcAt(fullIftRes.value) !== nmcAt(withoutSecrets(fullIftRes).value);
+    const iftDrmRes = discloseDrm(ctx, attack, column, ift.total, fullIftRes, forced);
     const iftDrm = iftDrmRes.value;
     ctx.emit('sk1.fire.attack', {
       attack: { mode, target: grp.loc, parts: [sc.weapon] },
@@ -854,8 +878,23 @@ function resolveHitBase(ctx: Ctx, sc: ShotCtx, h: HitInfo, targets: PieceId[], r
     });
     ctx.emit('sk2.ordnance.hit', { weapon: sc.weapon, target: grp.loc, targetType: shot.targetType, ammo, ch: grp.ch, column, dr: ift.dice as [number, number], drm: iftDrm, units: grp.units });
     if (desperate.length) ctx.emit('sk1.fire.dm', { units: desperate });
-    ctx.proc<ApplyResultFn>(FP.applyResult)(ctx, attack, column, ift.total + iftDrm, results);
-    ctx.proc<AttackResolvedFn>(FP.attackResolved)(ctx, { target: grp.loc, by: ammo === 'HE' ? 'he' : 'other', result: statics(ctx).tables.ift(column, ift.total + iftDrm).kind, malfunctioned: false });
+    // Full ASL: a HE or HEAT KIA on the Original DR may collapse a building Location into rubble before the attack reaches
+    // its occupants (ASLRB B24.11); the base procedure never does.
+    const by = ammo === 'HE' || ammo === 'HEAT' ? 'he' : 'other';
+    const rubbled = ctx.proc<BeforeApplyFn>(FP.beforeApply)(ctx, { target: grp.loc, by, column, originalDr: ift.total, caliber: sc.def.caliber, heat: ammo === 'HEAT', side, from: sc.hex });
+    if (!rubbled) ctx.proc<ApplyResultFn>(FP.applyResult)(ctx, attack, column, ift.total + iftDrm, results);
+    ctx.proc<AttackResolvedFn>(FP.attackResolved)(ctx, {
+      target: grp.loc,
+      by,
+      result: statics(ctx).tables.ift(column, ift.total + iftDrm).kind,
+      malfunctioned: false,
+      from: sc.hex,
+      side,
+      originalResult: statics(ctx).tables.ift(column, ift.total).kind,
+      originalDr: ift.total,
+      heat: ammo === 'HEAT',
+      ...(rubbled ? { rubbled: true } : {}),
+    });
   }
   return planned.map((p) => p.column);
 }
@@ -1014,11 +1053,11 @@ export const ordnanceModule: RuleModule = {
     th('apcr-range', 'case 11', (sc) => `+1 ${AMMO_NAME[sc.ammo]} at 13 hexes or more`, (sc) => (sc.ammo === 'APCR' || sc.ammo === 'APDS') && sc.range >= 13, () => 1);
     th('intensive', 'case 9', '+2 Intensive Fire', (sc) => !!sc.shot.intensive, () => 2);
     th('backblast', 'SK4 4.4.3', '+2 firing from a building (no Backblast)', (sc, env) => hasBackblast(sc.def) && !sc.shot.backblast && backblastHex(env, sc.hex), () => 2);
-    th('tem', 'case 17', (sc, env) => `+${env.query('hex.tem', { hex: sc.target }, 0)} TEM (${terrainOf(env, sc.target).name})`, (sc, env) => sc.shot.targetType === 'ITT' && env.query('hex.tem', { hex: sc.target }, 0) !== 0 && !onWoodsRoad(env, sc.movingInfo, [sc.loc ?? sc.hex], sc.target), (sc, env) => env.query('hex.tem', { hex: sc.target }, 0));
+    th('tem', 'case 17', (sc, env) => `+${env.query('hex.tem', { hex: sc.target }, 0)} TEM (${terrainOf(env, sc.target).name})`, (sc, env) => sc.shot.targetType === 'ITT' && env.query('hex.tem', { hex: sc.target }, 0) !== 0 && !onWoodsRoad(env, sc.movingInfo, [sc.loc ?? sc.hex], sc.target, !!sc.losBlind), (sc, env) => env.query('hex.tem', { hex: sc.target }, 0));
     th('emplacement', 'SK4 6.3', (sc, env) => `+${emplacementThDrm(env, sc.target, sc.side)} Emplacement TEM`, (sc, env) => sc.shot.targetType === 'ITT' && emplacementThDrm(env, sc.target, sc.side) > 0, (sc, env) => emplacementThDrm(env, sc.target, sc.side));
     th('hindrance', 'case 18', (sc) => `+${sc.hindrance} LOS Hindrance`, (sc) => sc.hindrance > 0, (sc) => sc.hindrance);
     th('ffnam', 'case 19', '-1 FFNAM', (sc) => !!sc.movingInfo && !sc.movingInfo.assault && !sc.movingInfo.pinned && !hazardousMover(sc), () => -1);
-    th('ffmo', 'case 19', '-1 FFMO', (sc, env) => !!sc.movingInfo && !sc.movingInfo.pinned && sc.hindrance === 0 && (env.query('hex.openGround', { hex: sc.target }, false) || onRoadInTheOpen(env, sc.movingInfo, [sc.loc ?? sc.hex], sc.target)) && !hazardousMover(sc), () => -1);
+    th('ffmo', 'case 19', '-1 FFMO', (sc, env) => !!sc.movingInfo && !sc.movingInfo.pinned && sc.hindrance === 0 && (env.query('hex.openGround', { hex: sc.target }, false) || onRoadInTheOpen(env, sc.movingInfo, [sc.loc ?? sc.hex], sc.target, !!sc.losBlind)) && !hazardousMover(sc), () => -1);
     th('acquired', 'case 20', (sc, env) => `-${acquisition(sc, env)} Acquired Target`, (sc, env) => acquisition(sc, env) > 0, (sc, env) => -acquisition(sc, env));
     th('hazardous', 'case 21', '-2 target using Hazardous Movement', (sc) => hazardousMover(sc), () => -2);
     th('targetSize', 'case 22', (sc, env) => `${targetSizeDrm(sc, env) > 0 ? '+' : ''}${targetSizeDrm(sc, env)} target size`, (sc, env) => targetSizeDrm(sc, env) !== 0, targetSizeDrm);

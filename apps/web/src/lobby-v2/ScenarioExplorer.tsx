@@ -19,6 +19,7 @@ import { Briefing } from '../panels/Briefing';
 import { Emblem as NationalEmblem } from '../fx/TurnChit';
 import { NATION } from '../game/describe';
 import { addMatchupBadges, badgeId, matchupOf } from './matchupBadge';
+import { byScenarioNumber } from './scenarioOrder';
 
 function clipRingAtLongitude(ring: Position[], longitude: number, keepGreater: boolean): Position[] {
   const source = ring.length > 1 && ring[0]![0] === ring.at(-1)![0] && ring[0]![1] === ring.at(-1)![1] ? ring.slice(0, -1) : ring;
@@ -82,8 +83,7 @@ const COUNTRY_GEOJSON = seamSafeGeoJSON(feature(countries, countries.objects['co
 const LAND_GEOJSON = seamSafeGeoJSON(feature(countries, countries.objects['land']!) as unknown as FeatureCollection);
 const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 const WWII_YEARS = Array.from({ length: 7 }, (_, index) => 1939 + index);
-const SCENARIO_NAME_COLLATOR = new Intl.Collator(undefined, { sensitivity: 'base', numeric: true });
-const alphabeticalKey = (value: string) => value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/gi, '').toLocaleLowerCase();
+
 const validWWIIYear = (value: string | null) => value && WWII_YEARS.includes(Number(value)) ? value : '';
 const MAP_ATTRIBUTION = '<a href="https://openfreemap.org/">OpenFreeMap</a> © <a href="https://www.openmaptiles.org/">OpenMapTiles</a> Data from <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>';
 const ALLIED_NATION_IDS = new Set(['al', 'am', 'br', 'ru']);
@@ -308,7 +308,7 @@ export function ScenarioExplorer() {
       if (yearFrom && (s.year ?? 0) < Number(yearFrom)) return false;
       if (yearTo && (s.year ?? 9999) > Number(yearTo)) return false;
       return words.every((word) => s.searchText.includes(word));
-    }).sort((a, b) => SCENARIO_NAME_COLLATOR.compare(alphabeticalKey(a.name), alphabeticalKey(b.name)) || SCENARIO_NAME_COLLATOR.compare(a.number, b.number));
+    }).sort(byScenarioNumber);
   }, [catalog, search, region, alliedNation, axisNation, product, month, yearFrom, yearTo, playableOnly, botOnly]);
 
   useEffect(() => {

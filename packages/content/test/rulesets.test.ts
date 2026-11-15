@@ -52,14 +52,14 @@ describe('rulesets', () => {
     const r = rulesetFor(ASL_TESTBED_SCENARIO);
     expect(r.id).toBe('asl-full');
     // Every SK module comes along, in order, then the ASL modules, which only add to or override them, then the
-    // test bed's special rule (a fortified building).
-    const ids = [...[piecesModule, turnModule, ...sk1CoreModules, ...sk2CoreModules, ...sk3CoreModules, ...aslCoreModules].map((m) => m.id), 'ssr.fortified-buildings'];
+    // test bed's special rules (fortified Locations, a hidden squad).
+    const ids = [...[piecesModule, turnModule, ...sk1CoreModules, ...sk2CoreModules, ...sk3CoreModules, ...aslCoreModules].map((m) => m.id), 'ssr.fortified-buildings', 'ssr.hidden-units'];
     expect(r.modules.map((m) => m.id)).toEqual(ids);
     expect(Object.values(SK_RULESETS).map(([, h]) => h)).not.toContain(r.versionHash);
   });
 
-  it('lists the test bed only under the Full ASL ruleset', () => {
-    expect(scenariosOfRuleset('full-asl').map((s) => s.id)).toEqual(['asl-testbed']);
+  it('lists the test beds only under the Full ASL ruleset', () => {
+    expect(scenariosOfRuleset('full-asl').map((s) => s.id)).toEqual(['asl-testbed', 'asl-testbed-fire']);
     expect(scenariosOfRuleset('starter-kit').map((s) => s.id)).not.toContain('asl-testbed');
     // It has the full counter set, like an SK3 game.
     expect(staticsFor(ASL_TESTBED_SCENARIO).counters['ru.447']).toBeDefined();

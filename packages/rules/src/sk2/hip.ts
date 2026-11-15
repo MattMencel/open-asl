@@ -139,6 +139,30 @@ export const hipModule: RuleModule = {
       },
     });
 
+    // ---------------------------------------------------------------- firing on the IFT
+    // SK4 6.4 reveals a Gun that fires but says nothing of its crew firing its own FP, or of the Gun's IFE (6.8),
+    // which resolve on the IFT, not by To Hit. Full ASL decides: hidden status is concealment (ASLRB A12.3), a
+    // concealed unit that fires in the LOS of a Good Order enemy ground unit loses it (A12.121 Concealment Table), a
+    // Gun firing its IFE so is always revealed (A12.34), and a Gun and its manning Infantry share their status (A12.2).
+    // The shot's own target sees it, so any IFT attack by the crew, the Gun or a SW the crew holds reveals both.
+    for (const event of ['sk1.fire.attack', 'sk1.fire.noLos'])
+      r.on<{ attack: { parts: PieceId[]; directors?: PieceId[] } }>({
+        id: event === 'sk1.fire.attack' ? 'sk2.hip.fired' : 'sk2.hip.fired-noLos',
+        event,
+        handler(ctx, ev) {
+          for (const id of [...ev.payload.attack.parts, ...(ev.payload.attack.directors ?? [])].sort()) {
+            const p = ctx.state.pieces[id];
+            if (!p) continue;
+            const firer = p.loc.kind === 'held' ? ctx.state.pieces[p.loc.by] : p;
+            for (const x of [p, firer]) {
+              if (!x || !isHidden(x)) continue;
+              if (gun(ctx, x)) reveal(ctx, x.id, 'fire');
+              else if (mmc(ctx, x) || smc(ctx, x)) revealUnit(ctx, x.id, 'fire');
+            }
+          }
+        },
+      });
+
     // ---------------------------------------------------------------- the MPh bounce (SK4 6.4)
     r.procedure<MoveEnterFn>(MOVE_ENTER, (next) => (ctx, ms, to, cost, woods, extra) => {
       // Full ASL: a stack bypassing the hex does not find what hides in its building or woods (ASLRB A12.151).

@@ -60,6 +60,10 @@ const MARKERS = [
   'ja/jaqmark=qmark-ja', 'MS/Banzai',
   // Full ASL: the Level counters an upper building level's units sit on (ASLRB B23.421).
   'ML/Lev1', 'ML/Lev2',
+  // Full ASL Fire and rubble (ASLRB B25, B24): Flame and Blaze, rubble, the Wind Direction counter in its six directions and
+  // its force faces, the Gust/Change face, TI and Labor (B24.7, B24.8), grey drifting Smoke.
+  'MS/Flame', 'MS/Blaze', 'ML/Rubble', 'ML/Wind1', 'ML/Wind2', 'ML/Wind3', 'ML/Wind4', 'ML/Wind5', 'ML/Wind6', 'ML/WindNo', 'ML/WindMB', 'ML/WindHW', 'ML/WindB',
+  'MS/ti=TI', 'MS/Labor1', 'MS/Labor2', 'ML/Smk2gr',
   // SK3 vehicles: Motion, Bog/Mired/Immobilized, Shock/UK, Stun (+1 side), STUN/Recall, Low Ammo, vehicle
   // acquisition, Bounding Fire, malfunctioned/disabled MA and MGs, and the CE/BU turret counters (one
   // orientation each; the client turns them to the Turret Covered Arc) and the non-turreted CE/BU markers.

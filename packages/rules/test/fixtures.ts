@@ -195,6 +195,10 @@ export function scenario(overrides: Partial<ScenarioDef> = {}): ScenarioDef {
     turns: 5,
     halfFinalTurn: false,
     month: 7,
+    // Stated so that the full ASL modules roll no EC or wind dice (ASLRB B25.5, B25.63) and forced dice land where the
+    // test expects; the Starter Kit reads neither.
+    ec: 'moderate',
+    weather: { wind: { from: 'W', force: 'calm' } },
     firstSide: 'am',
     sides: [
       { side: 'am', name: 'American', nationality: 'am', elr: 3 },

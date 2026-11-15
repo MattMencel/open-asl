@@ -37,7 +37,7 @@ const snowing = (state: GameState): GameState => ({ ...state, ext: { ...state.ex
 
 describe('weather', () => {
   it('is clear with a mild westerly breeze unless the card says otherwise', () => {
-    const { engine, state } = makeEngine({ pieces, extra: [testMod] });
+    const { engine, state } = makeEngine({ pieces, extra: [testMod], scenario: { weather: undefined } });
     expect(weatherOf(engine.env(state))).toEqual(DEFAULT_WEATHER);
     expect(weatherLabel(weatherOf(engine.env(state)))).toBe('Clear · mild breeze from the west');
     const { engine: e2, state: s2 } = makeEngine({ pieces, extra: [testMod], scenario: { weather: { sky: 'rain', ground: 'mud', wind: { from: 'NE', force: 'gusts' } } } });

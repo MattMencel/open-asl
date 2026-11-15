@@ -1,0 +1,490 @@
+import { describe, expect, it } from 'vitest';
+import type { Action, Engine, GameState, RuleModule } from '@asl/engine';
+import {
+  BREACH_SIDE_DECISION,
+  FORTIFIED_MODULE,
+  aslCoreModules,
+  breaches,
+  fortifiableLocations,
+  fortifiedKnownTo,
+  fortifiedModule,
+  fortifiedState,
+  fortifiedView,
+  isFortified,
+  lofSides,
+  moveState,
+  piecesModule,
+  redactState,
+  statics,
+  turnModule,
+  type FireAttackCtx,
+  type HexTerrainSpec,
+} from '../../src';
+import { sk1CoreModules } from '../../src/sk1';
+import { sk2CoreModules } from '../../src/sk2';
+import { sk3CoreModules } from '../../src/sk3';
+import { act, makeEngine, type PieceSpec } from '../fixtures';
+import { inCoveredArc, nearestSpine } from '../../src';
+import { testFire } from './helpers';
+
+/*
+ * Fortified Building Locations in full ASL (ASLRB B23.9–B23.93): designation by Location (B23.911, B23.912), the
+ * +1 per Location (B23.921), no entry while an enemy squad holds one (B23.922), Breach by DC and by a HE KIA
+ * (B23.9221, B23.711, the A23.3 example) and Guns in fortified Locations (B23.93, C2.6). The house is board u's
+ * K4–K5 stone Two Story House; its neighbours are K3 (north), L3, L4, K5, J4 and J3 (south-west).
+ */
+
+const LEVELS = { upper: 1 as const, stairwell: 'inherent' as const };
+const HOUSE: Record<string, HexTerrainSpec> = {
+  uK4: { terrain: 'building-stone', buildingId: 'u-B16', building: LEVELS, obstacleHeight: 1.5 },
+  uK5: { terrain: 'building-stone', buildingId: 'u-B16', building: LEVELS, obstacleHeight: 1.5 },
+};
+const SK: RuleModule[] = [piecesModule, turnModule, ...sk1CoreModules, ...sk2CoreModules, ...sk3CoreModules];
+const ASL: RuleModule[] = [...SK, ...aslCoreModules];
+
+/** A test-only Breach record, for the entry tests. */
+const testBreach: RuleModule = {
+  id: 'test.breach',
+  install(r) {
+    r.action<Action & { loc: string; toward: string }>({
+      type: 'test.breach',
+      decisionKinds: ['phase'],
+      resolve(ctx, a) {
+        ctx.emit('asl.breach', { breach: { loc: a.loc, toward: a.toward, by: 'dc' } });
+      },
+    });
+  },
+};
+
+/** Germans attack first; the Russians fortify `count` Locations of the K4–K5 house (exactly that many when `exact`). */
+function game(pieces: PieceSpec[], opts: { count?: number; exact?: boolean; open?: boolean; dice?: number[]; startPhase?: string; modules?: RuleModule[] } = {}) {
+  const scenario = {
+    firstSide: 'ge',
+    sides: [
+      { side: 'ge', name: 'German', nationality: 'ge', elr: 3 },
+      { side: 'ru', name: 'Russian', nationality: 'ru', elr: 3 },
+    ],
+    forces: [{ side: 'ru', units: [], setup: { kind: 'area' as const, description: 'the house', hexes: ['uK4', 'uK5'] } }],
+    ssr: [{ module: FORTIFIED_MODULE, params: { side: 'ru', count: opts.count ?? 2, unit: 'location', within: 'setup', ...(opts.exact ? { exact: true } : {}), ...(opts.open ? { open: true } : {}) } }],
+  };
+  return makeEngine({
+    board: 'u',
+    terrain: HOUSE,
+    scenario,
+    modules: opts.modules ?? ASL,
+    extra: [fortifiedModule, testFire, testBreach],
+    pieces,
+    ...(opts.dice ? { dice: opts.dice } : {}),
+    ...(opts.startPhase ? { startPhase: opts.startPhase } : {}),
+  });
+}
+const designate = (engine: Engine, state: GameState, locations: string[]) => act(engine, state, { type: 'fortify.designate', locations }).state;
+const types = (t: { events: { type: string }[] }) => t.events.map((e) => e.type);
+/** Pass and end phases until `phase` of `attacker` in a later turn than `from`. */
+function playOn(engine: Engine, s: GameState, from: number, attacker: string, phase: string): GameState {
+  for (let i = 0; i < 400 && !(s.turn > from && s.attacker === attacker && s.phase === phase); i++) {
+    const d = engine.currentDecision(s)!;
+    const a = engine.legalActions(s, d.owner).find((x) => x.type === 'defPass' || x.type === 'move.end' || x.type === 'endPhase') ?? engine.legalActions(s, d.owner)[0]!;
+    s = engine.submit(s, a as Action).state;
+  }
+  return s;
+}
+
+describe('designating fortified Locations (B23.911, B23.912)', () => {
+  const far: PieceSpec[] = [{ id: 'g', def: 'ge.467', side: 'ge', hex: 'uY1' }, { id: 'r', def: 'ru.447', side: 'ru', hex: 'uA1' }];
+  it('offers the ground and the upper level of every building hex in the setup area', () => {
+    const { engine, state } = game(far);
+    expect(engine.currentDecision(state)).toMatchObject({ kind: 'fortify', owner: 'ru', data: { count: 2, unit: 'location' } });
+    expect(fortifiableLocations(engine.env(state), 'ru')).toEqual(['uK4', 'uK4:1', 'uK5', 'uK5:1']);
+  });
+  it('refuses an upper level whose ground is not fortified, more than the count, and fewer when the count is exact', () => {
+    const { engine, state } = game(far, { count: 2, exact: true });
+    expect(() => designate(engine, state, ['uK4:1', 'uK5'])).toThrow(/fortify the level below first \(ASLRB B23.912\)/);
+    expect(() => designate(engine, state, ['uK4', 'uK5', 'uK4:1'])).toThrow(/At most 2 Locations/);
+    expect(() => designate(engine, state, ['uK4'])).toThrow(/Choose 2 Locations/);
+    expect(() => designate(engine, state, ['uK4', 'uK4'])).toThrow(/only be fortified once/);
+    expect(() => act(engine, state, { type: 'fortify.designate', buildings: ['u-B16'] })).toThrow(/fortifies Locations, not whole buildings/);
+    expect(() => designate(engine, state, ['uL4', 'uK4'])).toThrow(/not a building Location in your setup area/);
+  });
+  it('fortifies the chosen Locations only, secret from the other side', () => {
+    const { engine, state } = game(far);
+    const s = designate(engine, state, ['uK4:1', 'uK4']);
+    const env = engine.env(s);
+    expect(fortifiedState(env)).toEqual({ side: 'ru', buildings: ['u-B16'], revealed: [], locations: ['uK4', 'uK4:1'], revealedLocs: [] });
+    expect(isFortified(env, 'uK4')).toBe(true);
+    expect(isFortified(env, 'uK4:1')).toBe(true);
+    expect(isFortified(env, 'uK5')).toBe(false);
+    expect(env.query('hex.fortified', { hex: 'uK4' }, false)).toBe(true);
+    expect(env.query('hex.fortified', { hex: 'uK5' }, false)).toBe(false);
+    expect(fortifiedKnownTo(env, 'uK4', 'ru')).toBe(true);
+    expect(fortifiedKnownTo(env, 'uK4', 'ge')).toBe(false);
+    expect(fortifiedKnownTo(env, 'uK4', null)).toBe(false);
+    // The other side's view holds no Location until one is revealed.
+    expect((redactState(engine, s, 'ge').ext['sk1.fortified'] as { locations: string[] }).locations).toEqual([]);
+    expect(fortifiedView(env, 'ge')).toEqual([]);
+    expect(fortifiedView(env, 'ru')).toEqual([{ loc: 'uK4', breached: [] }, { loc: 'uK4:1', breached: [] }]);
+  });
+  it("the engine's default designation respects the ground-up rule", () => {
+    const { engine, state } = game(far, { count: 3 });
+    const [a] = engine.legalActions(state, 'ru').filter((x) => x.type === 'fortify.designate');
+    expect(a!['locations']).toEqual(['uK4', 'uK5', 'uK4:1']);
+    expect(() => act(engine, state, a!)).not.toThrow();
+  });
+});
+
+describe('the +1 TEM is per Location (B23.921)', () => {
+  it('level 1 fortified, the ground below it too, the next hex not', () => {
+    const { engine, state } = game([
+      { id: 'g', def: 'ge.467', side: 'ge', hex: 'uK2' },
+      { id: 'r1', def: 'ru.447', side: 'ru', hex: 'uK4', level: 1 },
+      { id: 'r2', def: 'ru.447', side: 'ru', hex: 'uK5' },
+    ]);
+    const env = engine.env(designate(engine, state, ['uK4', 'uK4:1']));
+    const drm = (target: string, targets: string[]) => {
+      const attack: FireAttackCtx = { mode: 'prep', side: 'ge', target, parts: [], targets, hindrance: 0 };
+      return env.explain('fire.drm', { attack }, 0);
+    };
+    expect(drm('uK4:1', ['r1']).value).toBe(4);
+    expect(drm('uK4:1', ['r1']).trace.find((t) => t.id === 'ssr.fortified.drm')?.secret).toBe(true);
+    expect(drm('uK5', ['r2']).value).toBe(3);
+  });
+});
+
+describe('B23.922: no entry while an enemy squad holds the Location', () => {
+  // A German squad in J4, south-west of K4; a Russian squad holds K4's fortified ground.
+  const russian = (extra: Partial<PieceSpec> = {}): PieceSpec => ({ id: 'r', def: 'ru.447', side: 'ru', hex: 'uK4', ...extra });
+  const german: PieceSpec = { id: 'g', def: 'ge.467', side: 'ge', hex: 'uJ4' };
+  const advance = { type: 'advance', units: ['g'], to: 'uK4' };
+
+  it('an advance into an unrevealed fortified Location is offered, and the attempt is refused: the unit stays, loses its APh and reveals the Location', () => {
+    const { engine, state } = game([german, russian(), { id: 'g2', def: 'ge.467', side: 'ge', hex: 'uJ3' }], { startPhase: 'APh' });
+    const s0 = designate(engine, state, ['uK4']);
+    // Legal as far as the Germans can know: the refusal must never leak the secret through legality.
+    expect(engine.legalActions(s0, 'ge').some((a) => a.type === 'advance' && a['to'] === 'uK4')).toBe(true);
+    expect(engine.legalActions(redactState(engine, s0, 'ge'), 'ge').some((a) => a.type === 'advance' && a['to'] === 'uK4')).toBe(true);
+    const t = act(engine, s0, advance);
+    expect(t.state.pieces['g']!.loc).toEqual({ kind: 'hex', hex: 'uJ4' });
+    expect(t.state.pieces['g']!.tags['advanced']).toBe(true);
+    expect(types(t)).toEqual(expect.arrayContaining(['sk1.fortified.revealed', 'asl.fortified.refused']));
+    expect(t.events.find((e) => e.type === 'asl.fortified.refused')!.payload).toMatchObject({ units: ['g'], loc: 'uK4', phase: 'APh', side: 'ge', reason: 'held' });
+    expect(t.events.find((e) => e.type === 'sk1.fortified.revealed')!.payload).toMatchObject({ loc: 'uK4', reason: 'attempt' });
+    expect(fortifiedKnownTo(engine.env(t.state), 'uK4', 'ge')).toBe(true);
+    expect((redactState(engine, t.state, 'ge').ext['sk1.fortified'] as { locations: string[] }).locations).toEqual(['uK4']);
+    // No second try this APh, nor any other advance.
+    expect(engine.legalActions(t.state, 'ge').some((a) => a.type === 'advance' && (a['units'] as string[]).includes('g'))).toBe(false);
+    // Once known, the advance is refused up front with the reason (another unit, g2, has not used its APh).
+    expect(engine.validate(t.state, { side: 'ge', decisionId: engine.currentDecision(t.state)!.id, type: 'advance', units: ['g2'], to: 'uK4' } as Action)).toMatch(/B23.922/);
+    expect(engine.legalActions(t.state, 'ge').some((a) => a.type === 'advance' && (a['units'] as string[]).includes('g2') && a['to'] === 'uK4')).toBe(false);
+    // Next Player Turn the unit moves and advances as usual.
+    const s2 = playOn(engine, t.state, t.state.turn, 'ge', 'MPh');
+    expect(s2.pieces['g']!.tags['advanced']).toBeUndefined();
+    expect(engine.legalActions(s2, 'ge').some((a) => a.type === 'move.start' && (a['units'] as string[]).includes('g'))).toBe(true);
+    expect(isFortified(engine.env(s2), 'uK4')).toBe(true);
+  });
+
+  it('a pinned squad, or a half-squad with a leader, does not bar the entry: the advance goes in and Close Combat follows', () => {
+    const pinned = game([german, russian({ tags: { pinned: true } })], { startPhase: 'APh' });
+    let s = act(pinned.engine, designate(pinned.engine, pinned.state, ['uK4']), advance).state;
+    expect(s.pieces['g']!.loc).toEqual({ kind: 'hex', hex: 'uK4' });
+    expect(s.hexMarkers['uK4']?.['cc']).toBe(true);
+    const small = game([german, { id: 'h', def: 'ru.247', side: 'ru', hex: 'uK4' }, { id: 'l', def: 'ru.L91', side: 'ru', hex: 'uK4' }], { startPhase: 'APh' });
+    s = act(small.engine, designate(small.engine, small.state, ['uK4']), advance).state;
+    expect(s.pieces['g']!.loc).toEqual({ kind: 'hex', hex: 'uK4' });
+    // Two half-squads are a squad's equivalent.
+    const two = game([german, { id: 'h', def: 'ru.247', side: 'ru', hex: 'uK4' }, { id: 'h2', def: 'ru.247', side: 'ru', hex: 'uK4' }], { startPhase: 'APh' });
+    s = act(two.engine, designate(two.engine, two.state, ['uK4']), advance).state;
+    expect(s.pieces['g']!.loc).toEqual({ kind: 'hex', hex: 'uJ4' });
+  });
+
+  it('through a Breach of that hexside the advance goes in; through another hexside it is still refused', () => {
+    const { engine, state } = game([german, russian(), { id: 'g2', def: 'ge.467', side: 'ge', hex: 'uK3' }], { startPhase: 'APh', open: true });
+    let s = designate(engine, state, ['uK4']);
+    s = act(engine, s, { type: 'test.breach', loc: 'uK4', toward: 'uJ4' }).state;
+    expect(breaches(engine.env(s))).toEqual([{ loc: 'uK4', toward: 'uJ4', by: 'dc' }]);
+    expect(engine.validate(s, { side: 'ge', decisionId: engine.currentDecision(s)!.id, type: 'advance', units: ['g2'], to: 'uK4' } as Action)).toMatch(/B23.922/);
+    s = act(engine, s, advance).state;
+    expect(s.pieces['g']!.loc).toEqual({ kind: 'hex', hex: 'uK4' });
+    expect(fortifiedView(engine.env(s), 'ge')).toEqual([{ loc: 'uK4', breached: ['uJ4'] }]);
+  });
+
+  it('a level 1 held by a squad can only be reached by the stairs, which are no hexside: the advance up is refused', () => {
+    const { engine, state } = game([{ id: 'g', def: 'ge.467', side: 'ge', hex: 'uK4' }, russian({ level: 1 })], { startPhase: 'APh', open: true });
+    const s = designate(engine, state, ['uK4', 'uK4:1']);
+    expect(engine.validate(s, { side: 'ge', decisionId: engine.currentDecision(s)!.id, type: 'advance', units: ['g'], to: 'uK4:1' } as Action)).toMatch(/B23.922/);
+  });
+
+  it('in the MPh a stack that tries to enter a fortified Location held by a hidden squad is turned back: the fortification and the squad come to light, the MF are spent where it stands, and its move is over', () => {
+    // r is hidden (an SSR letting units set up hidden); g at J4 steps into K4: refused, fired on by the revealed r (4 FP, no effect), move over.
+    const { engine, state } = game([german, russian({ tags: { hip: true } }), { id: 'g2', def: 'ge.467', side: 'ge', hex: 'uY1' }], { startPhase: 'MPh', dice: [6, 6] });
+    let s = designate(engine, state, ['uK4']);
+    s = act(engine, s, { type: 'move.start', units: ['g'] }).state;
+    expect(engine.legalActions(s, 'ge').some((a) => a.type === 'move.step' && a['to'] === 'uK4')).toBe(true);
+    const t = act(engine, s, { type: 'move.step', to: 'uK4' });
+    expect(t.state.pieces['g']!.loc).toEqual({ kind: 'hex', hex: 'uJ4' });
+    expect(t.state.pieces['r']!.tags['hip']).toBeUndefined();
+    expect(types(t)).toEqual(expect.arrayContaining(['sk1.fortified.revealed', 'asl.fortified.refused']));
+    expect(t.events.find((e) => e.type === 'asl.fortified.refused')!.payload).toMatchObject({ units: ['g'], loc: 'uK4', phase: 'MPh' });
+    const ms = moveState(engine.env(t.state))!;
+    expect(ms.halted).toBe(true);
+    expect(ms.spent['g']).toBe(2);
+    // The revealed squad may fire at the stack in J4 as Defensive First Fire.
+    expect(engine.currentDecision(t.state)).toMatchObject({ kind: 'firstFire', owner: 'ru' });
+    s = act(engine, t.state, { type: 'defFire', decl: { units: ['r'], sw: [], target: 'uJ4' } }).state;
+    while (engine.currentDecision(s)?.kind === 'firstFire') s = act(engine, s, { type: 'defPass' }).state;
+    // Its MPh is over: no further step, and the next unit may move.
+    expect(engine.legalActions(s, 'ge').some((a) => a.type === 'move.step' && (moveState(engine.env(s))?.units ?? []).includes('g'))).toBe(false);
+    expect(engine.legalActions(s, 'ge').some((a) => a.type === 'move.start' && (a['units'] as string[]).includes('g2'))).toBe(true);
+    // Next Player Turn g moves normally.
+    const s2 = playOn(engine, s, s.turn, 'ge', 'MPh');
+    expect(engine.legalActions(s2, 'ge').some((a) => a.type === 'move.start' && (a['units'] as string[]).includes('g'))).toBe(true);
+  });
+});
+
+describe('B23.9221: Breach by a DC', () => {
+  // g (4-6-7 with a DC) and l (a leader without one) in J4; r holds K4, fortified and known (the card names it).
+  const pieces = (extra: PieceSpec[] = []): PieceSpec[] => [
+    { id: 'g', def: 'ge.467', side: 'ge', hex: 'uJ4' },
+    { id: 'dc', def: 'ge.DC', side: 'ge', heldBy: 'g' },
+    { id: 'l', def: 'ge.L80', side: 'ge', hex: 'uJ4' },
+    { id: 'r', def: 'ru.447', side: 'ru', hex: 'uK4' },
+    ...extra,
+  ];
+  const breachOf = (t: { events: { type: string; payload: unknown }[] }) => t.events.find((e) => e.type === 'asl.breach.attempt')?.payload as { breached: boolean; malfunctioned: boolean; drm: number; result: string | null } | undefined;
+
+  it('is offered to the DC holder against a known fortified ADJACENT Location, not up the stairs, not against an unrevealed one', () => {
+    const { engine, state } = game(pieces(), { startPhase: 'MPh', open: true });
+    let s = designate(engine, state, ['uK4', 'uK4:1']);
+    s = act(engine, s, { type: 'move.start', units: ['g', 'l'] }).state;
+    // One entry per known fortified ADJACENT Location (J4 touches K4 and K5; only K4 is fortified), for the DC only.
+    const offered = engine.legalActions(s, 'ge').filter((a) => a.type === 'move.breach');
+    expect(offered.map((a) => `${a['dc']}>${a['target']}`)).toEqual(['dc>uK4']);
+    const check = (target: string) => engine.validate(s, { side: 'ge', decisionId: engine.currentDecision(s)!.id, type: 'move.breach', dc: 'dc', target } as Action);
+    expect(check('uK4:1')).toMatch(/ADJACENT/);
+    expect(check('uK5')).toMatch(/known to be fortified/);
+    // A secret one: not until the Germans have seen it.
+    const secret = game(pieces(), { startPhase: 'MPh' });
+    let u = designate(secret.engine, secret.state, ['uK4']);
+    u = act(secret.engine, u, { type: 'move.start', units: ['g'] }).state;
+    expect(secret.engine.legalActions(u, 'ge').some((a) => a.type === 'move.breach')).toBe(false);
+    expect(secret.engine.validate(u, { side: 'ge', decisionId: secret.engine.currentDecision(u)!.id, type: 'move.breach', dc: 'dc', target: 'uK4' } as Action)).toMatch(/known to be fortified/);
+    // A pinned placer may not.
+    const pinned = game(pieces().map((p) => (p.id === 'g' ? { ...p, tags: { pinned: true } } : p)), { startPhase: 'MPh', open: true });
+    let v = designate(pinned.engine, pinned.state, ['uK4']);
+    v = act(pinned.engine, v, { type: 'move.start', units: ['l'] }).state;
+    expect(pinned.engine.legalActions(v, 'ge').some((a) => a.type === 'move.breach')).toBe(false);
+  });
+
+  it('costs one MF, is placed once the stack has survived the fire there, and resolves in the AFPh: a NMC or better Breaches the hexside, the units take Area Fire with the same DR', () => {
+    // Breach DR 9 (4+5): +3 TEM +1 fortified = 13, a NMC on the DC's 30 column (the hexside goes); the squad inside takes 15 FP
+    // at 13: nothing. The DC's X# is 10 for a non-elite squad.
+    const { engine, state } = game(pieces(), { startPhase: 'MPh', open: true, dice: [4, 5] });
+    let s = designate(engine, state, ['uK4']);
+    s = act(engine, s, { type: 'move.start', units: ['g', 'l'] }).state;
+    const t = act(engine, s, { type: 'move.breach', dc: 'dc', target: 'uK4' });
+    expect(t.events.find((e) => e.type === 'asl.breach.declared')!.payload).toMatchObject({ dc: 'dc', placer: 'g', loc: 'uK4', toward: 'uJ4' });
+    let ms = moveState(engine.env(t.state))!;
+    expect(ms.spent['g']).toBe(1);
+    expect(ms.dcPending).toMatchObject({ dc: 'dc', placer: 'g', target: 'uK4', breach: 'uJ4' });
+    s = t.state;
+    while (engine.currentDecision(s)?.kind === 'firstFire') s = act(engine, s, { type: 'defPass' }).state;
+    s = act(engine, s, { type: 'move.end' }).state;
+    while (engine.currentDecision(s)?.kind === 'firstFire') s = act(engine, s, { type: 'defPass' }).state;
+    expect(s.pieces['dc']!.loc).toEqual({ kind: 'hex', hex: 'uK4' });
+    expect(s.pieces['dc']!.tags).toMatchObject({ dcPlaced: true, dcPlacer: 'g', dcBreach: 'uJ4' });
+    ms = moveState(engine.env(s))!;
+    expect(ms?.dcPending).toBeUndefined();
+    // On to the AFPh: the Breach attempt.
+    let r: ReturnType<typeof act> | null = null;
+    for (let i = 0; i < 20 && s.phase !== 'AFPh'; i++) {
+      const d = engine.currentDecision(s)!;
+      const a = engine.legalActions(s, d.owner).find((x) => x.type === 'defPass' || x.type === 'move.end' || x.type === 'endPhase')!;
+      r = act(engine, s, a);
+      s = r.state;
+    }
+    expect(s.phase).toBe('AFPh');
+    expect(breachOf(r!)).toMatchObject({ breached: true, malfunctioned: false, drm: 4, result: 'NMC' });
+    const attacks = r!.events.filter((e) => e.type === 'sk1.fire.attack').map((e) => e.payload as { fp: number; drm: number; explain: { label?: string }[] });
+    expect(attacks.map((a) => a.fp)).toEqual([30, 15]);
+    expect(attacks[0]!.explain.map((n) => n.label)).toEqual(expect.arrayContaining(['+3 TEM', '+1 Fortified Building']));
+    expect(breaches(engine.env(s))).toEqual([{ loc: 'uK4', toward: 'uJ4', by: 'dc' }]);
+    expect(s.pieces['dc']!.loc.kind).toBe('eliminated');
+    expect(s.pieces['r']!.tags['broken']).toBeUndefined();
+    // The APh: g advances in through the Breach despite the Good Order squad.
+    s = act(engine, s, { type: 'endPhase' }).state;
+    for (let i = 0; i < 6 && s.phase !== 'APh'; i++) s = act(engine, s, engine.legalActions(s, engine.currentDecision(s)!.owner).find((x) => x.type === 'endPhase' || x.type === 'defPass')!).state;
+    expect(s.phase).toBe('APh');
+    s = act(engine, s, { type: 'advance', units: ['g'], to: 'uK4' }).state;
+    expect(s.pieces['g']!.loc).toEqual({ kind: 'hex', hex: 'uK4' });
+    // Next Player Turn: the Breach stays, the DC and its tags are gone, the house is still fortified, everyone acts normally.
+    const s2 = playOn(engine, s, s.turn, 'ge', 'MPh');
+    expect(breaches(engine.env(s2))).toEqual([{ loc: 'uK4', toward: 'uJ4', by: 'dc' }]);
+    expect(Object.values(s2.pieces).some((p) => p.tags['dcBreach'] !== undefined || p.tags['dcPlaced'] !== undefined)).toBe(false);
+    expect(isFortified(engine.env(s2), 'uK4')).toBe(true);
+    expect(engine.legalActions(s2, 'ge').some((a) => a.type === 'move.start' && (a['units'] as string[]).includes('l'))).toBe(true);
+  });
+
+  it('an Original DR of the X# or more removes the DC without a Breach or an attack', () => {
+    const { engine, state } = game(pieces(), { startPhase: 'MPh', open: true, dice: [5, 5] });
+    let s = designate(engine, state, ['uK4']);
+    s = act(engine, s, { type: 'move.start', units: ['g'] }).state;
+    s = act(engine, s, { type: 'move.breach', dc: 'dc', target: 'uK4' }).state;
+    while (engine.currentDecision(s)?.kind === 'firstFire') s = act(engine, s, { type: 'defPass' }).state;
+    s = act(engine, s, { type: 'move.end' }).state;
+    let r: ReturnType<typeof act> | null = null;
+    for (let i = 0; i < 20 && s.phase !== 'AFPh'; i++) {
+      const d = engine.currentDecision(s)!;
+      r = act(engine, s, engine.legalActions(s, d.owner).find((x) => x.type === 'defPass' || x.type === 'move.end' || x.type === 'endPhase')!);
+      s = r.state;
+    }
+    expect(breachOf(r!)).toMatchObject({ breached: false, malfunctioned: true });
+    expect(breaches(engine.env(s))).toEqual([]);
+    expect(s.pieces['dc']!.loc.kind).toBe('eliminated');
+    expect(r!.events.filter((e) => e.type === 'sk1.fire.attack')).toHaveLength(1);
+  });
+
+  it('a plain DC may still be Placed on the fortified Location at the building entry cost, held or not', () => {
+    const { engine, state } = game(pieces(), { startPhase: 'MPh', open: true });
+    let s = designate(engine, state, ['uK4']);
+    s = act(engine, s, { type: 'move.start', units: ['g'] }).state;
+    s = act(engine, s, { type: 'move.placeDc', dc: 'dc', target: 'uK4' }).state;
+    expect(moveState(engine.env(s))!.spent['g']).toBe(2);
+    expect(moveState(engine.env(s))!.dcPending?.breach).toBeUndefined();
+  });
+});
+
+describe('B23.9221: Breach by a HE KIA', () => {
+  // A German 88 fires HE at the Russian squad in K4 (fortified, known): range 1 from K3 (one hexside, the north one),
+  // range 2 from L2 (along a hexspine: the firer chooses the L3 or the K3 side).
+  const gunGame = (from: string, dice: number[]) => {
+    const probe = game([{ id: 'c', def: 'ge.228c', side: 'ge', hex: from }, { id: 'r', def: 'ru.447', side: 'ru', hex: 'uK4' }]);
+    const map = statics(probe.engine.env(probe.state)).map;
+    const ca = inCoveredArc(map.hex(from)!.cube, 0, map.hex('uK4')!.cube) ? 0 : nearestSpine(map.hex(from)!.cube, 0, map.hex('uK4')!.cube)!;
+    const { engine, state } = game(
+      [
+        { id: 'c', def: 'ge.228c', side: 'ge', hex: from },
+        { id: 'g88', def: 'ge.AA88L', side: 'ge', heldBy: 'c', tags: { ca } },
+        { id: 'r', def: 'ru.447', side: 'ru', hex: 'uK4' },
+        { id: 'r2', def: 'ru.447', side: 'ru', hex: 'uK4' },
+        { id: 'far', def: 'ru.447', side: 'ru', hex: 'uA1' },
+      ],
+      { open: true, dice },
+    );
+    return { engine, state: designate(engine, state, ['uK4']) };
+  };
+  const fire = { type: 'fire.ordnance', shot: { weapon: 'g88', target: 'uK4', targetType: 'ITT' } };
+
+  it('the line of fire crosses one hexside: it is Breached at once', () => {
+    expect(lofSides('uK4', 'uK3', statics(gunGame('uK3', []).engine.env(gunGame('uK3', []).state)).map)).toEqual([4]);
+    // To Hit 10 at range 1, +3 +1: DR 4 hits (no CH); the 16 column IFT DR 3 is a KIA.
+    const { engine, state } = gunGame('uK3', [2, 2, 1, 2]);
+    const t = act(engine, state, fire);
+    expect(t.events.find((e) => e.type === 'sk1.fire.result')?.payload).toMatchObject({ result: { kind: 'KIA' } });
+    expect(breaches(engine.env(t.state))).toEqual([{ loc: 'uK4', toward: 'uK3', by: 'he' }]);
+  });
+  it('along a hexspine the firer chooses which of the two hexsides is Breached', () => {
+    const { engine, state } = gunGame('uL2', [2, 2, 1, 2]);
+    expect(lofSides('uK4', 'uL2', statics(engine.env(state)).map)).toEqual([4, 5]);
+    const t = act(engine, state, fire);
+    expect(t.events.find((e) => e.type === 'sk1.fire.result')?.payload).toMatchObject({ result: { kind: 'KIA' } });
+    expect(engine.currentDecision(t.state)).toMatchObject({ kind: BREACH_SIDE_DECISION, owner: 'ge', data: { loc: 'uK4', options: ['uK3', 'uL3'] } });
+    expect(engine.legalActions(t.state, 'ge').map((a) => a['toward'])).toEqual(['uK3', 'uL3']);
+    const s = act(engine, t.state, { type: 'breach.choose', toward: 'uL3' }).state;
+    expect(breaches(engine.env(s))).toEqual([{ loc: 'uK4', toward: 'uL3', by: 'he' }]);
+    expect(engine.currentDecision(s)!.kind).toBe('phase');
+  });
+  it('a K/ or lesser result Breaches nothing', () => {
+    // IFT DR 7 on the 16 column: a K/1 on the fixture table.
+    const { engine, state } = gunGame('uK3', [2, 2, 3, 4]);
+    const t = act(engine, state, fire);
+    expect(t.events.find((e) => e.type === 'sk1.fire.result')?.payload).toMatchObject({ result: { kind: 'K' } });
+    expect(breaches(engine.env(t.state))).toEqual([]);
+  });
+});
+
+describe('B23.93 and C2.6: Guns in Fortified Building Locations', () => {
+  it('any Gun may set up in a fortified ground Location; at a fortified upper level of a stone house only an ART/AT/INF Gun of at most 76mm', () => {
+    const { engine, state } = game([
+      { id: 'c1', def: 'ge.228c', side: 'ge', hex: 'uK4' },
+      { id: 'g88', def: 'ge.AA88L', side: 'ge', heldBy: 'c1', tags: { ca: 0 } },
+      { id: 'c2', def: 'ge.228c', side: 'ge', hex: 'uK4', level: 1 },
+      { id: 'g75', def: 'ge.AT75L', side: 'ge', heldBy: 'c2', tags: { ca: 0 } },
+      { id: 'r', def: 'ru.447', side: 'ru', hex: 'uA1' },
+    ]);
+    const env = engine.env(designate(engine, state, ['uK4', 'uK4:1']));
+    const base = 'the Starter Kit says no';
+    expect(env.query('gun.setupIllegal', { gun: 'g88', loc: 'uK4' }, base)).toBeNull();
+    expect(env.query('gun.setupIllegal', { gun: 'g75', loc: 'uK4:1' }, base)).toBeNull();
+    expect(env.query('gun.setupIllegal', { gun: 'g88', loc: 'uK4:1' }, base)).toMatch(/at most 76mm/);
+    expect(env.query('gun.setupIllegal', { gun: 'g75', loc: 'uK5:1' }, base)).toBe(base);
+    expect(env.query('gun.setupIllegal', { gun: 'g88', loc: 'uK5' }, base)).toBe(base);
+  });
+  it('a Gun at a fortified upper level never moves; no Gun may be pushed into a known fortified Location', () => {
+    const { engine, state } = game(
+      [
+        { id: 'c2', def: 'ge.228c', side: 'ge', hex: 'uK4', level: 1 },
+        { id: 'g75', def: 'ge.AT75L', side: 'ge', heldBy: 'c2', tags: { ca: 0 } },
+        { id: 'c3', def: 'ge.228c', side: 'ge', hex: 'uJ4' },
+        { id: 'g57', def: 'br.AT57L', side: 'ge', heldBy: 'c3', tags: { ca: 0 } },
+        { id: 'r', def: 'ru.447', side: 'ru', hex: 'uY1' },
+      ],
+      { startPhase: 'MPh', open: true },
+    );
+    let s = designate(engine, state, ['uK4', 'uK4:1']);
+    const d = engine.currentDecision(s)!;
+    expect(engine.validate(s, { side: 'ge', decisionId: d.id, type: 'move.start', units: ['c2'], manhandle: 'g75' } as Action)).toMatch(/B23.93/);
+    s = act(engine, s, { type: 'move.start', units: ['c3'], manhandle: 'g57' }).state;
+    expect(engine.validate(s, { side: 'ge', decisionId: engine.currentDecision(s)!.id, type: 'move.manhandle', to: 'uK4' } as Action)).toMatch(/B23.93/);
+  });
+  it('C2.6: a Gun fires at a target two levels below only at a range of at least two', () => {
+    // The house on a level 1 hill: level 1 of K4 stands at height 2; J4 (adjacent) and I4 (range 2) are at the foot.
+    const hill: Record<string, HexTerrainSpec> = { ...HOUSE, uK4: { ...HOUSE['uK4']!, elevation: 1 }, uK5: { ...HOUSE['uK5']!, elevation: 1 } };
+    const scenario = { firstSide: 'ge', sides: [{ side: 'ge', name: 'German', nationality: 'ge', elr: 3 }, { side: 'ru', name: 'Russian', nationality: 'ru', elr: 3 }] };
+    const probe = makeEngine({ board: 'u', terrain: hill, scenario, modules: ASL, pieces: [] });
+    const map = statics(probe.engine.env(probe.state)).map;
+    const ca = inCoveredArc(map.hex('uK4')!.cube, 0, map.hex('uJ4')!.cube) ? 0 : nearestSpine(map.hex('uK4')!.cube, 0, map.hex('uJ4')!.cube)!;
+    const { engine, state } = makeEngine({
+      board: 'u',
+      terrain: hill,
+      scenario,
+      modules: ASL,
+      pieces: [
+        { id: 'c2', def: 'ge.228c', side: 'ge', hex: 'uK4', level: 1 },
+        { id: 'g75', def: 'ge.AT75L', side: 'ge', heldBy: 'c2', tags: { ca } },
+        { id: 'r', def: 'ru.447', side: 'ru', hex: 'uJ4' },
+        { id: 'r2', def: 'ru.447', side: 'ru', hex: 'uI4' },
+      ],
+    });
+    const env = engine.env(state);
+    const illegal = (target: string) => env.query('ordnance.illegal', { shot: { weapon: 'g75', target, targetType: 'ITT' }, mode: 'prep', side: 'ge' }, null);
+    expect(illegal('uJ4')).toMatch(/2 levels below it only at a range of at least 2 \(ASLRB C2.6\)/);
+    expect(illegal('uI4') ?? '').not.toMatch(/C2.6/);
+  });
+});
+
+describe('the Starter Kit is untouched', () => {
+  it('a building-wide designation still fortifies every Location of the building and reveals on entry of any hex', () => {
+    const { engine, state } = makeEngine({
+      board: 'u',
+      terrain: HOUSE,
+      scenario: {
+        firstSide: 'ge',
+        sides: [{ side: 'ge', name: 'German', nationality: 'ge', elr: 3 }, { side: 'ru', name: 'Russian', nationality: 'ru', elr: 3 }],
+        forces: [{ side: 'ru', units: [], setup: { kind: 'area' as const, description: 'the house', hexes: ['uK4', 'uK5'] } }],
+        ssr: [{ module: FORTIFIED_MODULE, params: { side: 'ru', count: 1, within: 'setup' } }],
+      },
+      modules: SK,
+      extra: [fortifiedModule],
+      pieces: [{ id: 'g', def: 'ge.467', side: 'ge', hex: 'uJ4' }, { id: 'r', def: 'ru.447', side: 'ru', hex: 'uK5' }],
+      startPhase: 'APh',
+    });
+    const s = act(engine, state, { type: 'fortify.designate', buildings: ['u-B16'] }).state;
+    const env = engine.env(s);
+    expect(fortifiedState(env)).toEqual({ side: 'ru', buildings: ['u-B16'], revealed: [] });
+    expect(isFortified(env, 'uK4')).toBe(true);
+    expect(isFortified(env, 'uK5')).toBe(true);
+    expect(() => act(engine, s, { type: 'fortify.designate', locations: ['uK4'] })).toThrow();
+    const t = act(engine, s, { type: 'advance', units: ['g'], to: 'uK4' });
+    expect(t.state.pieces['g']!.loc).toEqual({ kind: 'hex', hex: 'uK4' });
+    expect(fortifiedState(engine.env(t.state))!.revealed).toEqual(['u-B16']);
+  });
+});

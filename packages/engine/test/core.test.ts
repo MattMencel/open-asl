@@ -202,6 +202,32 @@ describe('decisions and actions', () => {
     expect(e.legalActions(s, 'ger').map((a) => a.type).sort()).toEqual(['pass', 'shoot']);
   });
 
+  it('enumerates selected action types without invoking other generators', () => {
+    let calls = 0;
+    const extra: RuleModule = {
+      id: 'toy.costly',
+      install: (r) => r.action({
+        type: 'costly',
+        decisionKinds: ['main'],
+        legal: () => { calls++; return [{ type: 'costly' }]; },
+        resolve: () => {},
+      }),
+    };
+    const e = engineFor([toyCore, extra]);
+    const s = start(e);
+    const all = e.legalActions(s, 'ger');
+    calls = 0;
+    expect(e.legalActions(s, 'ger', ['pass', 'shoot', 'shoot', 'missing'])).toEqual(
+      all.filter((a) => a.type !== 'costly'),
+    );
+    expect(e.legalActions(s, 'ger', [])).toEqual([]);
+    expect(e.legalActions(s, 'rus', ['costly'])).toEqual([]);
+    expect(e.legalActions({ ...s, result: { winner: 'ger', reason: 'done' } }, 'ger', ['costly'])).toEqual([]);
+    expect(calls).toBe(0);
+    expect(e.legalActions(s, 'ger')).toEqual(all);
+    expect(calls).toBe(1);
+  });
+
   it('runs triggers and replacement effects', () => {
     const extras: RuleModule = {
       id: 'toy.extras',

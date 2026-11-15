@@ -5,6 +5,7 @@ import { sk2CoreModules } from '../src/sk2';
 import { sk3CoreModules } from '../src/sk3';
 import { T3 } from '../src/sk3/status';
 import { defaultVca } from '../src/sk3/vehicles';
+import { shotOutlook } from '../src/sk3/shotOutlook';
 import { RU_VS_GE, act, makeEngine, type PieceSpec } from './fixtures';
 
 /*
@@ -15,7 +16,7 @@ import { RU_VS_GE, act, makeEngine, type PieceSpec } from './fixtures';
 const extra = [...sk2CoreModules, ...sk3CoreModules];
 const t34 = (hex: string, tags: Record<string, string | number | boolean> = {}): PieceSpec => ({ id: 't34', def: 'ru.T34M43', side: 'ru', hex, tags: { vca: 0, ca: 0, ...tags } });
 
-function game(pieces: PieceSpec[], opts: { dice?: number[]; terrain?: Record<string, { terrain: string; features?: string[] }> } = {}) {
+function game(pieces: PieceSpec[], opts: { dice?: number[]; terrain?: Record<string, { terrain: string; features?: string[]; buildingId?: string }> } = {}) {
   return makeEngine({ pieces, scenario: RU_VS_GE, extra, startPhase: 'MPh', ...(opts.dice ? { dice: opts.dice } : {}), ...(opts.terrain ? { terrain: opts.terrain as never } : {}) });
 }
 const play = (engine: Engine, state: GameState, ...actions: (Omit<Action, 'decisionId' | 'side'> & { side?: string })[]) => {
@@ -317,6 +318,17 @@ describe('vehicle movement (SK4 3.3.2)', () => {
     const labels = shot.explain.map((x) => x.label);
     expect(labels).toContain('+4 moving vehicle (1 MP in your LOS)');
     expect(labels.some((l) => /in Motion/.test(l))).toBe(false);
+  });
+
+  it('the shot preview counts a moving target\u2019s MP without tracing the LOS (ASLRB A6.11): the same whether or not the Gun sees it', () => {
+    const preview = (blocked: boolean) => {
+      const { engine, state } = game([t34('yM9', { motion: true }), { id: 'pziv', def: 'ge.pzivf2', side: 'ge', hex: 'yM4', tags: { vca: 3, ca: 3 } }], { dice: [3, 3, 3, 3], ...(blocked ? { terrain: { yM6: { terrain: 'building-stone', buildingId: 'b' } } } : {}) });
+      let s = play(engine, state, { type: 'vmove.start', vehicle: 't34' });
+      s = act(engine, s, { type: 'vmove.stop' }).state;
+      return shotOutlook(engine.env(s), { weapon: 'pziv', target: 'yM9', targetType: 'VTT' }, 'first', 'ge', ['t34']).parts;
+    };
+    expect(preview(true)).toEqual(preview(false));
+    expect(preview(false)).toContain('+4 moving vehicle (1 MP spent; those in your LOS count when you fire)');
   });
 
   it('vehicular MGs are part of the vehicle: never dropped, passed to Infantry or destroyed (SK4 7.8)', () => {

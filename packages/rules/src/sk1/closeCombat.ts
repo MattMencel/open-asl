@@ -60,6 +60,8 @@ export interface CcAttackPlan {
   defenseFp: number;
   odds: string;
   drm: number;
+  /** Each unit's CC FP behind the totals (a pinned unit's halved), for the log. */
+  fp?: { attack: [PieceId, number][]; defense: [PieceId, number][] };
 }
 
 export const CC_HEX = 'ccHex';
@@ -274,7 +276,8 @@ export const closeCombatModule: RuleModule = {
         else delete d.ext[CC];
       },
     });
-    r.event<{ hex: HexId; side: SideId; attack: CcAttack; odds: string; drm: number; dr: number; kill: number; result: string }>({
+    // `fp`: each attacker's and target's CC FP as the odds were worked out (a pinned unit's halved, SK4 Pin), for the log.
+    r.event<{ hex: HexId; side: SideId; attack: CcAttack; odds: string; drm: number; dr: number; kill: number; result: string; fp?: { attack: [PieceId, number][]; defense: [PieceId, number][] } }>({
       type: 'sk1.cc.attack',
       apply() {},
     });
@@ -610,11 +613,15 @@ export function planAttack(env: QueryEnv, side: SideId, at: CcAttack): CcAttackP
   if (attackers.length === 0) return null;
   const targets = at.targets.filter((t) => env.state.pieces[t]?.loc.kind === 'hex');
   if (targets.length === 0) return null;
-  const attackFp = attackers.reduce((x, id) => x + fpForCc(env, id, 'attack'), 0);
-  const defenseFp = targets.reduce((x, id) => x + fpForCc(env, id, 'defense', attackers), 0);
+  const fp = {
+    attack: attackers.map((id) => [id, fpForCc(env, id, 'attack')] as [PieceId, number]),
+    defense: targets.map((id) => [id, fpForCc(env, id, 'defense', attackers)] as [PieceId, number]),
+  };
+  const attackFp = fp.attack.reduce((x, [, n]) => x + n, 0);
+  const defenseFp = fp.defense.reduce((x, [, n]) => x + n, 0);
   const odds = ccOdds(env, attackFp, defenseFp);
   if (!odds) return null;
-  return { attackers, targets, attackFp, defenseFp, odds, drm: env.query('cc.drm', { hex, attackers, targets, side }, 0) };
+  return { attackers, targets, attackFp, defenseFp, odds, drm: env.query('cc.drm', { hex, attackers, targets, side }, 0), fp };
 }
 
 /** One declared CC attack, planned and rolled, waiting for its result to be applied. */
@@ -696,7 +703,7 @@ function applyAttack(ctx: Ctx, { side, plan, roll }: CcAttackRoll) {
       ctx.proc<CasualtyFn>(MP.casualtyReduce)(ctx, victim, 'Close Combat');
     }
   }
-  ctx.emit('sk1.cc.attack', { hex, side, attack: { attackers, targets }, odds, drm, dr: roll.total, kill, result });
+  ctx.emit('sk1.cc.attack', { hex, side, attack: { attackers, targets }, odds, drm, dr: roll.total, kill, result, ...(plan.fp ? { fp: plan.fp } : {}) });
 }
 
 /** CC strength: SMC = 1; MMC = FP (halved if pinned, via query). */

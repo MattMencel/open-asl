@@ -65,6 +65,11 @@ export interface FireAttackCtx {
   moving?: { assault: boolean; viaRoadIntoWoodsRoad: boolean; viaRoadIntoOrchardRoad?: boolean; hazardous?: boolean; from?: HexId | null; vehicle?: boolean; pinned?: boolean };
   /** Worst LOS hindrance among firers. */
   hindrance: number;
+  /**
+   * A preview before the attack is declared: nothing that needs the LOS is worked out (ASLRB A6.11, SK4 3.2.1). The
+   * Hindrance is 0 and a unit that came along a Woods-Road/Orchard-Road is taken as out on the road.
+   */
+  losBlind?: boolean;
   /** Residual FP attack (no FG, no cowering). */
   residual?: boolean;
   /** An ordnance hit being resolved on the IFT (SK4 3.2.4): the Target Type, whether it was a Critical Hit, and the column. */
@@ -85,6 +90,8 @@ export interface FireAttackCtx {
   caChange?: { weapon: PieceId; spines: number; mount: Mount };
   /** The turret hexspine a vehicle's MG/IFE attack turns to first (`FireDeclaration.tca`). */
   tca?: number;
+  /** Full ASL: a Snap Shot at the hexside the moving stack crossed (`FireDeclaration.snap`, ASLRB A8.15). */
+  snap?: [HexId, HexId];
 }
 
 export interface FireDeclaration {
@@ -111,6 +118,13 @@ export interface FireDeclaration {
    * (A6.11). Never set in the Starter Kit.
    */
   at?: Record<HexId, [HexId, HexId]>;
+  /**
+   * Full ASL, a Snap Shot (ASLRB A8.15): the hexside the moving stack crossed in entering the target hex, named by the
+   * hex entered and the hex it came from (A2.2 order). Every firing Location traces its LOS to the whole hexside (both
+   * corners) instead of the hex centre; the attack is Area Fire with no FFNAM/FFMO and no TEM of the hex entered, and
+   * leaves no Residual FP (A8.223). Never set in the Starter Kit.
+   */
+  snap?: [HexId, HexId];
 }
 
 const NO_LOS_DATA: LosTrace = { clear: true, hindrance: 0, parts: [] };
@@ -119,7 +133,7 @@ const NO_LOS_DATA: LosTrace = { clear: true, hindrance: 0, parts: [] };
  * in full ASL a stack in Bypass is traced to the point the firing hex chose (`FireDeclaration.at`), with the A4.34 rule
  * for the centre (`'fire.los'`, `asl/bypass.ts`).
  */
-export const firerLos = (env: QueryEnv, from: LocId, decl: Pick<FireDeclaration, 'target' | 'at'>): LosTrace =>
+export const firerLos = (env: QueryEnv, from: LocId, decl: Pick<FireDeclaration, 'target' | 'at' | 'snap'>): LosTrace =>
   env.query('fire.los', { from, decl }, env.query('los.trace', { from, to: decl.target }, NO_LOS_DATA));
 
 /** The directing leaders of a declaration (accepts the old single-director form). */
@@ -157,7 +171,19 @@ declare module '@asl/engine' {
     /** Reason a declaration is illegal, or null. Contributions return the first problem found. */
     'fire.illegal': { ctx: { decl: FireDeclaration; mode: FireMode; side: SideId; moving?: PieceId[] }; value: string | null };
     /** The LOS of a firing Location to a declaration's target (see `firerLos`); the default is the centre-to-centre trace. */
-    'fire.los': { ctx: { from: LocId; decl: Pick<FireDeclaration, 'target' | 'at'> }; value: LosTrace };
+    'fire.los': { ctx: { from: LocId; decl: Pick<FireDeclaration, 'target' | 'at' | 'snap'> }; value: LosTrace };
+    /**
+     * Full ASL: the hexside a Snap Shot at the moving stack in `target` may be traced to (ASLRB A8.15: the one it crossed in
+     * entering that hex, while that entry is its latest MF expenditure), or null. Never one in the Starter Kit.
+     */
+    'fire.snapSide': { ctx: { target: LocId }; value: [HexId, HexId] | null };
+    /** Whether a Defensive First Fire attack leaves Residual FP (not a Snap Shot, ASLRB A8.223). */
+    'fire.leavesResidual': { ctx: { attack: FireAttackCtx }; value: boolean };
+    /**
+     * Full ASL: whether `side` may fire into its own Location `target` at the enemy units there, which are not in Melee
+     * (ASLRB A7.21 TPBF, A8.4, A12.151). The Starter Kit allows it only at a vehicle (`fire.ownHexAllowed`).
+     */
+    'fire.ownLocation': { ctx: { target: LocId; side: SideId; firer?: PieceId }; value: boolean };
     /**
      * Full ASL: the points other than the centre a firer may trace its LOS to in a target Location (ASLRB A4.34: the corners
      * of the hexsides a stack in Bypass went along there), as `FireDeclaration.at` values. None in the Starter Kit.
@@ -178,6 +204,12 @@ export const FP = {
   applyResult: 'sk1.fire.applyResult',
   /** (ctx, info: AttackResolvedInfo) => void, after an attack on a Location has resolved; a no-op by default. */
   attackResolved: 'sk1.fire.attackResolved',
+  /**
+   * (ctx, info: BeforeApplyInfo) => boolean, before an ordnance or DC attack's IFT result is applied to the occupants of
+   * a Location: true when a rule has already settled the Location (full ASL: the building collapsed into rubble on the
+   * Original DR, ASLRB B24.11), so the IFT result is not applied. False by default.
+   */
+  beforeApply: 'sk1.fire.beforeApply',
 } as const;
 
 /**
@@ -192,8 +224,33 @@ export interface AttackResolvedInfo {
   by: 'dc' | 'ft' | 'he' | 'other';
   result: IftResult['kind'] | null;
   malfunctioned: boolean;
+  /** The firing hex and side of a single-weapon attack (ordnance), for rules that look at its line of fire. */
+  from?: HexId;
+  side?: SideId;
+  /** The IFT result of the Original DR (no DRM) on the column fired, for rules keyed to an Original K or KIA (ASLRB B25.12, B25.13). */
+  originalResult?: IftResult['kind'] | null;
+  originalDr?: number;
+  /** A HEAT round, or a Collateral Attack (ASLRB B25.13 excludes both from Terrain Fires in their own way). */
+  heat?: boolean;
+  collateral?: boolean;
+  /** The rubble check already took the Location (ASLRB B24.6: no Flame from an attack that made rubble). */
+  rubbled?: boolean;
 }
 export type AttackResolvedFn = (ctx: Ctx, info: AttackResolvedInfo) => void;
+
+/** An ordnance or DC attack about to apply its IFT result: what a rule needs to judge the Location first (ASLRB B24.11). */
+export interface BeforeApplyInfo {
+  target: LocId;
+  by: 'dc' | 'he' | 'other';
+  /** The IFT column the attack is resolved on (after Area Fire reductions, B24.11) and its Original DR. */
+  column: number;
+  originalDr: number;
+  caliber?: number;
+  heat?: boolean;
+  side?: SideId;
+  from?: HexId;
+}
+export type BeforeApplyFn = (ctx: Ctx, info: BeforeApplyInfo) => boolean;
 
 export interface FireOutcome {
   column: number | null;
@@ -234,6 +291,11 @@ const fireLog = (env: QueryEnv): FireLog =>
  * the stack on one expenditure (`expenditureKey`).
  */
 const pairKey = (loc: LocId, target: LocId, expenditure?: string) => `${loc}>${target}${expenditure ? `@${expenditure}` : ''}`;
+/**
+ * The target of a declaration for the Mandatory Fire Group rule: its Location, or (full ASL) the hexside a Snap Shot is
+ * traced to, a different aiming point, so Snap Shots combine only with Snap Shots (ASLRB A7.55, A8.15).
+ */
+const fgTarget = (decl: Pick<FireDeclaration, 'target' | 'snap'>): string => (decl.snap ? `${decl.target}|snap` : decl.target);
 /** The pieces that have attacked `target` from `loc` this phase on the IFT (a moving target: on this MF/MP expenditure). */
 export const firedAt = (env: QueryEnv, loc: LocId, target: LocId, moving: boolean): PieceId[] =>
   fireLog(env).pairs[pairKey(loc, target, moving ? expenditureKey(env) : undefined)] ?? [];
@@ -356,8 +418,10 @@ export function discloseDrm(env: QueryEnv, attack: FireAttackCtx, column: number
  * symbol in that hex. A Fire Group from several hexes is judged by the LOS kindest to the target (as for
  * Hindrances, the worst among firers): any firer seeing it through the woods leaves it the woods TEM.
  */
-export function onWoodsRoad(env: QueryEnv, moving: FireAttackCtx['moving'], firerLocs: LocId[], target: LocId): boolean {
+export function onWoodsRoad(env: QueryEnv, moving: FireAttackCtx['moving'], firerLocs: LocId[], target: LocId, blind = false): boolean {
   if (!moving?.viaRoadIntoWoodsRoad) return false;
+  // A preview before the attack is declared may not trace the LOS (ASLRB A6.11): it takes the unit as out on the road.
+  if (blind) return true;
   return !firerLocs.some((h) => !roadPoints(env, target).some((toAt) => !env.query('los.trace', { from: h, to: target, ...(toAt ? { toAt } : {}) }, NO_LOS_DATA).woods?.includes(hexOfLoc(target))));
 }
 
@@ -375,17 +439,18 @@ const roadPoints = (env: QueryEnv, target: LocId): (LosPoint | undefined)[] => {
  * FFMO against a firer whose LOS stays on the road in that hex (and, the orchard hindering nowhere else, has no
  * Hindrance). A Fire Group is judged by the LOS kindest to the target, as on a Woods-Road.
  */
-export function onOrchardRoad(env: QueryEnv, moving: FireAttackCtx['moving'], firerLocs: LocId[], target: LocId): boolean {
+export function onOrchardRoad(env: QueryEnv, moving: FireAttackCtx['moving'], firerLocs: LocId[], target: LocId, blind = false): boolean {
   if (!moving?.viaRoadIntoOrchardRoad) return false;
+  if (blind) return true;
   return !firerLocs.some((h) => !roadPoints(env, target).some((toAt) => !env.query('los.trace', { from: h, to: target, ...(toAt ? { toAt } : {}) }, NO_LOS_DATA).orchard?.includes(hexOfLoc(target))));
 }
 
 /** Out on a road through other terrain, as Open Ground for FFMO: a Woods-Road or an Orchard-Road (SK1/SK4 1.1.1). */
-export const onRoadInTheOpen = (env: QueryEnv, moving: FireAttackCtx['moving'], firerLocs: LocId[], target: LocId): boolean =>
-  onWoodsRoad(env, moving, firerLocs, target) || onOrchardRoad(env, moving, firerLocs, target);
+export const onRoadInTheOpen = (env: QueryEnv, moving: FireAttackCtx['moving'], firerLocs: LocId[], target: LocId, blind = false): boolean =>
+  onWoodsRoad(env, moving, firerLocs, target, blind) || onOrchardRoad(env, moving, firerLocs, target, blind);
 
 const attackFirerLocs = (env: QueryEnv, attack: FireAttackCtx) => [...new Set(attack.parts.map((p) => partLoc(env, p)))];
-const attackOnWoodsRoad = (env: QueryEnv, attack: FireAttackCtx) => onWoodsRoad(env, attack.moving, attackFirerLocs(env, attack), attack.target);
+const attackOnWoodsRoad = (env: QueryEnv, attack: FireAttackCtx) => onWoodsRoad(env, attack.moving, attackFirerLocs(env, attack), attack.target, !!attack.losBlind);
 
 /** FFNAM (SK1 3.3.1): Defensive First Fire at Infantry not using Assault Movement (nor all pinned there already). */
 const ffnamApplies = (attack: FireAttackCtx) => !!attack.moving && !attack.moving.assault && !attack.moving.vehicle && !attack.moving.pinned;
@@ -395,7 +460,7 @@ const ffmoApplies = (env: QueryEnv, attack: FireAttackCtx) =>
   !attack.moving.vehicle &&
   !attack.moving.pinned &&
   attack.hindrance === 0 &&
-  (env.query('hex.openGround', { hex: attack.target }, false) || onRoadInTheOpen(env, attack.moving, attackFirerLocs(env, attack), attack.target));
+  (env.query('hex.openGround', { hex: attack.target }, false) || onRoadInTheOpen(env, attack.moving, attackFirerLocs(env, attack), attack.target, !!attack.losBlind));
 export function buildAttack(
   env: QueryEnv,
   decl: FireDeclaration,
@@ -443,6 +508,7 @@ export function buildAttack(
     hindrance,
     ...(decl.caChange ? { caChange: decl.caChange } : {}),
     ...(decl.tca !== undefined ? { tca: decl.tca } : {}),
+    ...(decl.snap ? { snap: decl.snap } : {}),
   };
 }
 
@@ -816,6 +882,12 @@ function basicIllegal(env: QueryEnv, decl: FireDeclaration, mode: FireMode, side
   const map = statics(env).map;
   if (decl.units.length + decl.sw.length === 0) return 'No firers';
   if (!locExists(env, decl.target)) return 'Unknown target hex';
+  // A Snap Shot only where a rule offers one (full ASL, ASLRB A8.15): the hexside the moving stack just crossed.
+  if (decl.snap) {
+    const side = env.query('fire.snapSide', { target: decl.target }, null);
+    if (!side) return 'No Snap Shot here: the moving stack has crossed no hexside into this hex on its latest MF (ASLRB A8.15)';
+    if ([...side].sort().join('|') !== [...decl.snap].sort().join('|')) return 'A Snap Shot is traced to the hexside the stack crossed (ASLRB A8.15)';
+  }
   const targetHex = hexOfLoc(decl.target);
   const firers = new Set<PieceId>();
   for (const id of decl.units) {
@@ -918,7 +990,8 @@ function basicIllegal(env: QueryEnv, decl: FireDeclaration, mode: FireMode, side
         break;
       case 'fpf':
         if (m === 'prep') return `${id} cannot fire`;
-        if (m === 'final' && statics(env).map.distance(hexOf(env.state, pieceOf(env, id))!, targetHex) !== 1) {
+        // FPF is against ADJACENT or same-hex units (ASLRB A8.31): the firer's own Location where full ASL allows fire into it.
+        if (m === 'final' && statics(env).map.distance(hexOf(env.state, pieceOf(env, id))!, targetHex) !== 1 && !(locOf(env.state, pieceOf(env, id)) === decl.target && env.query('fire.ownLocation', { target: decl.target, side }, false))) {
           return 'Final Protective Fire is only possible against an adjacent hex';
         }
         break;
@@ -926,7 +999,9 @@ function basicIllegal(env: QueryEnv, decl: FireDeclaration, mode: FireMode, side
         if (m === 'final') return `${id} is marked Final Fire`;
         if (m === 'first') {
           const at = hexOf(env.state, pieceOf(env, id));
-          if (!at || statics(env).map.distance(at, targetHex) !== 1) {
+          // "only at units in an adjacent (or same) hex" (ASLRB A8.4): the same Location where full ASL allows the fire.
+          const own = locOf(env.state, pieceOf(env, id)) === decl.target && env.query('fire.ownLocation', { target: decl.target, side }, false);
+          if (!own && (!at || statics(env).map.distance(at, targetHex) !== 1)) {
             return `${id} is marked First Fire and may only fire at an adjacent hex`;
           }
         }
@@ -953,7 +1028,11 @@ function basicIllegal(env: QueryEnv, decl: FireDeclaration, mode: FireMode, side
   const ownHexIllegal = (piece: Piece, firer: Piece): string | null => {
     const loc = locOf(env.state, piece)!;
     if (loc !== decl.target) return adjacentLocs(env, loc).includes(decl.target) ? null : 'Cannot fire into another Location of its hex that is not ADJACENT';
-    const base = vehiclesAt(env, loc, otherSide(env.state, side), true).length > 0 || (isVehicleDef(defOf(env, firer)) && unitsAt(env, loc, otherSide(env.state, side)).length > 0);
+    // Full ASL: at any enemy unit there not in Melee (`fire.ownLocation`; ASLRB A7.21, A8.4, A12.151).
+    const base =
+      vehiclesAt(env, loc, otherSide(env.state, side), true).length > 0 ||
+      (isVehicleDef(defOf(env, firer)) && unitsAt(env, loc, otherSide(env.state, side)).length > 0) ||
+      env.query('fire.ownLocation', { target: loc, side, firer: firer.id }, false);
     // A rule pack may open own-hex fire further (SK4 8.1.8.7: Banzai units in the AFPh).
     const ok = env.query('fire.ownHexAllowed', { firer: firer.id, target: decl.target }, base) && unitsAt(env, loc, otherSide(env.state, side)).length > 0;
     return ok ? null : 'Cannot fire into own hex outside Melee rules';
@@ -1027,7 +1106,7 @@ function basicIllegal(env: QueryEnv, decl: FireDeclaration, mode: FireMode, side
   const exp = moving ? expenditureKey(env) : undefined;
   for (const hex of locs) {
     // A vehicle's IFE and MGs never join the other units in their hex, so their attacks bind only each other (sk3.vehicleMg).
-    const used = log.pairs[pairKey(hex, decl.target, exp)]?.filter((id) => !(env.state.pieces[id] && isFt(env, id)) && !vehicleArmament(env, id));
+    const used = log.pairs[pairKey(hex, fgTarget(decl), exp)]?.filter((id) => !(env.state.pieces[id] && isFt(env, id)) && !vehicleArmament(env, id));
     if (used?.length === 0) continue;
     if (used && mode !== 'subsequentFirst' && mode !== 'fpf' && !hasFt) {
       const allSwRof = decl.units.length === 0;
@@ -1073,7 +1152,7 @@ function resolveFire(
       const [white, colored] = roll.dice as [number, number];
       const cowered = white === colored && cowerShift > 0;
       ctx.emit('sk1.fire.noLos', {
-        attack: { mode, target: decl.target, parts: blind.map((p) => p.piece), ...(blindDirectors.length ? { directors: blindDirectors } : {}), ...(decl.at ? { at: decl.at } : {}) },
+        attack: { mode, target: decl.target, parts: blind.map((p) => p.piece), ...(blindDirectors.length ? { directors: blindDirectors } : {}), ...(decl.at ? { at: decl.at } : {}), ...(decl.snap ? { snap: decl.snap } : {}) },
         from: [...blocked.keys()].sort(),
         blockedBy: [...blocked.values()],
         dr: [white, colored],
@@ -1088,7 +1167,7 @@ function resolveFire(
       return { column: null, dr: [white, colored], cowered, results: {}, rofKept, malfunctioned, residualFp: 0 };
     }
     ctx.emit('sk1.fire.noLos', {
-      attack: { mode, target: decl.target, parts: blind.map((p) => p.piece), ...(blindDirectors.length ? { directors: blindDirectors } : {}), ...(decl.at ? { at: decl.at } : {}) },
+      attack: { mode, target: decl.target, parts: blind.map((p) => p.piece), ...(blindDirectors.length ? { directors: blindDirectors } : {}), ...(decl.at ? { at: decl.at } : {}), ...(decl.snap ? { snap: decl.snap } : {}) },
       from: [...blocked.keys()].sort(),
       blockedBy: [...blocked.values()],
     });
@@ -1121,7 +1200,7 @@ function resolveFire(
   const drm = drmRes.value;
 
   ctx.emit('sk1.fire.attack', {
-    attack: { mode, target: decl.target, parts: attack.parts.map((p) => p.piece), ...(attack.directors?.length ? { directors: attack.directors } : {}), ...(decl.at ? { at: decl.at } : {}) },
+    attack: { mode, target: decl.target, parts: attack.parts.map((p) => p.piece), ...(attack.directors?.length ? { directors: attack.directors } : {}), ...(decl.at ? { at: decl.at } : {}), ...(decl.snap ? { snap: decl.snap } : {}) },
     from: [...new Set(attack.parts.map((p) => partLoc(ctx, p)))].sort(),
     fp,
     fpExplain: fpNotes(ctx, attack),
@@ -1141,7 +1220,7 @@ function resolveFire(
   // owner chooses not to retain the ROF (SK1 3.3.1): the amount it would leave is reported for that choice.
   let residualFp = 0;
   let rofResidual: FireOutcome['rofResidual'];
-  if ((mode === 'first' || mode === 'subsequentFirst' || mode === 'fpf') && column !== null) {
+  if ((mode === 'first' || mode === 'subsequentFirst' || mode === 'fpf') && column !== null && ctx.query('fire.leavesResidual', { attack }, true)) {
     // An ATR leaves no Residual FP (SK4 4.4.4).
     const atrs = attack.parts.filter((p) => p.kind === 'sw' && isAtr(ctx, p.piece)).map((p) => p.piece);
     const outside = outsideDrm(drmRes, ['sk1.drm.hindrance', 'sk1.drm.cx', 'sk1.drm.leadership']);
@@ -1172,6 +1251,9 @@ function resolveFire(
     by: ft ? 'ft' : 'other',
     result: column === null ? null : statics(ctx).tables.ift(column, roll.total + drm).kind,
     malfunctioned: !!ft && (malfunctioned.includes(ft) || removed.includes(ft)),
+    originalResult: column === null ? null : statics(ctx).tables.ift(column, roll.total).kind,
+    originalDr: roll.total,
+    side: attack.side,
   });
 
   const fpfUsers = fpfUsersOf(ctx, whole, mode);
@@ -1187,7 +1269,7 @@ function resolveFire(
   const pairs = { ...log.pairs };
   const exp = opts.moving ? expenditureKey(ctx) : undefined;
   for (const p of attack.parts) {
-    const k = pairKey(firerLoc(ctx, p.firer), decl.target, exp);
+    const k = pairKey(firerLoc(ctx, p.firer), fgTarget(decl), exp);
     pairs[k] = [...new Set([...(pairs[k] ?? []), p.piece])];
   }
   const directed = { ...log.directed };
@@ -1490,6 +1572,7 @@ export const fireResultModule: RuleModule = {
   install(r) {
     r.procedure<ApplyResultFn>(FP.applyResult, () => applyIftResult);
     r.procedure<AttackResolvedFn>(FP.attackResolved, () => () => {});
+    r.procedure<BeforeApplyFn>(FP.beforeApply, () => () => false);
   },
 };
 
@@ -1516,8 +1599,8 @@ export function simpleDeclarations(env: QueryEnv, side: SideId, targets: LocId[]
     const sws = ps.flatMap((p) => swHeldBy(env.state, p.id)).filter((s) => sw(env, s) && !isMalf(s) && eligible(s) && sw(env, s)?.type !== 'DC').map((s) => s.id);
     const leader = ps.find((p) => smc(env, p) && !isPinned(p));
     for (const t of targets) {
-      // Into the firers' own Location only at an enemy vehicle there (SK4 3.2.2.1).
-      if (t === hex && vehiclesAt(env, hex, otherSide(env.state, side), true).length === 0) continue;
+      // Into the firers' own Location only at an enemy vehicle there (SK4 3.2.2.1); full ASL at any enemy not in Melee.
+      if (t === hex && vehiclesAt(env, hex, otherSide(env.state, side), true).length === 0 && !env.query('fire.ownLocation', { target: t, side }, false)) continue;
       // Only the SWs that may fire on the IFT at this target: a BAZ, PSK or mortar fires on its own To Hit
       // Table and a short-ranged SW may be out of range, and either would make the whole stack's attack illegal.
       const iftSw = sws.filter(

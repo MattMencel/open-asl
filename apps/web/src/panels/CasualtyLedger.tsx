@@ -20,8 +20,12 @@ export type SideTally =
   | { kind: 'cvp'; points: number; goal?: number; effect?: 'wins' | 'denies' }
   /** The AFV race of an `afvLead` condition (S21): enemy AFV eliminated plus own AFV exited, against own AFV lost. */
   | { kind: 'afv'; points: number; eliminated: number; exited: number; lost: number; countsExits: boolean }
-  /** The FP a `losFirepower` condition (S22) counts now: Good Order units seeing the hexes, against its goal. */
-  | { kind: 'fp'; points: number; goal: number; units: LosFirepowerUnit[]; label: string }
+  /**
+   * The FP a `losFirepower` condition counts: Good Order units seeing the hexes, against its goal. It is a LOS check, so
+   * while the game is on it is `pending` (no points, no units): no LOS may be checked outside an attack (ASLRB A6.11)
+   * and the condition is judged at game end.
+   */
+  | { kind: 'fp'; points: number; goal: number; units: LosFirepowerUnit[]; label: string; pending?: boolean }
   /** The VP of a `goodOrderVp` condition (S17): Good Order Infantry in the area now, against its goal. */
   | { kind: 'area'; points: number; goal: number; units: AreaVpUnit[]; label: string }
   /**
@@ -66,6 +70,7 @@ export function sideTally(env: QueryEnv, scenario: ScenarioDef, side: SideId): S
   }
   const fp = scenario.victory.find((v): v is Extract<VictoryCondition, { kind: 'losFirepower' }> => v.kind === 'losFirepower' && v.side === side);
   if (fp) {
+    if (!env.state.result) return { kind: 'fp', points: 0, goal: fp.fp, units: [], label: fp.hexesLabel ?? 'hexes', pending: true };
     const t = losFirepower(env, fp);
     return { kind: 'fp', points: t.total, goal: fp.fp, units: t.units, label: fp.hexesLabel ?? 'hexes' };
   }
@@ -252,12 +257,20 @@ export function CasualtyLedger({ env, scenario, first, sideName, onClose }: Prop
                 <h3>
                   <span className="sw" /> {sideName(side)}
                 </h3>
-                <div className="total">
-                  <b>{tally.points}</b> FP
-                  <span className={`goal ${tally.points >= tally.goal ? 'reached' : ''}`}>wins at game end with {tally.goal}</span>
-                </div>
-                <p className="muted small">Good Order units with a LOS to the {tally.label}, each with the best attack it could make on one of them.</p>
-                {tally.units.length === 0 ? (
+                {tally.pending ? (
+                  <p className="muted small">
+                    Judged at game end: the FP of the Good Order units with a LOS to the {tally.label}, each with the best attack it could make on one of them, against {tally.goal}. No LOS is checked before then (ASLRB A6.11).
+                  </p>
+                ) : (
+                  <>
+                    <div className="total">
+                      <b>{tally.points}</b> FP
+                      <span className={`goal ${tally.points >= tally.goal ? 'reached' : ''}`}>wins at game end with {tally.goal}</span>
+                    </div>
+                    <p className="muted small">Good Order units with a LOS to the {tally.label}, each with the best attack it could make on one of them.</p>
+                  </>
+                )}
+                {tally.pending ? null : tally.units.length === 0 ? (
                   <p className="ledger-empty">No unit sees the {tally.label}.</p>
                 ) : (
                   <ul className="ledger-rows">

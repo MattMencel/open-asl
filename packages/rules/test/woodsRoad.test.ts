@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Engine, GameState } from '@asl/engine';
-import { moveState, statics } from '../src';
+import { buildAttack, firstFireTargets, moveState, movingInfo, statics } from '../src';
 import { act, makeEngine } from './fixtures';
 
 // Board y: an American squad comes up the road M3-M4-M5; M4 is a Woods-Road hex. A German squad in M7
@@ -76,6 +76,21 @@ describe('Woods-Road (SK1 1.1.1)', () => {
     const labels = drmLabels(act(engine, s, { type: 'defFire', decl: { units: ['g1'], sw: [], target: 'yM4' } }).events);
     expect(labels).not.toContain('-1 FFMO');
     expect(labels).not.toContain('no Woods TEM: moving along Woods-Road');
+  });
+
+  it('a preview before the attack is declared does not trace the LOS (ASLRB A6.11): the same DRM whatever the LOS crosses', () => {
+    const preview = (woods: boolean) => {
+      const { engine, state } = setup();
+      if (woods) woodsInSight(engine, state, 'yM4');
+      const s = act(engine, act(engine, state, { type: 'move.start', units: ['a1'] }).state, { type: 'move.step', to: 'yM4' }).state;
+      const env = engine.env(s);
+      const ms = moveState(env)!;
+      const attack = { ...buildAttack(env, { units: ['g1'], sw: [], target: 'yM4' }, 'first', 'ge', firstFireTargets(env, ms), movingInfo(env, ms)), hindrance: 0, losBlind: true };
+      return env.explain('fire.drm', { attack }, 0).trace.filter((t) => !t.suppressedBy && t.label).map((t) => t.label);
+    };
+    expect(preview(true)).toEqual(preview(false));
+    // Taken as out on the road, the firer's best case, as the Hindrance is taken as none.
+    expect(preview(true)).toContain('-1 FFMO');
   });
 });
 

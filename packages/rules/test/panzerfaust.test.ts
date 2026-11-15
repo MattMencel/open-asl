@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Engine, GameState } from '@asl/engine';
-import { panzerfaustModule, pfCap, pfMaxRange, pfUsed } from '../src';
+import { panzerfaustModule, pfCap, pfCheckNeed, pfCheckNeedText, pfMaxRange, pfUsed } from '../src';
 import { sk2CoreModules } from '../src/sk2';
 import { sk3CoreModules } from '../src/sk3';
 import { act, makeEngine, type PieceSpec } from './fixtures';
@@ -105,6 +105,20 @@ describe('Panzerfausts (SK4 4.4.2)', () => {
     const r2 = act(six.engine, six.state, { type: 'fire.pf', pf: { unit: 'g', target: 'yK6', targetType: 'VTT' } });
     expect(ev(r2, 'sk3.pf.check')[0]).toMatchObject({ result: 'pinned' });
     expect(r2.state.pieces['g']!.tags['pinned']).toBe(true);
+  });
+
+  it('a leader alone takes +2: his dr of 2 is a final 4 and finds no PF, and the roll says he needs a 1', () => {
+    const { engine, state } = game({ dice: [2], pieces: [{ id: 'ldr', def: 'ge.L80', side: 'ge', hex: 'yK5' }, { id: 't34', def: 'ru.T34M43', side: 'ru', hex: 'yK6', tags: { vca: 0, ca: 0 } }] });
+    const r = act(engine, state, { type: 'fire.pf', pf: { unit: 'ldr', target: 'yK6', targetType: 'VTT' } });
+    expect(ev(r, 'sk3.pf.check')[0]).toMatchObject({ dr: 2, drm: 2, final: 4, result: 'none' });
+    expect(ev(r, 'dice.rolled')[0]!['label']).toBe('PF check by ldr: needs dr ≤ 1 (+2 SMC)');
+  });
+
+  it('states the dr the unit needs: 3 less the drm, none past +3, never an original 6', () => {
+    expect([-1, 0, 1, 2, 3, 4].map(pfCheckNeed)).toEqual([4, 3, 2, 1, 0, 0]);
+    expect(pfCheckNeedText(0, [])).toBe('dr ≤ 3');
+    expect(pfCheckNeedText(2, ['+2 SMC'])).toBe('dr ≤ 1 (+2 SMC)');
+    expect(pfCheckNeedText(3, ['+1 CX', '+2 SMC'])).toBe('no dr can succeed (+1 CX, +2 SMC)');
   });
 
   it('a leader in the firer\'s hex may direct the To Hit DR (ASL A7.531), not the PF check; one elsewhere may not', () => {

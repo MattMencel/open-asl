@@ -24,6 +24,45 @@ const testFire: RuleModule = {
 const terrain = { yP5: { terrain: 'building-stone' }, yO5: { terrain: 'orchard' } };
 
 describe('game log', () => {
+  it('a rout step that drew Interdiction carries the LOS it was interdicted along, to be drawn like a shot\u2019s', () => {
+    // Open Ground from N5 to the woods at L5; a German squad at P5 sees M5 (SK1 3.6).
+    const { engine, state } = makeEngine({
+      startPhase: 'RtPh',
+      terrain: { yL5: { terrain: 'woods' } },
+      dice: [3, 3, 3, 3],
+      pieces: [
+        { id: 'a1', def: 'am.747', side: 'am', hex: 'yN5', tags: { broken: true, dm: true } },
+        { id: 'g1', def: 'ge.467', side: 'ge', hex: 'yP5' },
+      ],
+    });
+    const t = act(engine, state, { type: 'rout.step', unit: 'a1', to: 'yM5' });
+    const line = describeEvents(engine.env(t.state), t.events).find((l) => l.text.startsWith('Rout:'))!;
+    expect(line.text).toMatch(/Interdiction by/);
+    expect(line.los).toEqual({ from: ['yP5'], to: 'yM5' });
+  });
+
+  it('a cowering attack shows the column it came to and the one it cowered to (SK1 3.2)', () => {
+    const { engine, state } = makeEngine({ terrain, pieces: [{ id: 'a1', def: 'am.747', side: 'am', hex: 'yN5' }, { id: 'g1', def: 'ge.467', side: 'ge', hex: 'yO5' }] });
+    const ev = { seq: 1, type: 'sk1.fire.attack', payload: { attack: { mode: 'first', target: 'yO5', parts: ['a1'] }, from: ['yN5'], fp: 10, column: 6, dr: [6, 6], drm: 1, cowered: true, explain: [] } };
+    const lines = describeEvents(engine.env(state), [ev] as never).map((l) => l.text.trim());
+    expect(lines[0]).toMatch(/: 10 FP → 8 column, cowers to the 6 column, DR /);
+  });
+
+  it('writes the strengths behind Close Combat odds, unit by unit (a pinned unit at half FP)', () => {
+    const { engine, state } = makeEngine({
+      terrain,
+      pieces: [
+        { id: 'a1', def: 'am.747', side: 'am', hex: 'yO5' },
+        { id: 'a2', def: 'am.747', side: 'am', hex: 'yO5', tags: { pinned: true } },
+        { id: 'g1', def: 'ge.467', side: 'ge', hex: 'yO5' },
+      ],
+    });
+    // 4 + 2 (the pinned one, halved) = 6 against 4: 3:2.
+    const ev = { seq: 1, type: 'sk1.cc.attack', payload: { hex: 'yO5', side: 'am', attack: { attackers: ['a1', 'a2'], targets: ['g1'] }, odds: '3:2', drm: 0, dr: 4, kill: 6, result: 'eliminated', fp: { attack: [['a1', 4], ['a2', 2]], defense: [['g1', 4]] } } };
+    const lines = describeEvents(engine.env(state), [ev] as never).map((l) => l.text.trim());
+    expect(lines[0]).toMatch(/^CC in yO5 \(American\): American 7²-4-7 4 \+ American 7²-4-7 2 = 6 vs German 4¹-6-7 4 → 3:2, DR /);
+  });
+
   it('says how much Residual FP an attack left and why (ASLRB A8.26: one column less per point of DRM from outside the hex)', () => {
     const { engine, state } = makeEngine({
       terrain,
@@ -59,6 +98,27 @@ describe('game log', () => {
     // 2KIA: a clean first pick, then the next one among the rest.
     const two = describeEvents(engine.env(state), [roll(1, 'h1', 5), roll(2, 'h2', 2), roll(3, 'l1', 1), roll(4, 'h2', 4), roll(5, 'l1', 6)] as never).map((l) => l.text.trim());
     expect(two).toEqual(['KIA result, Random Selection (highest dr): German 4-4-7 5, German 4¹-6-7 2, German 9-1 leader 1 · next: German 4¹-6-7 4, German 9-1 leader 6 → German 4-4-7, German 9-1 leader']);
+  });
+
+  it('reads a 2KIA whose picks both tie: each round is the tied units or the units left, not split where a unit repeats', () => {
+    const { engine, state } = makeEngine({
+      terrain,
+      pieces: [
+        { id: 'h1', def: 'ge.447', side: 'ge', hex: 'yP5' },
+        { id: 'h2', def: 'ge.467', side: 'ge', hex: 'yP5' },
+        { id: 'l1', def: 'ge.L91', side: 'ge', hex: 'yP5' },
+      ],
+    });
+    const roll = (seq: number, id: string, v: number) => ({ seq, type: 'dice.rolled', payload: { label: `KIA result: random selection (${id})`, dice: [v] } });
+    // 4, 3, 4 ties h1 and the leader; 6, 1 picks h1. Then h2 and the leader: 4, 4 a tie; 4, 3 picks h2.
+    const seq: [string, number][] = [['h1', 4], ['h2', 3], ['l1', 4], ['h1', 6], ['l1', 1], ['h2', 4], ['l1', 4], ['h2', 4], ['l1', 3]];
+    const events = seq.map(([id, v], i) => roll(i + 1, id, v));
+    const lines = describeEvents(engine.env(state), events as never).map((l) => l.text.trim());
+    expect(lines).toEqual([
+      'KIA result, Random Selection (highest dr): German 4-4-7 4, German 4¹-6-7 3, German 9-1 leader 4 · tie, re-roll: German 4-4-7 6, German 9-1 leader 1 · next: German 4¹-6-7 4, German 9-1 leader 4 · tie, re-roll: German 4¹-6-7 4, German 9-1 leader 3 → German 4-4-7, German 4¹-6-7',
+    ]);
+    // The log is written again as each dr is revealed: every prefix of the rolls reads without error.
+    for (let k = 1; k <= events.length; k++) expect(() => describeEvents(engine.env(state), events.slice(0, k) as never)).not.toThrow();
   });
 
   it('says when a PTC has no effect on a unit already pinned, so the pins of an earlier attack do not read as the PTC’s', () => {
@@ -259,6 +319,26 @@ describe('SK2 log lines', () => {
     const oldLines = describeEvents(engine.env(t.state), old);
     expect(oldLines.find((l) => /^German 75L AT Gun at M5/.test(l.text))!.los).toEqual({ from: ['yK5'], to: 'yM5' });
     expect(oldLines.find((l) => /^[A-Z][\w ]* on M5: /.test(l.text))!.los).toEqual({ from: ['yK5'], to: 'yM5' });
+  });
+
+  it('says a Defensive First Fire hit by Intensive Fire leaves no Residual FP, where no counter appears (SK4 3.3.5)', async () => {
+    const { sk2CoreModules } = await import('@asl/rules');
+    const { GE_VS_BR } = await import('../../../packages/rules/test/fixtures');
+    const { engine, state } = makeEngine({
+      scenario: GE_VS_BR,
+      extra: sk2CoreModules,
+      pieces: [
+        { id: 'c1', def: 'ge.228c', side: 'ge', hex: 'yK5' },
+        { id: 'g75', def: 'ge.AT75L', side: 'ge', heldBy: 'c1', tags: { ca: 1 } },
+      ],
+    });
+    const shot = (mode: string, outcome: string, intensive: boolean) => ({ seq: 1, type: 'sk2.ordnance.shot', payload: { weapon: 'g75', from: 'yK5', target: 'yM5', targetType: 'ITT', ammo: 'HE', range: 2, th: 8, dr: [2, 1], drm: 0, mode, outcome, intensive } });
+    const rof = (why: string) => ({ seq: 2, type: 'sk2.ordnance.rof', payload: { weapon: 'g75', colored: 1, rof: 1, kept: false, why } });
+    const rofLine = (events: unknown[]) => describeEvents(engine.env(state), events as never).map((l) => l.text.trim()).find((l) => /loses ROF/.test(l));
+    expect(rofLine([shot('subsequentFirst', 'hit', true), rof('intensive')])).toBe('German 75L AT Gun loses ROF: Intensive Fire never retains ROF; no Residual FP (Intensive Fire leaves none)');
+    // Prep Fire never leaves Residual FP, and a miss has nothing to leave: no word of it.
+    expect(rofLine([shot('prep', 'hit', true), rof('intensive')])).toBe('German 75L AT Gun loses ROF: Intensive Fire never retains ROF');
+    expect(rofLine([shot('first', 'miss', true), rof('intensive')])).toBe('German 75L AT Gun loses ROF: Intensive Fire never retains ROF');
   });
 });
 

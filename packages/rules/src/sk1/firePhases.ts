@@ -3,9 +3,9 @@ import { isFixedWeapon, otherSide, personnelAt, statics, swHeldBy } from '../com
 import { locKey, type LocId } from '../common/location';
 import { isVisibleTo } from './known';
 import { PHASE_DECISION, askPhaseOwner } from '../common/turn';
-import { FP, iftColumn, simpleDeclarations, type ApplyResultFn, type AttackResolvedFn, type FireAttackCtx, type FireDeclaration, type FireMode, type ResolveFireFn } from './fire';
+import { FP, discloseDrm, iftColumn, simpleDeclarations, type ApplyResultFn, type AttackResolvedFn, type BeforeApplyFn, type FireAttackCtx, type FireDeclaration, type FireMode, type ResolveFireFn } from './fire';
 import { P as MP, type FlushFn } from './morale';
-import { T, actionIllegal, fireMarker, gun, inMelee, isGoodOrder, mmc, pieceOf, setTags, smc, sw } from './status';
+import { T, actionIllegal, drmNotes, fireMarker, gun, inMelee, isGoodOrder, mmc, pieceOf, setTags, smc, sw } from './status';
 
 export type FireAction = Action & { decl: FireDeclaration };
 
@@ -225,9 +225,14 @@ export function resolveDcBase(ctx: Ctx, dc: Piece) {
   const x = (dc.tags['dcX'] as number | undefined) ?? (d.x ?? 12) - (placerDef && placerDef.quality !== 'E' ? 2 : 0);
   const targets = personnelAt(ctx, hex, otherSide(ctx.state, ctx.state.attacker)).map((p) => p.id).sort();
   const attack: FireAttackCtx = { mode: 'advancing', side: ctx.state.attacker, target: hex, parts: [], targets, hindrance: 0, residual: true };
-  const drm = ctx.query('hex.tem', { hex }, 0) + (dc.tags['dcCx'] ? 1 : 0) + ctx.query('dc.drm', { target: hex }, 0);
+  // The TEM, the placer's CX and any extra DRM (`dc.drm`). A secret part of the extra (an unrevealed fortified
+  // building's +1) is applied, and told of, only when it changes a result (`discloseDrm`, as for small arms).
+  const extraRes = ctx.explain('dc.drm', { target: hex }, 0);
+  const fullDrm = { value: ctx.query('hex.tem', { hex }, 0) + (dc.tags['dcCx'] ? 1 : 0) + extraRes.value, trace: extraRes.trace };
   const roll = ctx.roll(`DC attack on ${hex}`);
   const column = iftColumn(ctx, d.fp);
+  const drmRes = discloseDrm(ctx, attack, roll.total < x ? column : null, roll.total, fullDrm);
+  const drm = drmRes.value;
   ctx.emit('sk1.fire.attack', {
     attack: { mode: 'advancing', target: hex, parts: [dc.id] },
     fp: d.fp,
@@ -235,13 +240,24 @@ export function resolveDcBase(ctx: Ctx, dc: Piece) {
     dr: roll.dice as [number, number],
     drm,
     cowered: false,
-    explain: [{ id: 'sk1.dc', label: `DC ${d.fp} FP` }],
+    explain: [{ id: 'sk1.dc', label: `DC ${d.fp} FP` }, ...drmNotes(drmRes)],
   });
-  if (roll.total < x && column !== null && targets.length) {
-    ctx.proc<ApplyResultFn>(FP.applyResult)(ctx, attack, column, roll.total + drm, {});
+  const detonated = roll.total < x && column !== null;
+  // Full ASL: a DC's KIA on the Original DR may rubble a building Location first (ASLRB A23.41, B24.11); never by default.
+  const rubbled = detonated && ctx.proc<BeforeApplyFn>(FP.beforeApply)(ctx, { target: hex, by: 'dc', column: column!, originalDr: roll.total, side: ctx.state.attacker });
+  if (detonated && !rubbled && targets.length) {
+    ctx.proc<ApplyResultFn>(FP.applyResult)(ctx, attack, column!, roll.total + drm, {});
     ctx.proc<FlushFn>(MP.flushLeaderLoss)(ctx);
   }
-  const detonated = roll.total < x && column !== null;
-  ctx.proc<AttackResolvedFn>(FP.attackResolved)(ctx, { target: hex, by: 'dc', result: detonated ? statics(ctx).tables.ift(column!, roll.total + drm).kind : null, malfunctioned: !detonated });
+  ctx.proc<AttackResolvedFn>(FP.attackResolved)(ctx, {
+    target: hex,
+    by: 'dc',
+    result: detonated ? statics(ctx).tables.ift(column!, roll.total + drm).kind : null,
+    malfunctioned: !detonated,
+    originalResult: detonated ? statics(ctx).tables.ift(column!, roll.total).kind : null,
+    originalDr: roll.total,
+    side: ctx.state.attacker,
+    ...(rubbled ? { rubbled: true } : {}),
+  });
   ctx.emit('piece.eliminated', { id: dc.id, reason: 'DC detonated' });
 }

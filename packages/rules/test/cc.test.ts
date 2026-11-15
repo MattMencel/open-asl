@@ -34,6 +34,28 @@ describe('Close Combat markers', () => {
   });
 });
 
+describe('Close Combat strengths', () => {
+  it('the attack event records each unit\u2019s CC FP behind the odds: a pinned unit\u2019s halved (SK4 Pin)', () => {
+    const { engine, state } = makeEngine({
+      startPhase: 'APh',
+      dice: [6, 6, 6, 6, 6, 6, 6, 6],
+      pieces: [
+        { id: 'a1', def: 'am.747', side: 'am', hex: 'yN5' },
+        { id: 'g1', def: 'ge.467', side: 'ge', hex: 'yO5', tags: { pinned: true } },
+        { id: 'g2', def: 'ge.467', side: 'ge', hex: 'yO5' },
+      ],
+    });
+    let s: GameState = act(engine, state, { type: 'advance', units: ['a1'], to: 'yO5' }).state;
+    s = act(engine, s, { type: 'endPhase' }).state;
+    for (let guard = 0; guard < 10 && engine.currentDecision(s)?.kind !== 'ccDeclare'; guard++) s = engine.submit(s, engine.legalActions(s, engine.currentDecision(s)!.owner)[0]!).state;
+    s = act(engine, s, { type: 'cc.declare', attacks: [{ attackers: ['a1'], targets: ['g1', 'g2'] }] }).state;
+    const t = act(engine, s, { type: 'cc.declare', attacks: [{ attackers: ['g1', 'g2'], targets: ['a1'] }] });
+    const ge = t.events.find((e) => e.type === 'sk1.cc.attack' && (e.payload as { side: string }).side === 'ge')!.payload;
+    // 2 (pinned, halved) + 4 = 6 against the 7-4-7's 7: 1:2.
+    expect(ge).toMatchObject({ odds: '1:2', fp: { attack: [['g1', 2], ['g2', 4]], defense: [['a1', 7]] } });
+  });
+});
+
 describe('Leaders stacked on top of MMC (SK1 3.8)', () => {
   // German 4-6-7s g1 and g2 with a 9-1 in O5; the Americans attack them there.
   const pieces = (leaderTags: Record<string, string> = {}): PieceSpec[] => [

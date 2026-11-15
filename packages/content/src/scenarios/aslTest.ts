@@ -88,11 +88,40 @@ export const ASL_TESTBED_SCENARIO: ScenarioDef = {
   ssr: [
     {
       module: 'fortified-buildings',
-      params: { side: 'ru', count: 1, within: 'setup' },
-      text: 'Before setting up, the Russian player secretly designates one building with a hex in the Russian setup area as Fortified (B23.9).',
+      params: { side: 'ru', count: 4, unit: 'location', exact: true, within: 'setup' },
+      text: 'Before setting up, the Russian player secretly designates exactly four building Locations in hexes of the Russian setup area as Fortified Building Locations (B23.911); an upper level may be fortified only above a fortified ground level (B23.912).',
+    },
+    {
+      module: 'hidden-units',
+      params: { side: 'ru', quota: 1, notOpenGround: true, rule: 'SSR 2' },
+      text: 'One Russian squad (or its equivalent) may set up using HIP (A12.3) in a hex that is not Open Ground.',
+    },
+  ],
+};
+
+/**
+ * The test bed with fires already burning (full ASL B25) and the conditions a fire needs: EC Very Dry, a Mild Breeze
+ * blowing north-east (hexside 5 of the hex grid), a Blaze in M3 (stone, ground), a Flame in L3 and burning woods at T2,
+ * and K4 already stone rubble. Everything else is the test bed. Dev fixtures for spreading fire, collapse and Flame
+ * clearance start here, where no die is needed to get a fire going.
+ */
+export const ASL_TESTBED_FIRE_SCENARIO: ScenarioDef = {
+  ...ASL_TESTBED_SCENARIO,
+  id: 'asl-testbed-fire',
+  number: 'T2',
+  title: 'T2 Full ASL Test Bed: Fire',
+  ec: 'veryDry',
+  weather: { wind: { from: 'SW', force: 'breeze', dir: 5 } },
+  notes: [...ASL_TESTBED_SCENARIO.notes!, 'Fires burn at the start: a Blaze in M3 and the T2 woods, a Flame in L3, rubble in K4; the EC are Very Dry and a Mild Breeze blows north-east, so that Fire spreads fast.'],
+  ssr: [
+    ...ASL_TESTBED_SCENARIO.ssr,
+    {
+      module: 'fires',
+      params: { blazes: ['uM3', 'uT2'], flames: ['uL3'], rubble: [{ hex: 'uK4', kind: 'stone' }] },
+      text: 'M3 and the T2 woods are ablaze and L3 holds a Flame at the start; K4 is stone rubble. Environmental Conditions are Very Dry and a Mild Breeze blows toward the north-east.',
     },
   ],
 };
 
 /** The scenarios that play under the Full ASL ruleset. */
-export const ASL_SCENARIOS: ScenarioDef[] = [ASL_TESTBED_SCENARIO];
+export const ASL_SCENARIOS: ScenarioDef[] = [ASL_TESTBED_SCENARIO, ASL_TESTBED_FIRE_SCENARIO];

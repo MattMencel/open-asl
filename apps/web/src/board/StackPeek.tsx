@@ -1,6 +1,6 @@
 import { useLayoutEffect, useRef, useState } from 'react';
 import type { HexId, Piece, PieceId, QueryEnv } from '@asl/engine';
-import { AMMO_NAME, acquisitionsAt, ammoOut, defOf, fireMarker, gunIdent, isWeaponDef, moveState, shownFireMarker, smokeDrm, smokeGrenades, stackOrder, swHeldBy, terrainOf, type Statics, type VehicleDef } from '@asl/rules';
+import { AMMO_NAME, acquisitionsAt, ammoOut, defOf, fireAt, fireMarker, fireNumbers, gunIdent, isWeaponDef, locationsOf, moveState, parseLabor, rubbleAt, shownFireMarker, smokeDrm, smokeGrenades, stackOrder, swHeldBy, terrainOf, windOf, type Statics, type VehicleDef } from '@asl/rules';
 import { counterImage, cxMarker, markerImage } from '../game/assets';
 import { identCss } from './ident';
 import { pieceLabel } from '../game/describe';
@@ -61,6 +61,9 @@ function statusOf(env: QueryEnv, p: Piece): { label: string; marker?: string }[]
   if (fire === 'first') out.push({ label: 'First Fire', marker: 'First' });
   if (fire === 'final') out.push({ label: 'Final Fire', marker: 'Final' });
   if (t['wounds']) out.push({ label: 'wounded', marker: 'Wound' });
+  if (t['ti']) out.push({ label: 'TI: fighting a Flame; no fire, movement or advance this Player Turn (ASLRB B24.72)', marker: 'TI' });
+  const labor = parseLabor(t['labor']);
+  if (labor) out.push({ label: `Labor ${labor.drm} on the next attempt at ${labor.task.replace(/^flame:/, 'the Flame in ').replace(/^[a-z]/, '')} (ASLRB B24.8)`, marker: labor.drm <= -2 ? 'Labor2' : 'Labor1' });
   // A leader relieved of command by SSR (LMA5 SSR 4): why he stays pinned.
   if (typeof t['relieved'] === 'string') out.push({ label: t['relieved'] });
   if (t['moved']) out.push({ label: 'moved' });
@@ -189,7 +192,25 @@ function groundOf(env: QueryEnv, hex: HexId): string {
   const parts = [t.name, `${t.tem > 0 ? '+' : ''}${t.tem} TEM`];
   if (h?.elevation) parts.push(`level ${h.elevation}`);
   for (const f of h?.features ?? []) parts.push(FEATURE_NAME[f] ?? f.replace(':', ' '));
+  // Full ASL rubble (ASLRB B24): what it was, and the three MF.
+  const rb = rubbleAt(env, hex);
+  if (rb) parts.push(rb.from === 0 ? '3 MF · ½-level obstacle (rubble, ASLRB B24)' : `level ${rb.from} rubble (ASLRB B24.2)`);
   return parts.join(' · ');
+}
+
+/** Fire in the hex's Locations (full ASL B25): the Blaze and what it means, or the Flames and their numbers. */
+function fireLines(env: QueryEnv, hex: HexId): string[] {
+  const out: string[] = [];
+  const wind = windOf(env);
+  for (const loc of locationsOf(env, hex)) {
+    const f = fireAt(env, loc);
+    if (!f) continue;
+    const where = loc === hex ? '' : ` (level ${loc.split(':')[1]})`;
+    const n = fireNumbers(env, loc);
+    if (f.blaze) out.push(`Blaze${where}: smoke +3 up to ${wind.force === 'heavy' ? 'no level (Heavy Winds)' : wind.force === 'breeze' ? '2 levels' : '4 levels'} · cannot be entered · units inside must leave by the end of the next RtPh (ASLRB B25.2, B25.4)`);
+    else if (f.flames.length) out.push(`Flame${f.flames.length > 1 ? `s (${f.flames.length})` : ''}${where}${f.flames.some((x) => x.hampered) ? ' · Hampered this Player Turn' : ''}: a Blaze on a DR ≥ ${n?.spread ?? '?'} at the end of each AFPh, out on ≤ 2; extinguish on a Clearance DR ≤ 2 (ASLRB B25.151, B24.72)`);
+  }
+  return out;
 }
 
 /** Markers on the hex itself (Smoke, CC, Melee, Residual FP, Acquired Target counters). */
@@ -362,6 +383,9 @@ export function StackPeek({ env, hex, at, bounds, placements, rotation, interact
             <span className="muted">{total} counter{total === 1 ? '' : 's'}</span>
           </div>
           <div className="peek-ground">{groundOf(env, hex)}</div>
+          {fireLines(env, hex).map((l) => (
+            <div key={l} className="peek-fire">{l}</div>
+          ))}
         </div>
       </div>
       {/* Top down, as on the board: a unit's weapons lie on top of it (SW over Gun), so they read first. */}

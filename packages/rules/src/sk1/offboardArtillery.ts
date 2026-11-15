@@ -7,7 +7,7 @@ import { phaseOwner } from './firePhases';
 import { hasLos } from './known';
 import { P as MP, type FlushFn } from './morale';
 import { northIndex } from './scatterSetup';
-import { T, isGoodOrder, mmc, setTags, smc } from './status';
+import { T, isGoodOrder, mmc, pieceOf, setTags, smc } from './status';
 import { terrainOf } from './terrain';
 
 /*
@@ -23,7 +23,9 @@ import { terrainOf } from './terrain';
  *
  * Readings: the attempt is open only before the side fires anything in that PFPh (its "start"); the observer is a
  * Good Order leader of the side on the map whose LOS reaches the target hex, and he is marked Prep Fire whatever the
- * dr; only a mission that makes contact is used up. A modified drift dr below 0 is 0. Each of the seven hexes with
+ * dr; only a mission that makes contact is used up. The LOS is checked once the call is made, never before (ASLRB
+ * A6.11, SK4 3.2.1: no LOS check before an attack is declared): a call whose observer has no LOS is that PFPh's attempt,
+ * with no contact dr, and he is marked Prep Fire all the same. A modified drift dr below 0 is 0. Each of the seven hexes with
  * personnel in it (of either side) takes its own attack on the IFT, as an Area Target Type ordnance hit (TEM, an Air
  * Burst in woods, no hindrance or leadership), each Location of a hex separately. Hexes of the blast that are off the
  * map are skipped; vehicles are not attacked (no rule for OBA against AFV yet).
@@ -121,16 +123,15 @@ export function artilleryCallIllegal(env: QueryEnv, side: SideId, hex: HexId, ob
   if (!statics(env).map.hex(hex)) return 'Not a hex on the map';
   const ok = observers(env, side);
   if (ok.length === 0) return 'No Good Order leader to observe';
-  if (observer === undefined) return ok.some((l) => sees(env, l, hex)) ? null : 'No leader of yours has a LOS to that hex';
-  const l = ok.find((x) => x.id === observer);
-  if (!l) return 'The observer must be a Good Order leader that has not fired';
-  return sees(env, l, hex) ? null : 'The observer has no LOS to that hex';
+  if (observer === undefined) return null;
+  // Whether he sees the hex is found when the call is made (ASLRB A6.11).
+  return ok.some((x) => x.id === observer) ? null : 'The observer must be a Good Order leader that has not fired';
 }
 
-/** The leaders that could observe a mission on `hex` now. */
+/** The leaders that may be named to observe a mission on `hex` now; whether they see it is checked on the call (A6.11). */
 export function artilleryObservers(env: QueryEnv, side: SideId, hex: HexId): Piece[] {
   if (artilleryCallIllegal(env, side, hex)) return [];
-  return observers(env, side).filter((l) => sees(env, l, hex));
+  return observers(env, side);
 }
 
 const sees = (env: QueryEnv, leader: Piece, hex: HexId) => leader.loc.kind === 'hex' && hasLos(env, locKey(leader.loc), hex);
@@ -239,6 +240,7 @@ export const offboardArtilleryModule: RuleModule = {
     });
     r.event<{ side: SideId; label: string; rule: string; hex: HexId; observer: PieceId; dr: number; need: number; contact: boolean; left: number }>({ type: 'ssr.oba.contact', apply() {} });
     r.event<{ side: SideId; label: string; rule: string; dr: number; drm: number } & ArtilleryImpact>({ type: 'ssr.oba.landed', apply() {} });
+    r.event<{ side: SideId; label: string; rule: string; hex: HexId; observer: PieceId }>({ type: 'ssr.oba.noLos', apply() {} });
 
     // The PFPh's "start" ends with the side's first shot (or a shot that found no LOS).
     for (const event of ['sk1.fire.attack', 'sk1.fire.noLos'])
@@ -260,6 +262,15 @@ export const offboardArtilleryModule: RuleModule = {
         const p = artilleryParams(ctx, a.side)!;
         const st = artilleryState(ctx, a.side);
         const rule = p.rule ?? 'SSR';
+        // The call is made; now the observer's LOS is checked (A6.11). None: this PFPh's attempt is spent, no contact dr.
+        if (!sees(ctx, pieceOf(ctx, a.observer), a.hex)) {
+          ctx.emit('ssr.oba.noLos', { side: a.side, label: p.label, rule, hex: a.hex, observer: a.observer });
+          setState(ctx, a.side, { ...st, tried: stamp(ctx) });
+          setTags(ctx, a.observer, { [T.fire]: 'prep' });
+          ctx.popDecision();
+          askPhaseOwner(ctx, phaseOwner(ctx));
+          return;
+        }
         const dr = ctx.roll(`${p.label} (${rule}): contact for a mission on ${a.hex} (≤ ${p.contact})`, 1).total;
         const contact = dr <= p.contact;
         const next: ArtilleryState = { ...st, tried: stamp(ctx), used: st.used + (contact ? 1 : 0), pending: contact ? { target: a.hex, observer: a.observer, turn: ctx.state.turn } : null };

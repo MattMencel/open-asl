@@ -6,7 +6,7 @@ import type { FxLevel } from '../fx/settings';
 import { DiceIcon } from '../ui/DiceIcon';
 import { GearIcon } from '../ui/GearIcon';
 import { fmtSe, goalText, type SideTally } from '../panels/CasualtyLedger';
-import { WeatherChip } from './WeatherChip';
+import { WeatherChip, type AslWindView } from './WeatherChip';
 
 interface Props {
   /** The game's length in force (a rule may change it in play: S36's secret length, once revealed). */
@@ -35,6 +35,8 @@ interface Props {
   /** The weather in play and where the wind blows to on screen (degrees clockwise from up). */
   weather: Weather;
   windAngle: number;
+  /** Full ASL (ASLRB B25.5, B25.63–B25.651): the wind force and direction, Gusts this Player Turn, and the EC; null under the Starter Kit. */
+  aslWind?: AslWindView | null;
   fx: FxLevel;
   onFx(l: FxLevel): void;
   /** Turn the map a quarter turn: +1 clockwise, -1 counterclockwise. */
@@ -69,6 +71,7 @@ function tallyReached(t: SideTally): boolean {
   if (t.kind === 'mmc') return t.wins && t.points < t.other;
   if (t.kind === 'afv') return t.points > t.lost;
   if (t.kind === 'areas') return t.groups.every((g) => g.clear >= g.need) && (!t.lost || t.lost.mine < t.lost.theirs);
+  if (t.kind === 'fp' && t.pending) return false;
   if (t.kind === 'fp' || t.kind === 'area' || t.kind === 'points') return t.points >= t.goal;
   return t.goal !== undefined && t.points >= t.goal && (t.kind !== 'vp' || !t.armor || t.armor.points >= t.armor.goal);
 }
@@ -81,6 +84,7 @@ function tallyTitle(t: SideTally, side: string): string {
   if (t.kind === 'cvp') return `Casualty victory points amassed by the ${side} side · click for the chits behind the total`;
   if (t.kind === 'points') return `Victory points of the ${side} side (wins at game end with ${t.goal}) · click for the sources`;
   if (t.kind === 'area') return `VP of the ${side} side's Good Order infantry ${t.label} (wins at game end with ${t.goal}) · click for the units`;
+  if (t.kind === 'fp' && t.pending) return `Judged at game end: FP the ${side} side's Good Order units seeing the ${t.label} could fire at them, against ${t.goal} (no LOS is checked before then)`;
   if (t.kind === 'fp') return `FP the ${side} side's Good Order units seeing the ${t.label} could fire at them (wins at game end with ${t.goal}) · click for the units`;
   const got = `${t.eliminated} enemy AFV eliminated${t.countsExits ? ` + ${t.exited} own AFV exited` : ''}`;
   return `${got}, against ${t.lost} AFV lost · the ${side} side wins with more · click for the ledger`;
@@ -111,7 +115,7 @@ function TallyChip({ t, side, onClick }: { t: SideTally; side: string; onClick()
         </>
       ) : t.kind === 'fp' ? (
         <>
-          FP <b>{t.points}</b>
+          FP <b>{t.pending ? '?' : t.points}</b>
           <span className="goal">/{t.goal}</span>
         </>
       ) : t.kind === 'area' || t.kind === 'points' ? (
@@ -192,7 +196,7 @@ export function northWords(north: number): string {
   return n === 0 ? 'North is up' : n === 90 ? 'North is to the right' : n === 180 ? 'North is down' : n === 270 ? 'North is to the left' : `North is ${n}° clockwise from up`;
 }
 
-export function Hud({ scenario, length, phases, phase, turn, attacker, acting, sideName, players, tally, onTally, pf, oba, weather, windAngle, fx, onFx, onRotate, onSettings, onShortcuts, onCharts, onBriefing, diceLog, onToggleDiceLog, unitsHidden, onToggleUnits, markersHidden, onToggleMarkers, endPhase, tools }: Props) {
+export function Hud({ scenario, length, phases, phase, turn, attacker, acting, sideName, players, tally, onTally, pf, oba, weather, windAngle, aslWind, fx, onFx, onRotate, onSettings, onShortcuts, onCharts, onBriefing, diceLog, onToggleDiceLog, unitsHidden, onToggleUnits, markersHidden, onToggleMarkers, endPhase, tools }: Props) {
   const [code, ...rest] = scenario.title.split(' ');
   const defender = scenario.sides.find((s) => s.side !== attacker)?.side ?? attacker;
   const idx = phases.indexOf(phase);
@@ -263,7 +267,7 @@ export function Hud({ scenario, length, phases, phase, turn, attacker, acting, s
           ))}
         </div>
         <Ratings sc={scenario} sideName={sideName} />
-        <WeatherChip weather={weather} windAngle={windAngle} />
+        <WeatherChip weather={weather} windAngle={windAngle} aslWind={aslWind} />
         <div className={`phase-strip side-${attacker}`} style={{ ['--def-side' as string]: `var(--${defender})` }}>
           {setup ? (
             <span className="ph now">SETUP</span>

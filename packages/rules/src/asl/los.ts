@@ -5,6 +5,7 @@ import type { LosResult } from '../common/statics';
 import { grainInSeason, terrainOf, type LosTrace } from '../sk1/terrain';
 import { heightOf } from '../sk2/elevation';
 import { orchardsInSeason } from '../sk2/ssr';
+import { rubbledHeights } from './rubble';
 
 /**
  * LOS with heights in full ASL (ASLRB A6.2, A6.4–A6.43, A6.5, A6.7, B10.2–B10.23, B12.2, B13.2, B14.2, B15.2,
@@ -34,7 +35,8 @@ export const aslLosModule: RuleModule = {
         const from = hexOfLoc(c.from);
         const to = hexOfLoc(c.to);
         if (!map.losAt) throw new Error('asl.los: the map has no LOS between heights');
-        const res = map.losAt({ hex: from, height: heightOf(env, c.from), ...c.fromAt }, { hex: to, height: heightOf(env, c.to), ...c.toAt }, { orchardInSeason: orchardsInSeason(env) });
+        const rubbled = rubbledHeights(env);
+        const res = map.losAt({ hex: from, height: heightOf(env, c.from), ...c.fromAt }, { hex: to, height: heightOf(env, c.to), ...c.toAt }, { orchardInSeason: orchardsInSeason(env), ...(c.noBlind ? { noBlind: true } : {}), ...(Object.keys(rubbled).length ? { rubbled } : {}) });
         if (!res.clear) {
           return {
             clear: false,

@@ -133,8 +133,28 @@ function chained(env: QueryEnv, units: Piece[]): boolean {
   return seen.size === hexes.length;
 }
 
-/** Why a Banzai Charge may not be declared so, or null (SK4 8.1.8.6). */
-export function declareIllegal(env: QueryEnv, side: SideId, leader: PieceId, target: HexId, units: PieceId[], vehicle?: PieceId): string | null {
+/**
+ * The lone DC charges at an AFV a side may declare now (a special rule's DC Banzai). `skipLos` leaves out the LOS
+ * requirement, for the interface to offer them without telling which AFV a unit sees (checked on declaring, A6.11).
+ */
+export function dcChargeOptions(env: QueryEnv, side: SideId, opts: { skipLos?: boolean } = {}): { type: 'banzai.declare'; leader: PieceId; target: HexId; units: PieceId[]; vehicle: PieceId }[] {
+  const out: { type: 'banzai.declare'; leader: PieceId; target: HexId; units: PieceId[]; vehicle: PieceId }[] = [];
+  if (!dcBanzaiParams(env)) return out;
+  const afvs = Object.values(env.state.pieces).filter((p) => p.side !== side && p.loc.kind === 'hex' && !!vehicleOf(env, p) && !isWreck(p) && isVisibleTo(env, p, side)).sort(byId);
+  for (const u of Object.values(env.state.pieces).filter((p) => p.side === side && p.loc.kind === 'hex' && jaInfantry(env, p) && !!dcOf(env, p.id)).sort(byId))
+    for (const v of afvs) {
+      const target = hexOf(env.state, v)!;
+      if (!declareIllegal(env, side, u.id, target, [u.id], v.id, opts)) out.push({ type: 'banzai.declare', leader: u.id, target, units: [u.id], vehicle: v.id });
+    }
+  return out;
+}
+
+/**
+ * Why a Banzai Charge may not be declared so, or null (SK4 8.1.8.6). `skipLos` leaves out its LOS requirement, for an
+ * interface showing a declaration as it is being drawn up: the LOS is checked when it is declared, not by trying hexes
+ * (ASLRB A6.11: no LOS checks ahead of time).
+ */
+export function declareIllegal(env: QueryEnv, side: SideId, leader: PieceId, target: HexId, units: PieceId[], vehicle?: PieceId, opts: { skipLos?: boolean } = {}): string | null {
   if (env.state.phase !== 'MPh') return 'A Banzai Charge is declared in the Movement Phase';
   if (env.state.attacker !== side) return 'Only the ATTACKER charges';
   if (banzaiState(env)) return 'A Banzai Charge is already under way';
@@ -163,10 +183,10 @@ export function declareIllegal(env: QueryEnv, side: SideId, leader: PieceId, tar
     if (ppCarried(env, p.id) > env.query('unit.ipc', { unit: p.id }, 0)) return `${p.id} carries more than its IPC`;
   }
   if (!chained(env, ps)) return 'Every charging unit must be adjacent to another unit of the charge';
-  const inReach = ps.some((p) => {
-    const h = hexOf(env.state, p)!;
-    return map(env).distance(h, target) <= BANZAI_RANGE && env.query('los.trace', { from: h, to: target }, { clear: true, hindrance: 0, parts: [] }).clear;
-  });
+  const near = ps.filter((p) => map(env).distance(hexOf(env.state, p)!, target) <= BANZAI_RANGE);
+  if (near.length === 0) return `No charging unit is within ${BANZAI_RANGE} hexes of the target`;
+  if (opts.skipLos) return null;
+  const inReach = near.some((p) => env.query('los.trace', { from: hexOf(env.state, p)!, to: target }, { clear: true, hindrance: 0, parts: [] }).clear);
   if (!inReach) return `No charging unit is within ${BANZAI_RANGE} hexes of the target with a LOS to it`;
   return null;
 }
@@ -330,15 +350,7 @@ export const banzaiModule: RuleModule = {
           const units = personnelAt(env, hexOf(env.state, l)!, side).filter((p) => jaInfantry(env, p) && isGoodOrder(env, p) && !isPinned(p) && p.tags[T.moved] === undefined).map((p) => p.id);
           for (const target of targets) if (!declareIllegal(env, side, l.id, target, units)) out.push({ type: 'banzai.declare', leader: l.id, target, units });
         }
-        // S71 SSR 2: a lone DC charge at an AFV.
-        if (dcBanzaiParams(env)) {
-          const afvs = Object.values(env.state.pieces).filter((p) => p.side !== side && p.loc.kind === 'hex' && !!vehicleOf(env, p) && !isWreck(p) && isVisibleTo(env, p, side)).sort(byId);
-          for (const u of Object.values(env.state.pieces).filter((p) => p.side === side && p.loc.kind === 'hex' && jaInfantry(env, p) && !!dcOf(env, p.id)).sort(byId))
-            for (const v of afvs) {
-              const target = hexOf(env.state, v)!;
-              if (!declareIllegal(env, side, u.id, target, [u.id], v.id)) out.push({ type: 'banzai.declare', leader: u.id, target, units: [u.id], vehicle: v.id });
-            }
-        }
+        out.push(...dcChargeOptions(env, side));
         return out;
       },
       validate: (env, a) => declareIllegal(env, a.side, a.leader, a.target, a.units, a.vehicle),

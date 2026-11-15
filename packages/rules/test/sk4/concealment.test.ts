@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Action, Ctx, Decision, Engine, GameState, RuleModule } from '@asl/engine';
-import { CONCEAL_RTPH_DECISION, FP, P as MP, SETUP_PLACED, UNKNOWN_DEF_ID, concealmentModule, hiddenUnitsModule, hexOf, isKnownTo, isVisibleTo, moveState, redactState, sk2CoreModules, sk3CoreModules, type CasualtyFn, type FireDeclaration, type FireMode, type ResolveFireFn, type SetupAction, type SetupPlacedFn, type UnitFn } from '../../src';
+import { CONCEAL_RTPH_DECISION, FP, P as MP, SETUP_PLACED, UNKNOWN_DEF_ID, concealmentModule, hiddenUnitsModule, hexOf, isKnownTo, statics, isVisibleTo, moveState, redactState, sk2CoreModules, sk3CoreModules, type CasualtyFn, type FireDeclaration, type FireMode, type ResolveFireFn, type SetupAction, type SetupPlacedFn, type UnitFn } from '../../src';
 import { RU_VS_GE, act, makeEngine, type PieceSpec } from '../fixtures';
 
 /** Test-only actions: resolve a fire declaration; run the setup-placed and scenario-begin procedures. */
@@ -78,6 +78,35 @@ describe('Concealment (SK4 8.3): gate, visibility and redaction', () => {
     expect(JSON.stringify(view)).not.toMatch(/"a"|"b"|"crew"|"gun"/);
     // The stand-in is no unit: the enemy may fire at the hex, cannot aim the Infantry Target Type at it, and may try to walk in.
     expect(engine.legalActions(view, 'ge').length).toBeGreaterThanOrEqual(0);
+  });
+});
+
+describe('Concealment (SK4 8.3): reinforcements waiting offboard', () => {
+  it('a concealed stack waiting in an offboard hex shows the enemy one "?" there with its height, not nothing', () => {
+    const { engine, state: s0 } = game([sq('a', 'yK5'), sq('b', 'yK5'), ge('g', 'yK8')], 'MPh');
+    // Two concealed squads in the offboard hex beside A1, waiting to enter.
+    const off = statics(engine.env(s0)).map.offboard('W')[0]!.id;
+    const state = { ...s0, pieces: { ...s0.pieces, a: { ...s0.pieces['a']!, loc: { kind: 'offboard' as const, edge: 'W', hex: off }, tags: { concealed: true } }, b: { ...s0.pieces['b']!, loc: { kind: 'offboard' as const, edge: 'W', hex: off }, tags: { concealed: true } } } };
+    const seen = redactState(engine, state, 'ge');
+    expect(seen.pieces['a']).toBeUndefined();
+    const standIns = Object.values(seen.pieces).filter((p) => p.defId === UNKNOWN_DEF_ID);
+    expect(standIns).toHaveLength(1);
+    expect(standIns[0]).toMatchObject({ side: 'ru', loc: { kind: 'offboard', hex: off }, tags: { concealed: true, counters: 2 } });
+    // Their owner sees them whole.
+    expect(redactState(engine, state, 'ru').pieces['a']).toBeDefined();
+  });
+});
+
+describe('Concealment (SK4 8.3): an online client\u2019s view', () => {
+  it('redacting an already redacted view keeps its "?" stand-ins, on the map and offboard (an online client draws the server\u2019s view)', () => {
+    const { engine, state: s0 } = game([sq('a', 'yK5', { concealed: true }), sq('b', 'yK5', { concealed: true }), sq('c', 'yK5'), ge('g', 'yK8')], 'MPh');
+    const off = statics(engine.env(s0)).map.offboard('W')[0]!.id;
+    const state = { ...s0, pieces: { ...s0.pieces, d: { id: 'd', defId: 'ru.447', side: 'ru', loc: { kind: 'offboard' as const, edge: 'W', hex: off }, tags: { concealed: true } } } };
+    const once = redactState(engine, state, 'ge');
+    const twice = redactState(engine, once, 'ge');
+    expect(Object.keys(twice.pieces).sort()).toEqual(Object.keys(once.pieces).sort());
+    expect(Object.values(twice.pieces).filter((p) => p.defId === UNKNOWN_DEF_ID)).toHaveLength(2);
+    expect(twice.pieces['c']).toBeDefined();
   });
 });
 
@@ -168,6 +197,16 @@ describe('Concealment (SK4 8.3): loss in the LOS of a Good Order enemy', () => {
       expect(trace.some((x) => x.id === 'sk4.th.concealed-target')).toBe(true);
       expect(trace.some((x) => x.id === 'sk2.th.hip-target')).toBe(false);
     }
+  });
+
+  it('a unit seen where it was but stepping out of sight keeps the "?": the move is judged where its MF are spent (ASLRB A12.14 EX)', () => {
+    // The German in K9 sees the K5 building but not K4 behind it.
+    const { engine, state } = game([sq('a', 'yK5', { concealed: true }), ge('g', 'yK9')], 'MPh');
+    const env = engine.env(state);
+    expect(env.query('los.trace', { from: 'yK9', to: 'yK5' }, { clear: true, hindrance: 0, parts: [] }).clear).toBe(true);
+    expect(env.query('los.trace', { from: 'yK9', to: 'yK4' }, { clear: true, hindrance: 0, parts: [] }).clear).toBe(false);
+    const s = settle(engine, play(engine, state, { type: 'move.start', units: ['a'] }, { type: 'move.step', to: 'yK4' }));
+    expect(concealed(s.pieces['a'])).toBe(true);
   });
 
   it('Non-Assault Movement in LOS drops it; Assault Movement into cover keeps it; into Open Ground drops it; out of LOS it keeps it', () => {

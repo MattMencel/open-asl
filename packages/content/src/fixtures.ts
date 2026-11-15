@@ -19,7 +19,7 @@ import { byId } from '@asl/rules';
  * Adding a fixture: append a `DevFixture` to `DEV_FIXTURES` and give `build` the steps.
  * - Name units by counter def and number within the side: `f.unit('ru', 'ru.447', 2)` is the side's second
  *   4-4-7 in order of battle order (a SW by its def: `f.sw('ge', 'ge.DC')`).
- * - `f.fortify(['u-B27'])` answers the `fortified-buildings` designation (building ids: `buildingAt('u', 'uP3')`).
+ * - `f.fortify(['uP2', 'uP2:1'])` answers the `fortified-buildings` designation with Locations (ASLRB B23.911).
  * - `f.setup(side, { [unit]: hex }, { [sw]: unit })` places the side's at-start units; units left out take
  *   the engine's default placement. SW go with the unit the scenario gives them to unless reassigned.
  * - `f.until(phase, { turn, attacker })` ends every phase (and declines every Defensive Fire, rout or CC
@@ -39,7 +39,7 @@ export interface DevFixture {
 }
 
 /** Answers that decline or end a decision, in the order the fixture runner tries them. */
-const PASSES = ['defPass', 'defRofDecline', 'defMotion.done', 'move.end', 'cc.arranged', 'endPhase'];
+const PASSES = ['defPass', 'defRofDecline', 'defMotion.done', 'move.end', 'cc.arranged', 'blaze.stay', 'endPhase'];
 
 /** Builds a fixture by submitting actions to an engine, collecting them in order. */
 export class FixtureBuilder {
@@ -111,20 +111,23 @@ export class FixtureBuilder {
     return this.unit(side, def, n);
   }
 
-  /** Answer the fortified-building designation. */
-  fortify(buildings: string[]): void {
+  /** Answer the fortified-building designation with Locations (B23.911). */
+  fortify(locations: string[]): void {
     if (this.decision.kind !== 'fortify') throw new Error(`Fixture: expected the fortify decision, not ${this.decision.kind}`);
-    this.act({ type: 'fortify.designate', buildings });
+    this.act({ type: 'fortify.designate', locations });
   }
 
-  /** Answer `side`'s setup decision: the given units in the given hexes, the rest where the engine's default puts them. */
-  setup(side: SideId, placements: Record<PieceId, HexId>, sw: Record<PieceId, PieceId> = {}): void {
+  /**
+   * Answer `side`'s setup decision: the given units in the given hexes, the rest where the engine's default puts them;
+   * `extra` adds to the action (`hidden`: the units set up hidden under a HIP special rule).
+   */
+  setup(side: SideId, placements: Record<PieceId, HexId>, sw: Record<PieceId, PieceId> = {}, extra: Record<string, unknown> = {}): void {
     const d = this.decision;
     if (d.kind !== 'setup' || d.owner !== side) throw new Error(`Fixture: expected the ${side} setup, not ${d.kind} (${d.owner})`);
     const dflt = this.engine.legalActions(this.state, side).find((a) => a.type === 'setup.place');
     if (!dflt) throw new Error(`Fixture: no default setup for ${side}`);
     const { side: _s, decisionId: _d, ...base } = dflt as Action & { placements: Record<PieceId, HexId>; sw?: Record<PieceId, PieceId> };
-    this.act({ ...base, placements: { ...base.placements, ...placements }, sw: { ...(base.sw ?? {}), ...sw } });
+    this.act({ ...base, placements: { ...base.placements, ...placements }, sw: { ...(base.sw ?? {}), ...sw }, ...extra });
   }
 
   /** Move `units` as one stack through `path` (adjacent hexes), the other side declining all fire, then end the move. */
@@ -150,16 +153,19 @@ export class FixtureBuilder {
  * 4-5-8s and the LMG in the village, the 7-0 and a Conscript squad on the hill. Germans: in the woods east
  * of hexrow S, the 9-2 with the assault engineers (FT, DC) opposite the P2-P3 stone building.
  */
-function testbedSetup(f: FixtureBuilder, fortified: string) {
+function testbedSetup(f: FixtureBuilder, fortified: string[]) {
   testbedSetupWith(f, fortified, {});
 }
 
-/** The test bed setup with some Russian units elsewhere: `moved` maps "def" or "def#n" to a Location. */
-function testbedSetupWith(f: FixtureBuilder, fortified: string, moved: Record<string, string>) {
+/**
+ * The test bed setup with some Russian units elsewhere: `moved` maps "def" or "def#n" to a Location; `hidden` names
+ * the defs set up hidden under the HIP special rule.
+ */
+function testbedSetupWith(f: FixtureBuilder, fortified: string[], moved: Record<string, string>, hidden: string[] = []) {
   const ru = (def: string, n = 1) => f.unit('ru', def, n);
   const at = (def: string, n: number, hex: string) => moved[`${def}#${n}`] ?? (n === 1 ? moved[def] : undefined) ?? hex;
   const ge = (def: string, n = 1) => f.unit('ge', def, n);
-  f.fortify([fortified]);
+  f.fortify(fortified);
   f.setup('ru', {
     [ru('ru.L91')]: at('ru.L91', 1, 'uK4'),
     [ru('ru.458', 1)]: at('ru.458', 1, 'uK4'),
@@ -171,7 +177,7 @@ function testbedSetupWith(f: FixtureBuilder, fortified: string, moved: Record<st
     [ru('ru.426', 1)]: at('ru.426', 1, 'uP5'),
     [ru('ru.L70')]: at('ru.L70', 1, 'uH5'),
     [ru('ru.426', 2)]: at('ru.426', 2, 'uH5'),
-  });
+  }, {}, hidden.length ? { hidden: hidden.map((d) => ru(d)) } : {});
   f.setup('ge', {
     [ge('ge.L92')]: 'uT3',
     [ge('ge.838')]: 'uT3',
@@ -199,7 +205,7 @@ function levelsSetup(f: FixtureBuilder) {
  * the ground of K4. K4-K5 is the fortified building here, so P2-P3 can be entered freely.
  */
 function losHeightsSetup(f: FixtureBuilder) {
-  testbedSetupWith(f, 'u-B16', { 'ru.L91': 'uK5:1', 'ru.458#1': 'uK5:1', 'ru.447#2': 'uM5:1', 'ru.527': 'uK4' });
+  testbedSetupWith(f, ['uK4', 'uK4:1', 'uK5', 'uK5:1'], { 'ru.L91': 'uK5:1', 'ru.458#1': 'uK5:1', 'ru.447#2': 'uM5:1', 'ru.527': 'uK4' });
 }
 
 /**
@@ -210,10 +216,62 @@ function orchardRoadSetup(f: FixtureBuilder) {
   testbedSetupWith(f, TESTBED_FORTIFIED, { 'ru.447#3': 'uL6', 'ru.447#2': 'uM7:1' });
 }
 
-/** The building the test bed fixtures fortify: P2-P3, the stone building nearest the German setup area. */
-export const TESTBED_FORTIFIED = 'u-B27';
+/** The Locations the test bed fixtures fortify: both levels of P2 and P3, the stone house nearest the German setup area. */
+export const TESTBED_FORTIFIED = ['uP2', 'uP2:1', 'uP3', 'uP3:1'];
+
+/**
+ * A German Turn 1 that reveals the fortified P3: the 9-2's stack walks T3-S3-R3-Q3 in the MPh and the 5-4-8 tries to
+ * advance into P3 (held by the Good Order 5-2-7) in the APh, which is refused (ASLRB B23.922) and shows P3 fortified.
+ */
+function revealP3(f: FixtureBuilder) {
+  f.until('MPh', { turn: 1, attacker: 'ge' });
+  f.move([f.unit('ge', 'ge.L92'), f.unit('ge', 'ge.838'), f.unit('ge', 'ge.548')], ['uS3', 'uR3', 'uQ3']);
+  f.until('APh', { turn: 1, attacker: 'ge' });
+  f.advance([f.unit('ge', 'ge.548')], 'uP3');
+}
+
+/**
+ * The fire test bed (T2): the test bed setup with the Russian 9-1 and a 4-5-8 (MMG) in L3, the Flame's house, and the 5-2-7
+ * in N3 beside the M3 Blaze; K4 is rubble, so the 4-4-7 that would stand there goes to K5.
+ */
+function fireSetup(f: FixtureBuilder) {
+  testbedSetupWith(f, TESTBED_FORTIFIED, { 'ru.L91': 'uL3', 'ru.458#1': 'uL3', 'ru.447#1': 'uK5', 'ru.527': 'uN3' });
+}
 
 export const DEV_FIXTURES: DevFixture[] = [
+  {
+    id: 'kindling',
+    scenarioId: 'asl-testbed',
+    title: 'Fire: Kindling',
+    description:
+      'German Turn 1 Prep Fire Phase. The 9-2 with the assault engineers (FT, DC) and the 5-4-8 stand in the T3 woods (Kindle # 9): right-click T3 and choose Kindle… to predesignate the squads\' attempts, the 9-2 directing (his modifier reversed), after his NTC (ASLRB B25.11). Every unit that takes part is marked Prep Fire.',
+    build(f) {
+      testbedSetup(f, TESTBED_FORTIFIED);
+      f.until('PFPh', { turn: 1, attacker: 'ge' });
+    },
+  },
+  {
+    id: 'blaze-spread',
+    scenarioId: 'asl-testbed-fire',
+    title: 'Fire: a Blaze spreads',
+    description:
+      'German Turn 1 Prep Fire Phase on the fire test bed: M3 and the T2 woods are ablaze, L3 holds a Flame (the 9-1 and a 4-5-8 are in it), K4 is rubble; the EC are Very Dry and a Mild Breeze blows north-east. At the end of this AFPh the Blazes roll to spread (B25.6) and the Flame to become a Blaze (B25.151); the 5-2-7 in N3 stands downwind of M3.',
+    build(f) {
+      fireSetup(f);
+      f.until('PFPh', { turn: 1, attacker: 'ge' });
+    },
+  },
+  {
+    id: 'flame-clearance',
+    scenarioId: 'asl-testbed-fire',
+    title: 'Fire: fighting a Flame',
+    description:
+      'Russian Turn 1 Movement Phase on the fire test bed: the 9-1 and the 4-5-8 (MMG) stand in L3 with a Flame. Right-click L3 and choose Fight the fire… before any stack moves: one Clearance DR for the units joining, ≤ 2 puts it out, 3–6 Hampers it; they are TI for the Player Turn (ASLRB B24.72).',
+    build(f) {
+      fireSetup(f);
+      f.until('MPh', { turn: 1, attacker: 'ru' });
+    },
+  },
   {
     id: 'start',
     scenarioId: 'asl-testbed',
@@ -440,6 +498,44 @@ export const DEV_FIXTURES: DevFixture[] = [
         const { side: _s2, decisionId: _d2, ...placed } = entry;
         f.act(placed as Omit<Action, 'side' | 'decisionId'>);
       }
+    },
+  },
+  {
+    id: 'fortified-breach',
+    scenarioId: 'asl-testbed',
+    title: 'Fortified building: Breach',
+    description:
+      'German Turn 2 Movement Phase. The 9-2 with the assault engineers (FT, DC) and the 5-4-8 stand in Q3 beside P3, a Fortified Building Location they know of (the 5-4-8 tried to advance in last turn and was refused: a Good Order 5-2-7 holds it, ASLRB B23.922). Move the stack, choose Place DC… and click P3: "Breach P3/Q3" places the DC against the hexside for one MF; in the AFPh a NMC or better Breaches it, and in the APh the stack may advance in through the gap.',
+    build(f) {
+      testbedSetup(f, TESTBED_FORTIFIED);
+      revealP3(f);
+      f.until('MPh', { turn: 2, attacker: 'ge' });
+    },
+  },
+  {
+    id: 'fortified-hidden',
+    scenarioId: 'asl-testbed',
+    title: 'Fortified building: a hidden squad inside',
+    description:
+      'German Turn 2 Movement Phase. The 8-0 with a 4-6-7 and a 4-4-7 stand in Q4 beside P3, which looks empty: the Russian 5-2-7 set up there hidden (SSR 2), and P3 is fortified. Move the stack into P3: the attempt is refused (ASLRB B23.922), the fortification and the squad come to light, the MF are spent in Q4 and the move is over.',
+    build(f) {
+      testbedSetupWith(f, TESTBED_FORTIFIED, {}, ['ru.527']);
+      f.until('MPh', { turn: 1, attacker: 'ge' });
+      f.move([f.unit('ge', 'ge.L80'), f.unit('ge', 'ge.467', 3), f.unit('ge', 'ge.447', 1)], ['uR4', 'uQ4']);
+      f.until('MPh', { turn: 2, attacker: 'ge' });
+    },
+  },
+  {
+    id: 'snap-shot',
+    scenarioId: 'asl-testbed',
+    title: 'Snap Shot',
+    description:
+      'German Turn 2 Movement Phase. The 8-0 with a 4-6-7 and a 4-4-7 stand in R4, next to the wooden building R3. A Russian 4-4-7 in the N3 house sees the whole R3-R4 hexside but not R3 itself; the 5-2-7 in P3 and the 4-2-6 in P5 watch too. Move the stack into R3; as the Russian, declare fire on it and choose "Snap Shot at R3-R4": half FP, no building TEM, no FFNAM or FFMO, traced to both corners of the hexside (ASLRB A8.15).',
+    build(f) {
+      testbedSetupWith(f, TESTBED_FORTIFIED, { 'ru.447#3': 'uN3' });
+      f.until('MPh', { turn: 1, attacker: 'ge' });
+      f.move([f.unit('ge', 'ge.L80'), f.unit('ge', 'ge.467', 3), f.unit('ge', 'ge.447', 1)], ['uR4']);
+      f.until('MPh', { turn: 2, attacker: 'ge' });
     },
   },
 ];

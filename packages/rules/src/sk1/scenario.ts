@@ -15,6 +15,11 @@ import { isRoadHex, terrainOf } from './terrain';
 
 declare module '@asl/engine' {
   interface QueryCatalog {
+    /**
+     * Control as the units' positions give it, for rules that amend it (full ASL: Control forfeited by a Kindled Fire,
+     * ASLRB A26.16; a building reduced to rubble is no building, B24.1). The default returns `next` unchanged.
+     */
+    'control.adjust': { ctx: { next: ControlState; prev: ControlState }; value: ControlState };
     /** Casualty VP value of an eliminated unit. */
     'vp.casualty': { ctx: { unit: PieceId }; value: number };
     /** Extra fields a default (AI/test) setup action carries, e.g. Gun Covered Arcs. */
@@ -95,7 +100,7 @@ const CONTROL = 'sk1.control';
  * with the hex; `locations` holds only the other Locations (upper levels), so it is never written in the Starter
  * Kit, which plays at ground level. Only hex and building Control are shown for now.
  */
-interface ControlState {
+export interface ControlState {
   hexes: Record<HexId, SideId>;
   buildings: Record<string, SideId>;
   /** Hexes an AFV Controls only while it sits there (SK4 Definitions): the controller to revert to (null: nobody). */
@@ -1356,7 +1361,7 @@ const CONTROL_TAGS = ['broken', 'wreck'];
 /** Update hex/building Control: Good Order MMC in a location with no enemy units (SK1 2.0). */
 export function updateControl(ctx: Ctx) {
   const prev = controlState(ctx);
-  const next: ControlState = { hexes: prev.hexes, buildings: { ...prev.buildings } };
+  let next: ControlState = { hexes: prev.hexes, buildings: { ...prev.buildings } };
   // Hex Control is copied on the first change only: the map of hexes held grows all game.
   let hexesChanged = false;
   const setHex = (h: HexId, side: SideId | undefined) => {
@@ -1432,6 +1437,13 @@ export function updateControl(ctx: Ctx) {
   const locations = { ...(prev.locations ?? {}) };
   for (const [loc, sides] of upperGood) if (sides.size === 1 && (upperSides.get(loc)?.size ?? 0) === 1) locations[loc] = [...sides][0]!;
   if (Object.keys(locations).length) next.locations = locations;
+  // Rules beyond the Starter Kit's may amend what the units' positions gave (full ASL: Control forfeited by Fire,
+  // ASLRB A26.16; a building reduced to rubble, B24.1). The default leaves it as it is.
+  const adjusted = ctx.query('control.adjust', { next, prev }, next);
+  if (adjusted !== next) {
+    hexesChanged = hexesChanged || !sameRecord(adjusted.hexes, prev.hexes);
+    next = adjusted;
+  }
   if (hexesChanged || !sameControl(next, prev)) ctx.emit('sk1.control', { state: next });
 }
 

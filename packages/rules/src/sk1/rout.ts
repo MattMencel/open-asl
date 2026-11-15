@@ -123,6 +123,8 @@ export interface RoutStep {
   lowCrawl: boolean;
   interdiction: 'checked' | 'lowCrawl' | 'notOpen' | 'none';
   by?: PieceId[];
+  /** Where each interdicting unit stood (its Location), in the order of `by`: the log draws the LOS it interdicted along. */
+  byFrom?: LocId[];
 }
 
 /** Why a broken unit must rout. */
@@ -699,11 +701,13 @@ export const routModule: RuleModule = {
     r.contribute({
       id: 'sk1.rout.end-blocked',
       query: 'phase.endBlocked',
-      when: (_c, env) => env.state.phase === 'RtPh' && (blockingRouts(env).length > 0 || activeRoutBlocks(env)),
-      apply: (_v, _c, env) => {
+      when: (_c, env) => env.state.phase === 'RtPh',
+      apply: (value, _c, env) => {
+        // Each legality search can traverse the rout graph. Compute it once and
+        // preserve any earlier restriction when no rout blocks the phase.
         if (activeRoutBlocks(env)) return `${routState(env)!.active!.unit} has not finished routing`;
         const n = blockingRouts(env).length;
-        return `${n} unit${n === 1 ? '' : 's'} must rout first`;
+        return n ? `${n} unit${n === 1 ? '' : 's'} must rout first` : value;
       },
     });
 
@@ -933,7 +937,12 @@ function enterHex(ctx: Ctx, act: ActiveRout, toLoc: LocId, cost: number, lowCraw
   let step: RoutStep = { unit: act.unit, to: hexOfLoc(toLoc), lowCrawl, interdiction: 'lowCrawl' };
   if (!lowCrawl) {
     const by = interdicted(ctx, side, to, from, onRoad);
-    step = { ...step, interdiction: by.length ? 'checked' : ctx.query('hex.openGround', { hex: to }, false) || onRoad ? 'none' : 'notOpen', ...(by.length ? { by: by.map((e) => e.id).sort() } : {}) };
+    const byIds = by.map((e) => e.id).sort();
+    step = {
+      ...step,
+      interdiction: by.length ? 'checked' : ctx.query('hex.openGround', { hex: to }, false) || onRoad ? 'none' : 'notOpen',
+      ...(by.length ? { by: byIds, byFrom: byIds.map((id) => locOf(ctx.state, pieceOf(ctx, id))!) } : {}),
+    };
     if (by.length > 0) {
       const lead = next.escort.length
         ? Math.min(...next.escort.map((l) => ctx.query('unit.leadership', { unit: l, for: act.unit }, smc(ctx, pieceOf(ctx, l))!.leadership)))

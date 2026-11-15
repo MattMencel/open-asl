@@ -1,6 +1,6 @@
 import type { CSSProperties } from 'react';
 import type { HexId, Piece, PieceId, QueryEnv } from '@asl/engine';
-import { AMMO_NAME, isCaveLoc, ppOf, terrainOf, acquisitionsAt, ammoOut, coveredArc, defOf, fireMarker, gunIdent, isWeaponDef, levelOfLoc, locOf, locationsOf, moveState, shownFireMarker, smokeDrm, smokeGrenades, stackOrder, swHeldBy, unitsInHex, unpossessedWeaponsAt, unpossessedWeaponsInHex, type Statics } from '@asl/rules';
+import { AMMO_NAME, hexOfLoc, isCaveLoc, ppOf, terrainOf, acquisitionsAt, ammoOut, coveredArc, defOf, fireMarker, gunIdent, isWeaponDef, levelOfLoc, locOf, locationsOf, moveState, shownFireMarker, smokeDrm, smokeGrenades, stackOrder, swHeldBy, unitsInHex, unpossessedWeaponsAt, unpossessedWeaponsInHex, type Statics } from '@asl/rules';
 import { counterImage, markerImage } from '../game/assets';
 import { defLabel, nationName, pieceLabel } from '../game/describe';
 import { smoke58Chits } from '../game/smoke';
@@ -16,6 +16,8 @@ interface Props {
    * only when firing is it ticked on its own (fired with its holder's FP or held back).
    */
   swWithHolder?: boolean;
+  /** The fortified Locations this viewer may know of, with the hexes their Breaches face (ASLRB B23.9, B23.9221). */
+  fortified?: { loc: string; breached: string[] }[];
 }
 
 const STATUS: [string, string][] = [
@@ -59,7 +61,7 @@ const CHIT: Record<string, string> = { ge: '#97d0f5', ru: '#d78f1e', am: '#cad84
 const VALUE_LABEL: Record<string, string> = { 'bog-mired': 'Mired', 'shock-uk': 'Unconfirmed Kill', 'stun-plus1': 'Stunned (+1)' };
 const FIRE_LABEL = { prep: 'Prep Fire', adv: 'Advancing Fire', first: 'First Fire', final: 'Final Fire' } as const;
 
-export function StackInspector({ env, hex, selected, onToggle, actingSide, swWithHolder = false }: Props) {
+export function StackInspector({ env, hex, selected, onToggle, actingSide, swWithHolder = false, fortified = [] }: Props) {
   if (!hex) {
     return (
       <section className="panel inspector">
@@ -181,6 +183,17 @@ export function StackInspector({ env, hex, selected, onToggle, actingSide, swWit
       <h3>
         {hex} <span className="muted">{off ? 'offboard' : h ? terrainOf(env, h.id).name : ''}{h?.features.length ? ` · ${h.features.join(', ')}` : ''}{h?.elevation ? ` · level ${h.elevation}` : ''}{locs.some(isCaveLoc) ? ' · Cave hex' : locs.length > 1 ? (h?.building?.upper === 2 ? ' · Multi-Story Building' : ' · Two Story House') : ''}</span>
       </h3>
+      {!!h && fortified.some((f) => hexOfLoc(f.loc) === h.id) && (
+        <div className="hexmarkers">
+          {fortified
+            .filter((f) => hexOfLoc(f.loc) === h.id)
+            .map((f) => (
+              <span key={f.loc} className="tag tag-fortified">
+                Fortified {levelOfLoc(f.loc) ? `level ${levelOfLoc(f.loc)}` : 'ground'} (+1 TEM){f.breached.length ? ` · Breached: ${f.breached.map((t) => t.replace(/^[a-z]/, '')).join(', ')} side${f.breached.length === 1 ? '' : 's'}` : ''}
+              </span>
+            ))}
+        </div>
+      )}
       {(Object.keys(markers).length > 0 || acquired.length > 0) && (
         <div className="hexmarkers">
           {acquired.map((a) => (

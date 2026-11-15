@@ -128,8 +128,12 @@ export interface MoveState {
   smokeTriedBy?: PieceId[];
   /** Units that started with a leader (2 MF bonus) — lose it if the leader leaves. */
   leaderBonus: PieceId[];
-  /** Pending DC placement awaiting survival of Defensive First Fire (`vehicle`: predesignated against that AFV, SK4 4.3); `target` is a LocId. */
-  dcPending?: { dc: PieceId; placer: PieceId; target: LocId; vehicle?: PieceId };
+  /**
+   * Pending DC placement awaiting survival of Defensive First Fire (`vehicle`: predesignated against that AFV, SK4 4.3);
+   * `target` is a LocId. `breach`: a full ASL Breach attempt (ASLRB B23.9221) against the hexside of `target` toward that
+   * hex, the placer's own; never set in the Starter Kit.
+   */
+  dcPending?: { dc: PieceId; placer: PieceId; target: LocId; vehicle?: PieceId; breach?: HexId };
   /** Every MF/MP expenditure this move, by the map hex it was made in (SK3: "MP spent in the firer's LOS"). */
   trail?: { hex: HexId; mp: number }[];
   /** A vehicle on the move (SK3 3.3.2): its start/stop state; `allowance`/`spent` are MP. */
@@ -851,12 +855,20 @@ export const movementModule: RuleModule = {
         const side = otherSide(env.state, env.state.attacker);
         const out: { type: string; decl: FireDeclaration }[] = [];
         const seen = new Set<string>();
+        // Full ASL: each also as a Snap Shot at the hexside the stack crossed (ASLRB A8.15).
+        const snap = env.query('fire.snapSide', { target: moveLoc(ms)! }, null);
         for (const mode of ['first', 'subsequentFirst', 'fpf'] as FireMode[]) {
-          for (const decl of simpleDeclarations(env, side, [moveLoc(ms)!], mode, firstFireTargets(env, ms))) {
-            const key = JSON.stringify(decl);
-            if (seen.has(key) || firstFireIllegal(env, ms, decl, side)) continue;
-            seen.add(key);
-            out.push({ type: 'defFire', decl });
+          for (const plain of simpleDeclarations(env, side, [moveLoc(ms)!], mode, firstFireTargets(env, ms))) {
+            // A SW that cannot make a Snap Shot (an ATR, ...) stays out of the Snap Shot, its holder still firing.
+            const snapSw = snap ? plain.sw.filter((id) => !firstFireIllegal(env, ms, { units: [], sw: [id], target: plain.target, snap }, side)) : [];
+            const snaps = snap ? [{ ...plain, snap }, ...(snapSw.length < plain.sw.length ? [{ ...plain, sw: snapSw, snap }] : [])] : [];
+            for (const decl of [plain, ...snaps]) {
+              if (decl.units.length + decl.sw.length === 0) continue;
+              const key = JSON.stringify(decl);
+              if (seen.has(key) || firstFireIllegal(env, ms, decl, side)) continue;
+              seen.add(key);
+              out.push({ type: 'defFire', decl });
+            }
           }
         }
         return out;
@@ -1587,7 +1599,10 @@ function plausibleFrom(env: QueryEnv, from: LocId, target: LocId): boolean {
   const ok = (los: { clear: boolean; near?: boolean }) => los.clear || !!los.near;
   if (ok(firerLos(env, from, { target }))) return true;
   const hex = hexOfLoc(from);
-  return env.query('fire.targetPoints', { target }, []).some((pt) => ok(firerLos(env, from, { target, at: { [hex]: pt } })));
+  if (env.query('fire.targetPoints', { target }, []).some((pt) => ok(firerLos(env, from, { target, at: { [hex]: pt } })))) return true;
+  // Full ASL: or to the whole hexside the stack crossed, for a Snap Shot (ASLRB A8.15).
+  const snap = env.query('fire.snapSide', { target }, null);
+  return !!snap && ok(firerLos(env, from, { target, snap }));
 }
 
 /**
@@ -1638,7 +1653,7 @@ function offerFirstFire(ctx: Ctx) {
 function completeDcPlacement(ctx: Ctx) {
   const ms = moveState(ctx);
   if (!ms?.dcPending) return;
-  const { dc, placer, target, vehicle } = ms.dcPending;
+  const { dc, placer, target, vehicle, breach } = ms.dcPending;
   const p = ctx.state.pieces[placer];
   if (p && p.loc.kind === 'hex' && !isBroken(p) && !isPinned(p)) {
     // X# for the AFPh attack, fixed now while the placer's status is known: the counter's X#
@@ -1649,7 +1664,7 @@ function completeDcPlacement(ctx: Ctx) {
     ctx.emit('piece.moved', { id: dc, loc: locationAt(target) });
     // Against an AFV the hexside it was placed through fixes the target facing, whatever the AFV does later (SK4 4.3).
     const v = vehicle ? ctx.state.pieces[vehicle] : undefined;
-    setTags(ctx, dc, { dcPlaced: true, dcPlacer: placer, dcCx: isCx(p), dcX, ...(v ? { dcVehicle: vehicle, dcFrom: p.loc.hex, dcVca: (v.tags['vca'] as number | undefined) ?? 0 } : {}) });
+    setTags(ctx, dc, { dcPlaced: true, dcPlacer: placer, dcCx: isCx(p), dcX, ...(v ? { dcVehicle: vehicle, dcFrom: p.loc.hex, dcVca: (v.tags['vca'] as number | undefined) ?? 0 } : {}), ...(breach ? { dcBreach: breach } : {}) });
   }
   ctx.emit('sk1.move.state', { state: { ...ms, dcPending: undefined } });
 }

@@ -299,7 +299,7 @@ describe('Rout Phase', () => {
     // Into Open Ground in the German's Normal Range and clear LOS: Interdiction, by g1.
     const { engine, state } = makeEngine(opts('yP5'));
     const t1 = act(engine, state, stepTo(engine, state, 'am', 'a1', 'yM5')!);
-    expect(stepOf(t1)).toEqual({ unit: 'a1', to: 'yM5', lowCrawl: false, interdiction: 'checked', by: ['g1'] });
+    expect(stepOf(t1)).toEqual({ unit: 'a1', to: 'yM5', lowCrawl: false, interdiction: 'checked', by: ['g1'], byFrom: ['yP5'] });
     // On into the woods: not Open Ground.
     const t2 = act(engine, t1.state, stepTo(engine, t1.state, 'am', 'a1', 'yL5')!);
     expect(stepOf(t2)).toEqual({ unit: 'a1', to: 'yL5', lowCrawl: false, interdiction: 'notOpen' });

@@ -4,6 +4,7 @@ import { BrowserRouter } from 'react-router';
 import { App } from './App';
 import { AuthProvider } from './auth/AuthProvider';
 import { installErrorLog } from './diagnostics/errorLog';
+import { installTranslateGuard } from './diagnostics/translateGuard';
 import { ErrorBoundary } from './ui/ErrorBoundary';
 import './styles.css';
 import 'maplibre-gl/dist/maplibre-gl.css';
@@ -11,6 +12,7 @@ import './lobby-v2/lobby.css';
 import './aar/aar.css';
 
 installErrorLog();
+installTranslateGuard();
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

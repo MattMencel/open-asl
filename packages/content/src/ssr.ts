@@ -1,5 +1,7 @@
 import type { QueryEnv, RuleModule } from '@asl/engine';
 import {
+  placeBlaze,
+  placeFlame,
   CAVES_MODULE,
   cavesModule,
   CVP_VALUES_MODULE,
@@ -125,6 +127,37 @@ import {
  */
 
 /** A rule shown to the players as written and not enforced by the engine. */
+/** Fires and rubble in place at the start (ASLRB A26.161 "Fires existing at the start of play"); full ASL only. */
+export interface FiresParams {
+  /** Locations ablaze from the start (accidental: nobody forfeits Control for them). */
+  blazes?: string[];
+  /** Locations holding a Flame from the start. */
+  flames?: string[];
+  /** Hexes already rubble: from the ground up, or from level 1 with the ground intact. */
+  rubble?: { hex: string; kind: 'stone' | 'wood'; from?: number }[];
+}
+export const FIRES_MODULE = 'fires';
+const firesModule: RuleModule = {
+  id: 'ssr.fires',
+  summary: 'Blazes, Flames and rubble a scenario starts with (full ASL).',
+  requires: ['asl.fire', 'asl.rubble'],
+  install(r) {
+    r.setup({
+      id: 'ssr.fires.start',
+      priority: -4,
+      run(ctx) {
+        for (const s of statics(ctx).scenario.ssr) {
+          if (s.module !== FIRES_MODULE) continue;
+          const p = s.params as unknown as FiresParams;
+          for (const r of p.rubble ?? []) ctx.emit('asl.rubble', { hex: r.hex, from: r.from ?? 0, kind: r.kind, by: 'ssr', burning: false });
+          for (const loc of p.blazes ?? []) placeBlaze(ctx, loc, { kindledBy: null, source: 'ssr' });
+          for (const loc of p.flames ?? []) placeFlame(ctx, loc, { kindledBy: null, source: 'ssr' });
+        }
+      },
+    });
+  },
+};
+
 const textModule: RuleModule = {
   id: 'ssr.text',
   summary: 'Scenario special rules the engine does not enforce; the players apply them.',
@@ -691,6 +724,8 @@ export const SSR_MODULES: Record<string, RuleModule> = {
   'no-cross-nationality-leadership': noCrossNationalityLeadershipModule,
   /** Hexes of one printed terrain are another in every respect; the map is built with `redraw`; params `RedrawTerrainParams`. */
   'redraw-terrain': redrawTerrainModule,
+  /** Blazes, Flames and rubble in place at the start (full ASL); params `FiresParams`. */
+  [FIRES_MODULE]: firesModule,
   /** Setup by scatter: stacks placed by a direction and distance roll from each group's rendezvous hex; params `ScatterParams`. */
   [SCATTER_MODULE]: scatterSetupModule,
   /** Reinforcement groups picked secretly, each with its entry turn and recorded edge hex; params `EntryGroupsParams`. */

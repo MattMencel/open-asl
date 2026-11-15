@@ -23,6 +23,15 @@ export function windScreenAngle(scenario: ScenarioDef, weather: Weather, rotatio
   return (to + northScreenAngle(scenario, rotation)) % 360;
 }
 
+/**
+ * Where a hexside of the hex grid points on screen, as a clockwise angle in screen degrees (0 = up) for the current
+ * view: hexside 0 is the south-east side of a hex (corners clockwise from the east, `hexCorners.ts`), each next one 60°
+ * further round. The full ASL wind blows toward a hexside (ASLRB B25.64, B.8).
+ */
+export function hexsideScreenAngle(hexside: number, rotation: number): number {
+  return (((60 * hexside + 120 + rotation) % 360) + 360) % 360;
+}
+
 /** The visual effect the map draws for a sky: falling particles, a wash, or nothing. */
 export type WeatherFxKind = 'snow' | 'rain' | 'fog' | 'mist' | null;
 

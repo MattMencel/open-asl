@@ -6,6 +6,7 @@ export * from './common/map';
 export * from './common/losHeights';
 export * from './common/hexCorners';
 export * from './common/tagLifecycle';
+export * from './common/victoryObservation';
 export * from './sk1';
 export * from './sk2';
 export * from './sk3';

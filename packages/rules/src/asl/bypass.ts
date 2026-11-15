@@ -3,6 +3,7 @@ import { hexPixel } from '../common/map';
 import { acrossSide, cornerBetween, cornerHexes, cornerName, cornerPoint, mod6, sameCorner, sideToward } from '../common/hexCorners';
 import { hexOfLoc, isGroundLoc, locationsOf, locOf, type LocId } from '../common/location';
 import { personnelAt, statics } from '../common/pieces';
+import { isAblaze } from './fire';
 import type { FireAttackCtx } from '../sk1/fire';
 import { FORTIFIED_DRM } from '../sk1/fortified';
 import { visibleEnemyAt } from '../sk1/known';
@@ -44,7 +45,8 @@ const BYPASS_TERRAIN = (id: string) => id === 'woods' || id.startsWith('building
 /** A woods or building hex that has a hexside open to Bypass (ASLRB A4.3). */
 export function bypassable(env: QueryEnv, hex: HexId): boolean {
   const map = statics(env).map;
-  return !!map.hex(hex) && BYPASS_TERRAIN(terrainOf(env, hex).id) && (map.bypassSides?.(hex) ?? 0) !== 0;
+  // An obstacle that is Ablaze cannot be bypassed (A4.3); rubble is not Bypass terrain at all.
+  return !!map.hex(hex) && BYPASS_TERRAIN(terrainOf(env, hex).id) && (map.bypassSides?.(hex) ?? 0) !== 0 && !isAblaze(env, hex);
 }
 const sideFree = (env: QueryEnv, hex: HexId, k: number) => ((statics(env).map.bypassSides?.(hex) ?? 0) & (1 << mod6(k))) !== 0;
 
@@ -341,6 +343,20 @@ export const aslBypassModule: RuleModule = {
     });
     // A26.11: Control comes when the MPh of the units in Bypass is over (see `updateControl`), which ends no piece event.
     r.on({ id: 'asl.bypass.control', event: 'sk1.move.state', handler: (ctx) => updateControl(ctx) });
+    // A12.151 (A12.3: hidden status is the equal of concealment): Defensive Fire that forces a unit in Bypass to end its
+    // MPh there, broken or pinned, in a Location holding hidden enemy units reveals them at once; they may then attack
+    // it there with TPBF as Defensive First Fire (FFNAM and FFMO apply to units in Bypass, not to pinned ones, A7.83), and
+    // it is in the obstacle with its full TEM from Final Fire on (A4.32, A4.33).
+    r.on<{ state: MoveState | null }>({
+      id: 'asl.bypass.stranded-reveal',
+      event: 'sk1.move.state',
+      handler(ctx, ev) {
+        const ms = ev.payload.state;
+        if (!ms?.hex || !Object.keys(ms.stoppedBypass ?? {}).length) return;
+        const hex = ms.hex;
+        if (hiddenGunsAt(ctx, hex, ctx.state.attacker).length || hiddenUnitsAt(ctx, hex, ctx.state.attacker).length) revealHex(ctx, hex, ctx.state.attacker, 'a unit stranded in Bypass (ASLRB A12.151)');
+      },
+    });
 
     // ---------------------------------------------------------------- A4.132 b: the road point
     // Against a unit that entered a non-Open Ground hex at the road rate the firer may trace to the centre or to where

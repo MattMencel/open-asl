@@ -1,6 +1,6 @@
 import type { Ctx, Decision, HexId, Piece, PieceId, QueryEnv, RuleModule, SideId } from '@asl/engine';
 import { byId, hexOf, isPersonnelDef, defOf, otherSide, personnelAt, personnelInHex, statics } from '../common/pieces';
-import { locOf } from '../common/location';
+import { hexOfLoc, isGroundLoc, locOf, type LocId } from '../common/location';
 import { PHASE_DECISION, askPhaseOwner } from '../common/turn';
 import type { VictoryCondition } from '../common/statics';
 import type { FireAttackCtx } from '../sk1/fire';
@@ -19,6 +19,8 @@ import { T2, caTurnedIllegal, coveredArc, firePhaseKey, gunHex, gunManner, gunsO
 
 declare module '@asl/engine' {
   interface QueryCatalog {
+    /** Why a Gun may not set up in a Location, given the Starter Kit's answer as the default (null: it may). */
+    'gun.setupIllegal': { ctx: { gun: PieceId; loc: LocId }; value: string | null };
     /** Why a Gun may not change its Covered Arc now (without firing), or null. */
     'gun.canChangeCa': { ctx: { gun: PieceId }; value: string | null };
     /** Whether a Gun set up in `hex` may use Hidden Initial Placement (SK4 6.4). */
@@ -85,7 +87,7 @@ export function emplacementThDrm(env: QueryEnv, hex: HexId, side: SideId): numbe
 }
 
 /** The Guns a victory condition is about: `of`'s Guns of the listed defs (all its Guns by default), captured ones included. */
-function victoryGuns(env: QueryEnv, vc: Extract<VictoryCondition, { kind: 'gunsEliminatedOrCaptured' | 'occupyGunHexes' }>) {
+export function victoryGuns(env: QueryEnv, vc: Extract<VictoryCondition, { kind: 'gunsEliminatedOrCaptured' | 'occupyGunHexes' }>) {
   // A captured Gun has changed side: find Guns by their counter nationality and original owner.
   const ownerNats = new Set(
     (statics(env).scenario.sides.find((s) => s.side === vc.of)?.nationalities ?? [statics(env).scenario.sides.find((s) => s.side === vc.of)?.nationality]).filter(Boolean),
@@ -128,14 +130,20 @@ function checkImmediateGunVictory(ctx: Ctx) {
   }
 }
 
-/** Why a Gun may not set up in `hex`: only small target Guns and (not large) AT/INF Guns may set up in a building hex. */
-/** Why a Gun may not set up in `hex` (SK4 6.3: only small-target, AT and INF Guns in a building hex), or null. */
-export function gunBuildingIllegal(env: QueryEnv, g: Piece, hex: HexId): string | null {
+/**
+ * Why a Gun may not set up in `loc` (a hex, or a Location in full ASL): only small target Guns and (not large) AT/INF
+ * Guns may set up in a building hex (SK4 1.2.6; ASLRB C2.7), never at an upper level (B23.423). The full ASL rules
+ * except Fortified Building Locations (B23.93) through the query.
+ */
+export function gunBuildingIllegal(env: QueryEnv, g: Piece, loc: LocId): string | null {
   const d = gun(env, g)!;
-  if (statics(env).map.hex(hex)?.buildingId && d.targetSize !== 'small' && !((d.type === 'AT' || d.type === 'INF') && d.targetSize !== 'large')) {
-    return `${g.id}: only small target Guns and AT/INF Guns may set up in a building hex`;
-  }
-  return null;
+  const building = !!statics(env).map.hex(hexOfLoc(loc))?.buildingId;
+  const base = !isGroundLoc(loc)
+    ? `${g.id}: a Gun cannot occupy an upper building level (ASLRB B23.423)`
+    : building && d.targetSize !== 'small' && !((d.type === 'AT' || d.type === 'INF') && d.targetSize !== 'large')
+      ? `${g.id}: only small target Guns and AT/INF Guns may set up in a building hex`
+      : null;
+  return env.query('gun.setupIllegal', { gun: g.id, loc }, base);
 }
 
 export const gunsModule: RuleModule = {

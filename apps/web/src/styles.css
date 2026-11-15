@@ -368,6 +368,8 @@ input[type='checkbox'] { accent-color: var(--brass); width: 16px; height: 16px; 
 .hud .weather-chip .sky { display: inline-flex; }
 .hud .weather-chip .wind { display: inline-flex; color: var(--muted); transition: transform 0.35s ease; }
 .hud .weather-chip .wind.force-heavy, .hud .weather-chip .wind.force-gusts { color: var(--amber); }
+.hud .weather-chip .gusts { color: var(--amber); border-color: var(--amber); }
+.hud .weather-chip .ec { color: var(--brass); }
 .hud .weather-chip .ground { font: 600 9px var(--font-head); letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); border: 1px solid var(--line-hi); border-radius: 3px; padding: 1px 5px; }
 .fx-off .hud .weather-chip .wind { transition: none; }
 
@@ -518,6 +520,7 @@ input[type='checkbox'] { accent-color: var(--brass); width: 16px; height: 16px; 
 .tags { display: flex; gap: 3px; flex-wrap: wrap; justify-content: flex-end; }
 .tag { font: 700 10px var(--font-head); letter-spacing: 0.08em; text-transform: uppercase; padding: 2px 6px; border-radius: 2px; background: #3b4336; }
 .tag-broken { background: #7a2a24; } .tag-malf { background: #7a2a24; } .tag-emplaced, .tag-dugIn { background: #4a4030; }
+.tag-fortified { background: #8a3b12; color: #f6ecc8; }
 /* A status with a counter on the board looks like that counter: its chit colour and lettering (art/markers). */
 .tag-dm, .tag-pinned, .tag-cx, .tag-wounds, .tag-motion, .tag-bog-mired, .tag-immob, .tag-shock, .tag-stun, .tag-recall, .tag-bff,
 .tag-lowAmmo, .tag-maDisabled, .tag-fire-prep, .tag-fire-adv, .tag-fire-first, .tag-fire-final, .tag-cc, .tag-rfp, .tag-smoke {
@@ -1011,6 +1014,7 @@ p.cc-hint { margin: 0; text-transform: none; letter-spacing: 0.02em; font-size: 
 .stack-peek .peek-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; font-family: var(--font-head); letter-spacing: 0.08em; font-size: 11px; text-transform: uppercase; }
 .stack-peek .peek-head b { font-size: 14px; color: var(--text); }
 .stack-peek .peek-ground { font-family: var(--font-head); font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+.stack-peek .peek-fire { font-size: 11px; color: var(--amber); margin-top: 2px; }
 .stack-peek ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
 .peek-row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
 .peek-row.nested { padding-left: 18px; opacity: 0.9; }

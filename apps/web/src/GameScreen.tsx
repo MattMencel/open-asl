@@ -3,6 +3,8 @@ import type { Action, GameState, HexId, Piece, PieceId, QueryEnv, SideId } from 
 import { fixtureActions } from '@asl/content';
 import {
   adjacentLocs,
+  scenarioRuleset,
+  sideToward,
   attackFp,
   buildAttack,
   cavesParams,
@@ -12,6 +14,24 @@ import {
   levelOfLoc,
   locOf,
   moveLoc,
+  BLAZE_ESCAPE_DECISION,
+  blazeAt,
+  burnable,
+  clearanceDrm,
+  clearers,
+  EC_NAME,
+  ecState,
+  escapeDestinations,
+  fireAt as fireRecordAt,
+  fireNumbers,
+  fireView,
+  flamesAt,
+  kindleIllegal,
+  kindlers,
+  kindlingDrm,
+  rubbleView,
+  WIND_NAME,
+  windOf,
   locationAt,
   locationsOf,
   controlChits,
@@ -58,10 +78,14 @@ import {
   defaultPlacement,
   FORTIFY_DECISION,
   fortifiableBuildings,
+  fortifiableLocations,
   fortifiedKnownTo,
   fortifiedParams,
   fortifiedState,
+  fortifiedView,
   fortifyIllegal,
+  breachIllegal,
+  BREACH_SIDE_DECISION,
   personnelAt,
   personnelInHex,
   piecesToPlace,
@@ -100,6 +124,7 @@ import {
   ordnanceOf,
   pfCap,
   pfCheckDrm,
+  pfCheckNeedText,
   pfIllegal,
   pfMaxRange,
   pfUnitIllegal,
@@ -127,8 +152,8 @@ import {
 import { caChangeFor, gunHexOf, shotOptions, spineLabel, spineToward, thPreview } from './game/ordnance';
 import { DirectorPicker, GunComposer } from './panels/GunComposer';
 import type { SmokeThrow } from '@asl/rules';
-import { CONCEAL_RTPH_DECISION, LEADER_PTC_DECISION, ONCE_DR_DECISION, actionIllegal, onceDrRules, ordnanceWeaponIllegal, banzaiSteps, banzaiState, banzaiWindowsPending, concealRtphUnits, concealmentActive, declareIllegal as banzaiIllegal, isJapanese, obConcealment, redactState } from '@asl/rules';
-import { BoardView, type BoardOverlay, type HexBadge, type HexControl, type Placement } from './board/BoardView';
+import { CONCEAL_RTPH_DECISION, LEADER_PTC_DECISION, ONCE_DR_DECISION, UNKNOWN_DEF_ID, actionIllegal, onceDrRules, ordnanceWeaponIllegal, banzaiSteps, banzaiState, banzaiWindowsPending, concealRtphUnits, concealmentActive, declareIllegal as banzaiIllegal, dcChargeOptions, isJapanese, obConcealment, redactState } from '@asl/rules';
+import { BoardView, type BoardOverlay, type FireHex, type FortifiedHex, type HexBadge, type HexControl, type Placement, type RubbleHex } from './board/BoardView';
 import { ActionWheel, action, group, type WheelItem } from './board/ActionWheel';
 import { StackPeek, stackIn } from './board/StackPeek';
 import { NATION, PHASE_NAME, defLabel, describeEvents, hexLabel, humanize, phaseSections, pieceLabel } from './game/describe';
@@ -161,7 +186,7 @@ import { SettingsPanel } from './settings/SettingsPanel';
 import { ShortcutsDialog } from './panels/Shortcuts';
 import { ChartsDialog } from './panels/Charts';
 import { useFxLevel, useWeatherFx, useYourCallStrip } from './fx/settings';
-import { northScreenAngle, weatherFxKind, windScreenAngle } from './game/weatherView';
+import { hexsideScreenAngle, northScreenAngle, weatherFxKind, windScreenAngle } from './game/weatherView';
 import { CompassRose } from './hud/CompassRose';
 import { HudTools } from './deployment';
 
@@ -247,7 +272,7 @@ const CC_LINGER_SLOW = 6500;
 
 const FIRE_MODE: Record<string, FireMode> = { PFPh: 'prep', DFPh: 'final', AFPh: 'advancing' };
 /** Moves a stack can still make once its MF are spent only if one of these is legal (a road bonus step, say). */
-const MOVE_GOES_ON = new Set(['move.step', 'move.manhandle', 'move.smoke', 'move.recover', 'move.placeDc', 'move.exit']);
+const MOVE_GOES_ON = new Set(['move.step', 'move.manhandle', 'move.smoke', 'move.recover', 'move.placeDc', 'move.breach', 'move.exit']);
 
 /** Ping colours: one per player by seat order, chosen to stand out on any terrain (none is a map colour); the last is a spectator's. */
 const PING_COLORS = [0xff2fd6, 0x19e8ff, 0xfff23a];
@@ -366,6 +391,12 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
    * Full ASL: Defensive First Fire declared at a stack in Bypass, each firing hex now choosing the point its LOS is
    * traced to (ASLRB A4.34, A6.11; read here as each firing hex choosing its own).
    */
+  /**
+   * Full ASL Snap Shot (ASLRB A8.15): the declared fire is previewed as a Snap Shot at the hexside the moving stack crossed
+   * (`snapAim`); `snapShown` keeps the stack drawn on that hexside while the shot's result is on screen, until the next action.
+   */
+  const [snapAim, setSnapAim] = useState(false);
+  const [snapShown, setSnapShown] = useState<{ hex: HexId; from: HexId; units: PieceId[] } | null>(null);
   const [pointPick, setPointPick] = useState<{ decl: FireDeclaration; hexes: HexId[]; i: number; chosen: Record<HexId, [HexId, HexId]>; points: [HexId, HexId][] } | null>(null);
   const [peek, setPeek] = useState<{ hex: HexId; at: { x: number; y: number } } | null>(null);
   /** The wheel can be about a whole hex or one chit in the stack card. */
@@ -482,6 +513,10 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
   const [error, setError] = useState<string | null>(null);
   const [lowCrawl, setLowCrawl] = useState(false);
   const [mode, setMode] = useState<'normal' | 'smoke' | 'dc' | 'bffMg'>('normal');
+  /** A Kindling attempt being composed (full ASL B25.11): the Location, the MMC attempting, and a SMC attempting alone. */
+  const [kindle, setKindle] = useState<{ loc: string; picks: string[]; self: string | null } | null>(null);
+  /** A Flame clearance being composed (full ASL B24.72): the Location and the units joining the one DR. */
+  const [douse, setDouse] = useState<{ loc: string; picks: string[] } | null>(null);
   /**
    * Smoke grenade attempts declared so far for the stack's next MF expenditure, and the unit to throw next: every
    * attempt declared together is one expenditure of the stack (ASLRB A4.2), thrown with the Throw button.
@@ -1062,10 +1097,12 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
     setGunShot(null);
     setPfShot(null);
     setMode('normal');
+    setSnapAim(false);
   };
 
   const run = (a: Omit<Action, 'side' | 'decisionId'>, keepSelection = false) => {
     if (resolving) return 'Wait for the dice: the last action is still being resolved';
+    setSnapShown(null);
     const err = session.act(a);
     setError(plain(err));
     if (!err && !keepSelection) reset();
@@ -1359,7 +1396,10 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
   /** The fortifying side's pre-designation step, when it is this player's to make. */
   const fortifying = owner && decision?.kind === FORTIFY_DECISION ? decision : null;
   const fortMax = fortifying ? Number(fortifying.data?.['count'] ?? 0) : 0;
-  const fortifiable = useMemo(() => (fortifying ? fortifiableBuildings(env, fortifying.owner) : []), [fortifying, env]);
+  /** Designation by Location (ASLRB B23.911): picks are Locations and clicks cycle a hex's levels; else whole buildings. */
+  const fortByLoc = fortifying?.data?.['unit'] === 'location';
+  const fortExact = fortByLoc && fortifying?.data?.['exact'] === true;
+  const fortifiable = useMemo(() => (fortifying ? (fortByLoc ? fortifiableLocations(env, fortifying.owner) : fortifiableBuildings(env, fortifying.owner)) : []), [fortifying, fortByLoc, env]);
   const [fortPicks, setFortPicks] = useState<string[]>([]);
   useEffect(() => setFortPicks([]), [fortifying?.id]);
   /** Every hex of a building, by its id (building ids are the engine's; players see hexes). */
@@ -1368,24 +1408,42 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
     const hs = buildingHexes(id);
     return hs.length > 1 ? `${hexLabel(hs[0]!)} (${hs.length} hexes)` : hexLabel(hs[0] ?? id);
   };
+  const fortLocLabel = (loc: string) => `${hexLabel(hexOfLoc(loc))} ${levelOfLoc(loc) ? `level ${levelOfLoc(loc)}` : 'ground'}`;
+  const fortPicksArg = (picks: string[]) => (fortByLoc ? { locations: picks } : { buildings: picks });
   const toggleFortify = (hex: HexId) => {
     if (!fortifying) return;
     const b = statics.map.hex(hex)?.buildingId;
+    if (fortByLoc) {
+      // Each click on a building hex cycles: nothing → the ground → the ground and level 1 → nothing (B23.912: the ground first).
+      const levels = fortifiable.filter((l) => hexOfLoc(l) === hex).sort((a, c) => levelOfLoc(a) - levelOfLoc(c));
+      if (!b || levels.length === 0) {
+        setError(b ? 'That building is outside your setup area' : 'Click a building hex');
+        return;
+      }
+      const have = levels.filter((l) => fortPicks.includes(l)).length;
+      const want = have >= levels.length ? 0 : have + 1;
+      const next = [...fortPicks.filter((l) => hexOfLoc(l) !== hex), ...levels.slice(0, want)];
+      const err = fortifyIllegal(env, fortifying.owner, fortPicksArg(next));
+      // Over the count: say so, and leave the picks as they were.
+      setError(err && /At most/.test(err) ? plain(err) : null);
+      if (!err || !/At most/.test(err)) setFortPicks(next);
+      return;
+    }
     if (!b || !fortifiable.includes(b)) {
       setError(b ? 'That building is outside your setup area' : 'Click a building hex');
       return;
     }
     const next = fortPicks.includes(b) ? fortPicks.filter((x) => x !== b) : [...fortPicks, b];
-    const err = fortifyIllegal(env, fortifying.owner, next);
+    const err = fortifyIllegal(env, fortifying.owner, fortPicksArg(next));
     setError(plain(err));
     if (!err) setFortPicks(next);
   };
   const confirmFortify = fortifying
     ? {
-        label: fortPicks.length ? `Fortify ${fortPicks.length} building${fortPicks.length === 1 ? '' : 's'}` : 'Fortify none',
+        label: fortPicks.length ? `Fortify ${fortPicks.length} ${fortByLoc ? 'Location' : 'building'}${fortPicks.length === 1 ? '' : 's'}` : 'Fortify none',
         icon: '✔',
-        blocked: plain(fortifyIllegal(env, fortifying.owner, fortPicks)),
-        onClick: () => run({ type: 'fortify.designate', buildings: fortPicks }),
+        blocked: plain(fortifyIllegal(env, fortifying.owner, fortPicksArg(fortPicks))),
+        onClick: () => run({ type: 'fortify.designate', ...fortPicksArg(fortPicks) }),
       }
     : null;
   // Fortified buildings this screen may show: online, the fortifying player's own as well as the
@@ -1401,14 +1459,45 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
     return [...(env.statics as Statics).map.hexes()].filter((h) => !inPlay(env, h.id)).map((h) => h.id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [env.state.ext['ssr.length']]);
-  const fortifiedShown = useMemo((): HexId[] => {
+  /** Full ASL Fire and rubble (B25, B24): every record is public, so the board and the peek card show them all. */
+  const fullAslRules = statics.scenario.ruleset === 'full-asl';
+  const fireHexes = useMemo((): FireHex[] => {
+    if (!fullAslRules) return [];
+    const heavy = windOf(env).force === 'heavy';
+    return fireView(env).map((f) => ({ loc: f.loc, ...(f.blaze ? { blaze: true, smoke: !heavy } : {}), flames: f.flames.length, ...(f.flames.some((x) => x.hampered) ? { hampered: true } : {}) }));
+  }, [env, fullAslRules]);
+  const rubbleHexes = useMemo((): RubbleHex[] => (fullAslRules ? rubbleView(env).map((r) => ({ hex: r.hex, from: r.from, kind: r.kind, ...(r.burning ? { burning: true } : {}) })) : []), [env, fullAslRules]);
+  /** The full ASL wind and EC for the HUD (B25.5, B25.63–B25.65); null under the Starter Kit, which has neither. */
+  const aslWind = useMemo(() => {
+    if (!fullAslRules) return null;
+    const w = windOf(env);
+    const ec = ecState(env);
+    return { force: w.force, dir: w.dir, gusts: !!w.gusts, gustDir: w.gustDir, ec: ec ? { name: EC_NAME[ec.ec], drm: ec.drm } : null };
+  }, [env, fullAslRules]);
+  /** The fortified Locations this viewer may know of, with their Breaches, and the picks being made. */
+  const fortifiedLocs = useMemo((): { loc: string; breached: HexId[] }[] => {
     if (!fortState) return [];
-    const out: HexId[] = [];
-    for (const h of statics.map.hexes()) if (h.buildingId && fortifiedKnownTo(env, h.id, fortViewer)) out.push(h.id);
-    if (fortifying) for (const b of fortPicks) out.push(...buildingHexes(b));
+    const out = fortState.locations
+      ? fortifiedView(env, fortViewer)
+      : [...statics.map.hexes()].filter((h) => h.buildingId && fortifiedKnownTo(env, h.id, fortViewer)).flatMap((h) => locationsOf(env, h.id).map((loc) => ({ loc, breached: [] })));
+    if (fortifying) for (const pick of fortPicks) for (const loc of fortByLoc ? [pick] : buildingHexes(pick)) if (!out.some((x) => x.loc === loc)) out.push({ loc, breached: [] });
     return out;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fortState, fortViewer, env, fortifying, fortPicks]);
+  }, [fortState, fortViewer, env, fortifying, fortPicks, fortByLoc]);
+  const fortifiedShown = useMemo((): FortifiedHex[] => {
+    const byHex = new Map<HexId, FortifiedHex>();
+    for (const { loc, breached } of fortifiedLocs) {
+      const hex = hexOfLoc(loc);
+      const f = byHex.get(hex) ?? { hex };
+      if (levelOfLoc(loc) > 0) f.upper = true;
+      const sides = breached.map((toward) => sideToward(statics.map, hex, toward)).filter((k): k is number => k !== null);
+      if (sides.length) f.breached = [...(f.breached ?? []), ...sides];
+      byHex.set(hex, f);
+    }
+    // A badge only where the ground is shown too; a level shown alone (never by the rules) is still marked.
+    for (const f of byHex.values()) if (f.upper && !fortifiedLocs.some((x) => x.loc === f.hex)) f.upperOnly = true;
+    return [...byHex.values()];
+  }, [fortifiedLocs]);
   /** The fortifying player's own list, online only (a hotseat screen keeps the secret from both). */
   const secretFortList = fortState && fortState.buildings.length > 0 && (fortOpen || fortViewer === fortState.side) ? fortState : null;
 
@@ -1525,7 +1614,13 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
       ? state.pieces[id]?.tags['fire'] ? 'Final' : 'First'
       : phase === 'PFPh' ? 'FirePrep' : phase === 'AFPh' ? 'FireAdv' : phase === 'DFPh' ? 'Final' : null;
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  const fireDecl: FireDeclaration | null = useMemo(() => (isFireDecision && target && selected.size > 0 ? buildDecl(target) : null), [isFireDecision, target, selected, directors, state, env]);
+  /** The hexside a Snap Shot at the moving stack in `loc` may be traced to now (full ASL, ASLRB A8.15), or null. */
+  const snapAt = (loc: string): [HexId, HexId] | null => (decision?.kind === 'firstFire' ? env.query('fire.snapSide', { target: loc }, null) : null);
+  const fireDecl: FireDeclaration | null = useMemo(() => {
+    if (!(isFireDecision && target && selected.size > 0)) return null;
+    const snap = snapAim ? snapAt(target) : null;
+    return snap ? snapDeclFor(target, snap).decl : buildDecl(target);
+  }, [isFireDecision, target, selected, directors, state, env, snapAim]);
 
   /** Shoot the declared fire group at `at`: refused (with the reason shown) when the rules do not allow it. */
   const fireAt = (at: HexId, vsVehicle?: PieceId) => {
@@ -1554,6 +1649,64 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
     }
     run(decision.kind === 'firstFire' ? { type: 'defFire', decl } : { type: 'fire', decl });
   };
+
+  /** Full ASL, Defensive First Fire: is this a full ASL game (Snap Shots exist)? */
+  const fullAsl = scenarioRuleset(statics.scenario) === 'full-asl';
+  /**
+   * Full ASL Snap Shot (ASLRB A8.15): the declared group fires at the whole hexside the moving stack crossed in entering the
+   * hex. The stack is drawn on that hexside for the shot (`snapShown`); the engine records the hexside with the shot.
+   */
+  /**
+   * The Snap Shot the declared group makes at `loc`: a SW that cannot make one (an ATR, a Gun's IFE, ...) stays out while
+   * the rest fires, as `swLeftOut` does for any shot; `out` names what stays out.
+   */
+  function snapDeclFor(loc: HexId, snap: [HexId, HexId]): { decl: FireDeclaration; out: PieceId[] } {
+    const decl: FireDeclaration = { ...buildDecl(loc), snap };
+    if (!owner || !ms) return { decl, out: [] };
+    const moving = firstFireTargets(env, ms);
+    const illegal = (d: FireDeclaration) => env.query('fire.illegal', { decl: d, mode: fireModeFor(d), side: owner, moving }, null);
+    if (!illegal(decl)) return { decl, out: [] };
+    const out = decl.sw.filter((id) => illegal({ units: [], sw: [id], target: loc, snap }));
+    const rest: FireDeclaration = { ...decl, sw: decl.sw.filter((id) => !out.includes(id)) };
+    return out.length && rest.units.length + rest.sw.length > 0 && !illegal(rest) ? { decl: rest, out } : { decl, out: [] };
+  }
+  const snapFireAt = (loc: HexId) => {
+    if (!owner || decision?.kind !== 'firstFire' || !ms) return;
+    const snap = snapAt(loc);
+    if (!snap) return;
+    const { decl } = snapDeclFor(loc, snap);
+    const why = plain(env.query('fire.illegal', { decl, mode: fireModeFor(decl), side: owner, moving: firstFireTargets(env, ms) }, null));
+    if (why) {
+      setError(why);
+      return;
+    }
+    const units = firstFireTargets(env, ms);
+    if (!run({ type: 'defFire', decl })) setSnapShown({ hex: snap[0], from: snap[1], units });
+  };
+  /** The Snap Shot entries of the wheel on the moving stack's hex, in full ASL Defensive First Fire (none in the Starter Kit). */
+  function snapItems(hex: HexId): WheelItem[] {
+    if (!fullAsl || decision?.kind !== 'firstFire' || !ms?.hex || ms.hex !== hexOfLoc(hex) || !owner) return [];
+    const loc = moveLoc(ms)!;
+    const snap = snapAt(loc);
+    if (!snap) {
+      const why = ms.from && statics.map.hex(ms.from)
+        ? 'No Snap Shot: the stack has crossed no hexside on its latest MF here (a further MF, the stairs, or round the same Bypass hex) (ASLRB A8.15)'
+        : 'No Snap Shot at a unit entering from off the map: that hexside is on no board (ASLRB A8.15)';
+      return [action('Snap Shot', () => {}, { icon: '⌁', disabled: true, hint: why })];
+    }
+    const { decl, out } = snapDeclFor(loc, snap);
+    const why = selected.size === 0 ? 'Select your firers first' : plain(env.query('fire.illegal', { decl, mode: fireModeFor(decl), side: owner, moving: firstFireTargets(env, ms) }, null));
+    const name = `${short(snap[0])}-${short(snap[1])}`;
+    const left = out.length ? ` ${out.map((id) => pieceLabel(env, state.pieces[id])).join(', ')} cannot make a Snap Shot and stays out.` : '';
+    return [
+      action(`Snap Shot at ${name} (½ FP, no TEM, FFNAM or FFMO)`, () => snapFireAt(loc), {
+        icon: '⌁',
+        disabled: !!why,
+        hint: why ?? `Traced to the whole ${name} hexside the stack crossed (both corners): Area Fire, no TEM of the hex entered, no FFNAM or FFMO, no Residual FP (ASLRB A8.15).${left}`,
+      }),
+      action('Preview Snap Shot', () => { setTarget(loc); setSnapAim(true); }, { icon: '◎', active: snapAim && target === loc, disabled: selected.size === 0, hint: 'Show the Snap Shot\'s FP, column and DRM in the panel first' }),
+    ];
+  }
 
   /** Declare fire with these units (and SW), optionally directed by a leader there: they are marked and wait for a target. */
   const declareFire = (hex: HexId, ids: PieceId[], leader: PieceId | '') => {
@@ -1666,9 +1819,9 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
     const illegal = plain(env.query('fire.illegal', { decl: fireDecl, mode: fmode, side: owner, ...(ms ? { moving: firstFireTargets(env, ms) } : {}) }, null));
     if (fireDecl.units.length + fireDecl.sw.length === 0) return { illegal: 'Select firing units or SW', fp: 0, column: null, drm: 0, parts: [] as string[] };
     try {
-      // The LOS (and so any hindrance along it) is only checked once the shot is declared, so the
-      // preview shows the DRM without it.
-      const attack = { ...buildAttack(env, fireDecl, fmode, owner, ms ? firstFireTargets(env, ms) : undefined, ms ? movingInfo(env, ms) : undefined), hindrance: 0 };
+      // The LOS (and so any hindrance along it, or where it crosses a Woods-Road's woods) is only checked once the shot
+      // is declared (ASLRB A6.11, SK4 3.2.1), so the preview shows the DRM without it.
+      const attack = { ...buildAttack(env, fireDecl, fmode, owner, ms ? firstFireTargets(env, ms) : undefined, ms ? movingInfo(env, ms) : undefined), hindrance: 0, losBlind: true };
       const fp = attackFp(env, attack);
       // A secret DRM (an unrevealed fortified building) is never previewed: see `discloseDrm`.
       const drm = withoutSecrets(env.explain('fire.drm', { attack }, 0));
@@ -1677,7 +1830,12 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
         fp,
         column: iftColumn(env, fp),
         drm: drm.value,
-        parts: [...drm.trace.filter((t) => !t.suppressedBy && t.label).map((t) => t.label!), 'LOS and hindrances are checked when you fire'],
+        parts: [
+          // Full ASL Snap Shot (ASLRB A8.15): say what it is aimed at and why its numbers differ.
+          ...(fireDecl.snap ? [`Snap Shot at ${fireDecl.snap.map((h) => h.replace(/^[a-z]+/, '')).join('-')}: ½ FP (Area Fire), no TEM, FFNAM or FFMO; traced to both corners of the hexside`] : []),
+          ...drm.trace.filter((t) => !t.suppressedBy && t.label).map((t) => t.label!),
+          'LOS and hindrances are checked when you fire',
+        ],
         leftOut: [
           ...holdersFiringSw(chosenDecl(fireDecl.target)).map((u) => `${pieceLabel(env, state.pieces[u])} fires its weapon, not its own FP (SK1 4.0)`),
           ...swLeftOut(withSwFirers(chosenDecl(fireDecl.target))).map((l) => `Left out: ${l.why}`),
@@ -1885,8 +2043,14 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
     }
     for (const [h, r] of [...scatterUi.highlights, ...entryUi.highlights, ...stretchUi.highlights]) highlights.set(h, SSR_TONE[r]);
     if (fortifying) {
-      // Green = buildings that may be fortified; amber = the ones chosen so far.
-      for (const h of statics.map.hexes()) if (h.buildingId && fortifiable.includes(h.buildingId)) highlights.set(h.id, fortPicks.includes(h.buildingId) ? AMBER : GREEN);
+      // Green = buildings that may be fortified; amber = the ones chosen so far (by Location: amber the ground, violet both levels).
+      if (fortByLoc) {
+        for (const loc of fortifiable) {
+          const hex = hexOfLoc(loc);
+          const picked = fortPicks.filter((l) => hexOfLoc(l) === hex).length;
+          highlights.set(hex, picked === 0 ? GREEN : picked === 1 ? AMBER : VIOLET);
+        }
+      } else for (const h of statics.map.hexes()) if (h.buildingId && fortifiable.includes(h.buildingId)) highlights.set(h.id, fortPicks.includes(h.buildingId) ? AMBER : GREEN);
       return { selectedHex, highlights, selectedPieces: new Set<PieceId>(), los: null };
     }
     if (placing) {
@@ -2102,8 +2266,12 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
       }
     }
     controls.push(...bypassControls);
-    return { controls, badges, ...(arrows.length ? { arrows } : {}), selectedHex, highlights, selectedPieces: selected, los, ...(declaredFire ? { declaredFire } : {}), ...(spent.size ? { spent } : {}), ...(ghost.size ? { ghost } : {}), ...(onRoad ? { onRoad } : {}), ...(smokeTried?.size ? { smokeTried } : {}), ...(amUnits?.size ? { assaultMoving: amUnits } : {}), ...(bypass ? { bypass, inBypass: inBypass! } : {}) };
-  }, [ms, legal, selected, lowCrawl, target, selectedHex, isFireDecision, state, env, placing, picked, pending, todo, phase, routs, routing, routShown, theirDraft, fortifying, fortifiable, fortPicks, ssrMarks, caFor, pendingCa, swHexes, ring, owner, decision, session, turnable, mode, anchors, obaShown, banzaiDraft, banzaiUnit, bypassControls, smokePlan, smokeNext]);
+    // Full ASL Snap Shot (ASLRB A8.15): while one is previewed, and while its result is shown, the stack is drawn back on the
+    // hexside it crossed, where the shot is traced; otherwise nothing of it is on the map.
+    const snapPreview = snapAim && target && ms && decision?.kind === 'firstFire' && target === moveLoc(ms) ? snapAt(target) : null;
+    const snap = snapShown ? { hex: snapShown.hex, from: snapShown.from, units: new Set<PieceId>(snapShown.units) } : snapPreview && ms ? { hex: snapPreview[0], from: snapPreview[1], units: new Set<PieceId>(firstFireTargets(env, ms)) } : null;
+    return { controls, badges, ...(arrows.length ? { arrows } : {}), selectedHex, highlights, selectedPieces: selected, los, ...(declaredFire ? { declaredFire } : {}), ...(spent.size ? { spent } : {}), ...(ghost.size ? { ghost } : {}), ...(onRoad ? { onRoad } : {}), ...(smokeTried?.size ? { smokeTried } : {}), ...(amUnits?.size ? { assaultMoving: amUnits } : {}), ...(bypass ? { bypass, inBypass: inBypass! } : {}), ...(snap ? { snap } : {}) };
+  }, [snapAim, snapShown, ms, legal, selected, lowCrawl, target, selectedHex, isFireDecision, state, env, placing, picked, pending, todo, phase, routs, routing, routShown, theirDraft, fortifying, fortifiable, fortPicks, ssrMarks, caFor, pendingCa, swHexes, ring, owner, decision, session, turnable, mode, anchors, obaShown, banzaiDraft, banzaiUnit, bypassControls, smokePlan, smokeNext]);
 
   // ------------------------------------------------------------------ board clicks
   const onHexClick = (hex: HexId, e: { shift: boolean; ctrl: boolean; at: MapPoint; screen?: { x: number; y: number } }) => {
@@ -2216,8 +2384,29 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
         setMode('normal');
       }
       if (mode === 'dc') {
-        const place = dcPlacement(hex);
-        if (place) run(place, true);
+        const placement = dcPlacement(hex);
+        const dc = ms.units.flatMap((u) => swHeldBy(state, u)).find((s) => (defOf(env, s) as { type?: string }).type === 'DC');
+        const afv = !!placement?.vehicle;
+        const place = () => { if (placement) run(placement, true); };
+        // Full ASL: a Fortified Building Location the stack knows of may instead have its hexside Breached (ASLRB B23.9221).
+        if (dc && ms.hex && e.screen && !afv && breachIllegal(env, ms, dc.id, hex) === null) {
+          const cost = plain(session.check({ type: 'move.placeDc', dc: dc.id, target: hex }));
+          const entry = env.query('move.cost', { unit: dc.loc.kind === 'held' ? dc.loc.by : ms.units[0]!, from: ms.hex, to: hex, viaRoad: false }, 0);
+          setMode('normal');
+          setPeek(null);
+          setSelectedHex(hex);
+          setWheel({
+            hex,
+            at: e.screen,
+            title: `DC on ${hexLabel(hex)}`,
+            items: [
+              action(`DC on ${hexLabel(hex)} · ${entry} MF`, place, { icon: '✸', disabled: !!cost, hint: cost ?? 'Place the DC in the Location: it attacks everything there in the Advancing Fire Phase (30 FP, the fortified TEM)' }),
+              action(`Breach ${hexLabel(hex)}/${hexLabel(ms.hex)} · 1 MF`, () => run({ type: 'move.breach', dc: dc.id, target: hex }, true), { icon: '⟋', hint: 'Place the DC against the hexside: in the AFPh a NMC or better Breaches it and the same DR attacks the units inside as Area Fire; then Infantry may enter through it (ASLRB B23.9221)' }),
+            ],
+          });
+          return;
+        }
+        place();
         setMode('normal');
         return;
       }
@@ -2326,7 +2515,9 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
     // Fire: once declared, clicking a hex with enemy units shoots at it; before that it only previews.
     if (isFireDecision && selected.size > 0) {
       // A Vehicle Target Type shot aims at an enemy vehicle, which is not personnel.
-      const enemy = personnelInHex(shownEnv, hex).some((p) => p.side !== owner) || (gunShot?.targetType === 'VTT' && !!enemyVehicleAt(shownEnv, hex, owner!));
+      // An enemy's concealed stack is a "?" stand-in, not personnel, and may be fired at (as Area Fire, SK4 8.3.2).
+      const standIn = Object.values(shown.pieces).some((p) => p.defId === UNKNOWN_DEF_ID && p.side !== owner && p.loc.kind === 'hex' && p.loc.hex === hex);
+      const enemy = personnelInHex(shownEnv, hex).some((p) => p.side !== owner) || standIn || (gunShot?.targetType === 'VTT' && !!enemyVehicleAt(shownEnv, hex, owner!));
       if (enemy) {
         // Full ASL: the target is a Location (ASLRB A2.8). Defensive First Fire aims at the moving stack's; a hex with
         // enemy units on more than one level opens the wheel to pick one (design C1). In the Starter Kit: the hex.
@@ -2507,7 +2698,7 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
     const locs = enemyLocsIn(hex);
     if (locs.length < 2) {
       const at = firstFireAt(hex) ?? locs[0] ?? hex;
-      return [action('Preview attack', () => setTarget(at), { icon: '◎', active: target === at, disabled: noFirers, hint })];
+      return [action('Preview attack', () => { setTarget(at); setSnapAim(false); }, { icon: '◎', active: target === at && !snapAim, disabled: noFirers, hint })];
     }
     return locs.map((l) => action(`Preview attack · ${locName(l)}: ${enemyNames(l)}`, () => setTarget(l), { icon: '◎', active: target === l, disabled: noFirers, hint }));
   }
@@ -2806,7 +2997,8 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
           }
         }
         // S71 SSR 2: a Japanese unit with a DC may charge an AFV alone, then attack it in CC (CCV 5, -3).
-        const dcCharges = legal.filter((a) => a.type === 'banzai.declare' && a['vehicle'] && own.includes(a['leader'] as string));
+        // Offered without the LOS requirement, which is checked when the charge is declared (ASLRB A6.11).
+        const dcCharges = owner ? dcChargeOptions(env, owner, { skipLos: true }).filter((a) => own.includes(a.leader)) : [];
         if (dcCharges.length)
           items.push(
             group(
@@ -2814,7 +3006,7 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
               dcCharges.map((a) => {
                 const v = state.pieces[a['vehicle'] as string]!;
                 return action(`${pieceLabel(env, state.pieces[a['leader'] as string]).replace(/^\S+ /, '')} → ${pieceLabel(env, v).replace(/^\S+ /, '')} in ${hexLabel(a['target'] as string)}`, () => run(a), {
-                  hint: 'A lone Banzai Charge at the AFV; unbroken in its hex after Defensive First Fire, a CC attack on it with a CCV of 5 and -3 DRM, the DC used up (SSR 2)',
+                  hint: 'A lone Banzai Charge at the AFV; unbroken in its hex after Defensive First Fire, a CC attack on it with a CCV of 5 and -3 DRM, the DC used up (SSR 2). The unit must see the AFV: that is checked when you declare',
                 });
               }),
               { icon: '!', hint: 'A lone Banzai Charge at an enemy AFV by a unit possessing a DC (SSR 2)' },
@@ -2940,6 +3132,56 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
       }
     }
 
+    // Full ASL Fire (ASLRB B25.11, B24.72): Kindling in the PFPh, fighting a Flame in the MPh or DFPh, per Location of the hex.
+    if (fullAslRules && decision.kind === 'phase' && decision.owner === owner && !placing && !fortifying && (phase === 'PFPh' || phase === 'MPh' || phase === 'DFPh')) {
+      for (const loc of locationsOf(env, hex)) {
+        const ownHere = personnelAt(env, loc, owner);
+        if (!ownHere.length) continue;
+        const where = levelOfLoc(loc) ? ` (level ${levelOfLoc(loc)})` : '';
+        if (phase === 'PFPh' && owner === state.attacker) {
+          const n = fireNumbers(env, loc);
+          const { leaders, smcs, mmcs } = kindlers(env, loc, owner);
+          const possible = (leaders.length && mmcs.length) || smcs.length;
+          const why = !n
+            ? `${terrainOf(env, loc).name} is not Burnable Terrain (ASLRB B25.1)`
+            : blazeAt(env, loc)
+              ? 'The Location is already ablaze'
+              : !possible
+                ? mmcs.length
+                  ? 'Only a unit stacked with a Good Order leader may Kindle, or a SMC alone (ASLRB B25.11)'
+                  : 'No unpinned Good Order Infantry here that has not fired this phase'
+                : plain(session.check({ type: 'fire.kindle', loc, attempts: mmcs.length && leaders.length ? mmcs.map((m) => ({ unit: m.id, director: leaders[0]!.id })) : [{ unit: smcs[0]!.id }] }));
+          items.push(
+            action(`Kindle…${where}`, () => setKindle({ loc, picks: leaders.length ? mmcs.map((m) => m.id) : [], self: leaders.length || !smcs.length ? null : smcs[0]!.id }), {
+              icon: '🔥',
+              disabled: !!why,
+              active: kindle?.loc === loc,
+              hint: why ?? `Try to start a Flame in the ${terrainOf(env, loc).name}: Kindle # ${n!.kindle}; every attempt here is predesignated at once (ASLRB B25.11)`,
+            }),
+          );
+        }
+        if (phase === 'MPh' || phase === 'DFPh') {
+          const f = fireRecordAt(env, loc);
+          if (!f) continue;
+          const units = clearers(env, loc, owner);
+          const why = f.blaze
+            ? 'A Blaze cannot be extinguished (ASLRB B25.7)'
+            : phase === 'MPh' && ms
+              ? 'A Flame is fought before any stack moves (ASLRB B24.72)'
+              : !units.some((p) => !isWeaponDef(defOf(env, p)) && defOf(env, p).kind !== 'leader')
+                ? 'Needs an unpinned Good Order MMC here that has not moved or fired this Player Turn (ASLRB B24.72)'
+                : null;
+          items.push(
+            action(`Fight the fire…${where}`, () => setDouse({ loc, picks: units.map((p) => p.id) }), {
+              icon: '🧯',
+              disabled: !!why,
+              active: douse?.loc === loc,
+              hint: why ?? `One Clearance DR for every unit joining: ≤ 2 puts the Flame out, 3–6 Hampers it this Player Turn; the units are TI (ASLRB B24.72)`,
+            }),
+          );
+        }
+      }
+    }
     if (decision.kind === 'phase' && phase === 'RPh') {
       const idsHere = new Set(unitsHere.map((p) => p.id));
       // A leader with several broken units here rallies them all at once; single attempts stay on each counter's menu.
@@ -2997,7 +3239,7 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
           action('Fire Panzerfaust at this hex', () => { run(decision.kind === 'firstFire' ? { type: 'defFire.pf', pf } : { type: 'fire.pf', pf }); setPfShot(null); setDeclared(false); }, {
             icon: '✦',
             disabled: !!why,
-            hint: why ?? `PF check dr ≤ 3${drm ? ` (${notes.join(', ')})` : ''}: then To Hit ${[10, 8, 6, 4].slice(0, pfMaxRange(env) + 1).map((th, r) => `${th} at ${r}`).join(', ')}; HEAT To Kill 31, or 16 FP on one unit in a building; an original 6 pins`,
+            hint: why ?? `PF check: needs ${pfCheckNeedText(drm, notes)}, a final 1-3: then To Hit ${[10, 8, 6, 4].slice(0, pfMaxRange(env) + 1).map((th, r) => `${th} at ${r}`).join(', ')}; HEAT To Kill 31, or 16 FP on one unit in a building; an original 6 pins`,
           }),
         );
         items.push(action('Cancel Panzerfaust', () => { setPfShot(null); setDeclared(false); setSelected(new Set()); }, { icon: '✕' }));
@@ -3005,11 +3247,17 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
         const turn = caChangeFor(env, gunShot.gun, hex);
         items.push(action(turn !== null ? 'Turn the Gun and fire at this hex' : 'Fire at this hex', () => fireGunAt(hex), { icon: '✦', hint: turn !== null ? 'The target is outside the Covered Arc: the Gun turns first (To Hit DRM)' : 'Roll To Hit against this hex' }));
         items.push(action('Preview shot', () => setTarget(hex), { icon: '◎', active: target === hex, hint: 'Show the To Hit number and DRM in the panel first' }));
+      } else if (declared && !enemyHere && decision.kind === 'phase' && (phase === 'PFPh' || phase === 'DFPh' || phase === 'AFPh')) {
+        // Blind fire at a hex where no enemy is seen: a hidden unit there is attacked as Area Fire and revealed if
+        // affected (SK4 6.4; ASLRB A12.13 "reveal the unit if affected"). Offered at every such hex alike, so it tells
+        // nothing about what may be hidden.
+        items.push(action('Fire at this hex (no enemy seen)', () => fireAt(hex), { icon: '✦', hint: 'Area Fire at a hex where you see no enemy: anything hidden there is attacked at half FP and revealed if affected (SK4 6.4); otherwise the fire is spent' }));
       } else if (enemyHere && declared) {
         // Full ASL: a hex with enemy units on more than one level is fired at one Location at a time (ASLRB A2.8, A7.3).
         const enemyLocs = enemyLocsIn(hex);
         if (enemyLocs.length < 2) items.push(action('Fire at this hex', () => fireAt(firstFireAt(hex) ?? enemyLocs[0] ?? hex), { icon: '✦', hint: 'Resolve the declared fire against this hex' }));
         else for (const l of enemyLocs) items.push(action(`Fire at ${locName(l)}: ${enemyNames(l)}`, () => fireAt(l), { icon: '✦', hint: `Resolve the declared fire against ${hexLabel(l)} only` }));
+        items.push(...snapItems(hex));
         const loneFt = fireDecl && fireDecl.units.length === 0 && fireDecl.sw.length === 1 && (defOf(env, state.pieces[fireDecl.sw[0]!]!) as { type?: string }).type === 'FT';
         if (loneFt)
           for (const v of unitsHere.filter((p) => p.side !== owner && vehicleDef(env, p) && !p.tags['wreck']))
@@ -3374,12 +3622,13 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
         const a = { type: s.type, hex };
         if (session.check(a) === null) items.push(action(s.label, () => run(a, true), { icon: '✸', hint: s.hint }));
       }
-    // Off-board artillery (SSR): at the start of the PFPh, a leader with a LOS to the hex calls a fire mission on it.
+    // Off-board artillery (SSR): at the start of the PFPh, a leader calls a fire mission on a hex. His LOS to it is checked
+    // once the call is made (ASLRB A6.11), so every leader who may observe is offered at every hex.
     const oba = decision.kind === 'phase' && phase === 'PFPh' ? artilleryMissions(env, owner) : null;
     if (oba) {
       const spotters = artilleryObservers(env, owner, hex);
       const label = `Call ${oba.label} fire (${oba.left} left)`;
-      const hint = `Contact on a dr ≤ ${scenario.ssr.find((r) => r.module === 'offboard-artillery' && (r.params as { side?: string } | undefined)?.side === owner)?.params?.['contact'] ?? '?'}; the salvo lands at the start of the AFPh, perhaps off target. The observer is marked Prep Fire.`;
+      const hint = `Contact on a dr ≤ ${scenario.ssr.find((r) => r.module === 'offboard-artillery' && (r.params as { side?: string } | undefined)?.side === owner)?.params?.['contact'] ?? '?'}; the salvo lands at the start of the AFPh, perhaps off target. The observer is marked Prep Fire. His LOS to the hex is checked when you call: without one, this phase's attempt is spent.`;
       const call = (observer: PieceId) => run({ type: 'ssr.oba', hex, observer }, true);
       if (spotters.length === 1) items.push(action(`${label}: ${pieceLabel(env, spotters[0]!)} observes`, () => call(spotters[0]!.id), { icon: '✸', hint }));
       else if (spotters.length > 1) items.push(group(label, spotters.map((l) => action(`${pieceLabel(env, l)} observes`, () => call(l.id), { hint })), { icon: '✸', hint }));
@@ -3522,26 +3771,32 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
     });
     logResize.current.observe(el);
   }, []);
-  // A shot picked in the log has its LOS drawn on the map, traced again over the map as it stands
-  // (terrain never changes; Smoke or wrecks placed since could differ), red from where it is blocked.
+  // A shot picked in the log has its LOS drawn on the map as the shot found it: clear for a shot that resolved, red for one
+  // that found no LOS. Only a blocked one is traced again (over the map as it stands) to show where: re-tracing any shot
+  // would be a free LOS check between those hexes now, with whatever Smoke or wrecks lie there today (ASLRB A6.11).
   const [losReview, setLosReview] = useState<number | null>(null);
   const losThreads = useMemo(() => {
     const line = losReview === null ? undefined : sections.flatMap((s) => s.lines).find((l) => l.seq === losReview);
     if (!line?.los) return null;
     const { from, to } = line.los;
     // The ends are Locations (full ASL: an upper level is traced from its height); the map draws them by hex.
-    return from.map((loc) => {
+    // A Snap Shot (full ASL): each firing Location's LOS went to both corners of the hexside crossed (ASLRB A8.15, B9.42).
+    const snap = line.los.snap;
+    const snapK = snap ? sideToward(statics.map, snap[0], snap[1]) : null;
+    const ends = from.flatMap((loc) => (snapK !== null ? [snapK, (snapK + 1) % 6].map((v) => ({ loc, v })) : [{ loc, v: null as number | null }]));
+    return ends.map(({ loc, v }) => {
       // Fire at a stack in Bypass (full ASL): this firing hex's LOS went to the corner it chose (ASLRB A4.34).
       const pt = line.los!.at?.[hexOfLoc(loc)];
-      const vertex = pt ? cornerBetween(statics.map, hexOfLoc(to), pt[0], pt[1]) : null;
-      const tr = env.query('los.trace', { from: loc, to, ...(vertex !== null ? { toAt: { vertex } } : {}) }, { clear: true, hindrance: 0, parts: [] });
+      const vertex = v ?? (pt ? cornerBetween(statics.map, hexOfLoc(to), pt[0], pt[1]) : null);
+      const blocked = !!line.los!.blocked;
+      const tr = blocked ? env.query('los.trace', { from: loc, to, ...(vertex !== null ? { toAt: { vertex } } : {}), ...(v !== null ? { noBlind: true, noTargetSmoke: true } : {}) }, { clear: true, hindrance: 0, parts: [] }) : null;
       const [fromLevel, toLevel] = [levelOfLoc(loc), levelOfLoc(to)];
       return {
         from: hexOfLoc(loc),
         to: hexOfLoc(to),
         ...(vertex !== null ? { toVertex: vertex } : {}),
-        clear: tr.clear,
-        ...(tr.blockedAt ? { blockedAt: tr.blockedAt } : {}),
+        clear: !blocked,
+        ...(tr?.blockedAt ? { blockedAt: tr.blockedAt } : {}),
         ...(fromLevel ? { fromLevel } : {}),
         ...(toLevel ? { toLevel } : {}),
       };
@@ -3645,6 +3900,8 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
           objectives={objectives}
           control={control}
           fortified={fortifiedShown}
+          fires={fireHexes}
+          rubble={rubbleHexes}
           outOfPlay={outOfPlay}
           hidePieces={unitsHidden || peekTerrain}
           hideMarkers={markersHidden || peekBare}
@@ -3666,7 +3923,8 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
             pf={pfLeft}
             oba={Object.fromEntries(obaShown.map((o) => [o.side, o.missions]))}
             weather={weather}
-            windAngle={windAngle}
+            windAngle={aslWind && aslWind.force !== 'none' && aslWind.dir !== undefined ? hexsideScreenAngle(aslWind.dir, rotation) : aslWind?.gusts && aslWind.gustDir !== undefined ? hexsideScreenAngle(aslWind.gustDir, rotation) : windAngle}
+            aslWind={aslWind}
             fx={fxLevel}
             onFx={setFxLevel}
             onSettings={() => setSettings(true)}
@@ -3823,6 +4081,39 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
         {settings && <SettingsPanel fx={fxLevel} onFx={setFxLevel} weatherFx={weatherFx} onWeatherFx={setWeatherFx} callStrip={callStrip} onCallStrip={setCallStrip} onClose={() => setSettings(false)} />}
         {shortcuts && <ShortcutsDialog onClose={() => setShortcuts(false)} />}
         {charts && <ChartsDialog nationalities={scenario.sides.flatMap((s) => s.nationalities ?? [s.nationality])} onClose={() => setCharts(false)} />}
+        {decision?.kind === BLAZE_ESCAPE_DECISION && decision.owner === owner && (
+          // Units in a Blaze at the start of the RtPh (ASLRB B25.4): break and rout out, stay (and die at the phase's end), or move out when they cannot break.
+          <Modal title="Blaze: leave or stay?" kicker={PHASE_NAME[phase] ?? phase}>
+            <p>Infantry in a Blaze must leave by the end of this Rout Phase or be eliminated (ASLRB B25.4). Pinned units and units in Melee cannot leave.</p>
+            <ul className="end-ask-units">
+              {((decision.data?.['units'] as string[] | undefined) ?? []).map((id) => {
+                const p = state.pieces[id];
+                const at = (decision.data?.['locs'] as Record<string, string> | undefined)?.[id] ?? (p?.loc.kind === 'hex' ? p.loc.hex : '');
+                const canBreak = !!legal.find((a) => a.type === 'blaze.break' && a['unit'] === id);
+                const outs = legal.filter((a) => a.type === 'blaze.moveOut' && a['unit'] === id);
+                return (
+                  <li key={id}>
+                    {pieceLabel(env, p)}
+                    <span className="muted"> · {hexLabel(hexOfLoc(at))}{levelOfLoc(at) ? ` level ${levelOfLoc(at)}` : ''} · Blaze</span>{' '}
+                    {canBreak && (
+                      <button className="primary small" onClick={() => run({ type: 'blaze.break', unit: id })}>
+                        Break and rout out
+                      </button>
+                    )}{' '}
+                    {outs.map((a) => (
+                      <button key={String(a['to'])} className="primary small" onClick={() => run(a)}>
+                        Move out to {hexLabel(hexOfLoc(String(a['to'])))}
+                      </button>
+                    ))}{' '}
+                    <button className="ghost small" onClick={() => run({ type: 'blaze.stay', unit: id })}>
+                      Stay (eliminated at the end of the RtPh)
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          </Modal>
+        )}
         {endAsk && (
           <Modal title={endAsk.title} kicker={PHASE_NAME[phase] ?? phase} onClose={() => setEndAsk(null)}>
             {endAsk.lines.map((l, i) => (
@@ -3893,7 +4184,7 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
         ) : waitingOn ? (
           <section className={`panel decision waiting side-${waitingOn}`}>
             <div className="who">{sideName(waitingOn)} — {session.mySide === null ? 'their orders' : 'waiting for their orders'}</div>
-            <h2>{decisionTitle(decision!.kind, phase, fortOpen, decision!.data?.['ending'] === true && !banzaiState(env)?.dff)}</h2>
+            <h2>{decisionTitle(decision!.kind, phase, fortOpen, decision!.data?.['ending'] === true && !banzaiState(env)?.dff, fortByLoc)}</h2>
             {theirPlacing ? (
               <>
                 <p className="hint">
@@ -3922,7 +4213,7 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
           decision && (
             <section className={`panel decision side-${decision.owner}`}>
               <div className="who">{sideName(decision.owner)} — your orders</div>
-              <h2>{decisionTitle(decision.kind, phase, fortOpen, decision.data?.['ending'] === true && !banzaiState(env)?.dff)}</h2>
+              <h2>{decisionTitle(decision.kind, phase, fortOpen, decision.data?.['ending'] === true && !banzaiState(env)?.dff, fortByLoc)}</h2>
               {error && <div className="error">{error}</div>}
 
               {scatterUi.panel}
@@ -3931,7 +4222,8 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
               {lengthUi.panel}
               {stretchUi.panel}
               {banzaiDraft && decision.kind === 'phase' && phase === 'MPh' && (() => {
-                const err = banzaiDraft.target ? plain(banzaiIllegal(env, owner!, banzaiDraft.leader, banzaiDraft.target, banzaiDraft.units)) : 'Click the enemy hex the charge goes for';
+                // Checked as it is drawn up without the LOS to the target, which is checked when the charge is declared (A6.11).
+                const err = banzaiDraft.target ? plain(banzaiIllegal(env, owner!, banzaiDraft.leader, banzaiDraft.target, banzaiDraft.units, undefined, { skipLos: true })) : 'Click the enemy hex the charge goes for';
                 const candidates = Object.values(state.pieces)
                   .filter((p) => p.side === owner && p.loc.kind === 'hex' && isJapanese(env, p) && !isWeaponDef(defOf(env, p)) && !isVehiclePiece(p.id) && p.tags['broken'] !== true && p.tags['pinned'] !== true && p.tags['moved'] === undefined && p.tags['banzai'] === undefined)
                   .sort((a, b) => (a.id < b.id ? -1 : 1));
@@ -4057,20 +4349,121 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
                   <p className="hint">
                     {scenario.ssr.find((r) => r.module === 'fortified-buildings')?.text}
                   </p>
-                  <p className="hint">
-                    Click up to <b>{fortMax}</b> green building{fortMax === 1 ? '' : 's'} to fortify {fortMax === 1 ? 'it' : 'them'} (click again to undo), then <b>{confirmFortify?.label}</b> in the top bar.{fortOpen ? ' The card names the choice: the other side sees it.' : ' The choice stays secret until it matters.'}
-                  </p>
+                  {fortByLoc ? (
+                    <p className="hint">
+                      Click a green building hex to fortify its ground (amber), again to add level 1 (violet, where the house has one: the ground first, ASLRB B23.912), again to clear it. {fortExact ? `Exactly ${fortMax}` : `Up to ${fortMax}`} Location{fortMax === 1 ? '' : 's'}: <b>{fortPicks.length} of {fortMax}</b> chosen. Then <b>{confirmFortify?.label}</b> in the top bar.{fortOpen ? ' The card names the choice: the other side sees it.' : ' The choice stays secret until it matters.'}
+                    </p>
+                  ) : (
+                    <p className="hint">
+                      Click up to <b>{fortMax}</b> green building{fortMax === 1 ? '' : 's'} to fortify {fortMax === 1 ? 'it' : 'them'} (click again to undo), then <b>{confirmFortify?.label}</b> in the top bar.{fortOpen ? ' The card names the choice: the other side sees it.' : ' The choice stays secret until it matters.'}
+                    </p>
+                  )}
                   <ul className="setup-rules small">
                     {fortPicks.map((b) => (
                       <li key={b}>
-                        Fortified: building {buildingLabel(b)}{' '}
-                        <button className="ghost small" title="Undo" onClick={() => setFortPicks(fortPicks.filter((x) => x !== b))}>
+                        Fortified: {fortByLoc ? fortLocLabel(b) : `building ${buildingLabel(b)}`}{' '}
+                        <button className="ghost small" title="Undo" onClick={() => setFortPicks(fortPicks.filter((x) => x !== b && !(fortByLoc && hexOfLoc(x) === hexOfLoc(b) && levelOfLoc(x) > levelOfLoc(b))))}>
                           ×
                         </button>
                       </li>
                     ))}
-                    {fortPicks.length === 0 && <li className="muted">No building chosen yet</li>}
+                    {fortPicks.length === 0 && <li className="muted">{fortByLoc ? 'No Location chosen yet' : 'No building chosen yet'}</li>}
                   </ul>
+                </div>
+              )}
+              {kindle && decision.kind === 'phase' && phase === 'PFPh' && decision.owner === owner && (() => {
+                // A Kindling attempt (ASLRB B25.11): the MMC attempting (each its own DR, the leader directing), or a SMC alone.
+                const loc = kindle.loc;
+                const n = fireNumbers(env, loc);
+                const { leaders, smcs, mmcs } = kindlers(env, loc, owner!);
+                const director = leaders.find((l) => l.id !== kindle.self) ?? null;
+                const attempts = [...kindle.picks.filter((u) => director).map((u) => ({ unit: u, director: director!.id })), ...(kindle.self ? [{ unit: kindle.self }] : [])];
+                const err = attempts.length ? plain(session.check({ type: 'fire.kindle', loc, attempts })) : 'Tick at least one unit';
+                const chance = (need: number) => `${Math.round((need <= 2 ? 36 : need > 12 ? 0 : [36, 36, 35, 33, 30, 26, 21, 15, 10, 6, 3, 1][need - 1]!) / 0.36)}%`;
+                const row = (p: Piece, dir: Piece | null, on: boolean, toggle: () => void) => {
+                  const { drm, explain } = kindlingDrm(env, loc, p.id, dir?.id);
+                  const need = (n?.kindle ?? 0) - drm;
+                  return (
+                    <li key={p.id}>
+                      <label>
+                        <input type="checkbox" checked={on} onChange={toggle} /> {pieceLabel(env, p)} <span className="muted">DR ≥ {need}{explain.length ? ` (${explain.join(', ')})` : ''} · {chance(need)}</span>
+                      </label>
+                    </li>
+                  );
+                };
+                return (
+                  <div className="composer">
+                    <p className="hint">
+                      <b>Kindle {hexLabel(hexOfLoc(loc))}{levelOfLoc(loc) ? ` level ${levelOfLoc(loc)}` : ''}</b>: {terrainOf(env, loc).name}, Kindle # {n?.kindle}.
+                      {director ? ` ${pieceLabel(env, director)} directs (NTC first; his modifier is reversed).` : ''} Every unit ticked is marked Prep Fire whatever the outcome; all attempts here are predesignated now (ASLRB B25.11).
+                    </p>
+                    <ul className="setup-rules small">
+                      {director && mmcs.map((m) => row(m, director, kindle.picks.includes(m.id), () => setKindle({ ...kindle, picks: kindle.picks.includes(m.id) ? kindle.picks.filter((x) => x !== m.id) : [...kindle.picks, m.id] })))}
+                      {smcs.map((sm) => row(sm, null, kindle.self === sm.id, () => setKindle({ ...kindle, self: kindle.self === sm.id ? null : sm.id, picks: sm.id === director?.id ? [] : kindle.picks })))}
+                    </ul>
+                    {err && <p className="hint warn">{err}</p>}
+                    <div className="buttons">
+                      <button className="ghost" onClick={() => setKindle(null)}>
+                        Cancel
+                      </button>
+                      <button className="primary" disabled={!!err} onClick={() => { run({ type: 'fire.kindle', loc, attempts }); setKindle(null); }}>
+                        Attempt
+                      </button>
+                    </div>
+                  </div>
+                );
+              })()}
+              {douse && decision.kind === 'phase' && (phase === 'MPh' || phase === 'DFPh') && decision.owner === owner && (() => {
+                // Fighting a Flame (ASLRB B24.72, B24.7): one DR for every unit joining; a leader among them directs.
+                const loc = douse.loc;
+                const flame = flamesAt(env, loc)[0];
+                const candidates = clearers(env, loc, owner!);
+                const picked = candidates.filter((p) => douse.picks.includes(p.id));
+                const director = picked.find((p) => defOf(env, p).kind === 'leader');
+                const units = picked.filter((p) => p.id !== director?.id).map((p) => p.id);
+                const { drm, explain } = clearanceDrm(env, loc, units, director?.id);
+                const a = flame ? { type: 'fire.extinguish', loc, flame: flame.id, units, ...(director ? { director: director.id } : {}) } : null;
+                const err = !a ? 'No Flame here any more' : plain(session.check(a));
+                return (
+                  <div className="composer">
+                    <p className="hint">
+                      <b>Fight the fire in {hexLabel(hexOfLoc(loc))}{levelOfLoc(loc) ? ` level ${levelOfLoc(loc)}` : ''}</b>: Clearance DR {drm ? `${drm > 0 ? '+' : ''}${drm}` : '±0'}{explain.length ? ` (${explain.join(', ')})` : ''} · ≤ 2 extinguishes · 3–6 Hampers this Player Turn. The units are TI and Hazardous Movement for the Player Turn; a failure earns a Labor counter (ASLRB B24.72, B24.8).
+                    </p>
+                    <ul className="setup-rules small">
+                      {candidates.map((p) => (
+                        <li key={p.id}>
+                          <label>
+                            <input type="checkbox" checked={douse.picks.includes(p.id)} onChange={() => setDouse({ ...douse, picks: douse.picks.includes(p.id) ? douse.picks.filter((x) => x !== p.id) : [...douse.picks, p.id] })} /> {pieceLabel(env, p)}
+                            {defOf(env, p).kind === 'leader' && <span className="muted"> directs</span>}
+                          </label>
+                        </li>
+                      ))}
+                    </ul>
+                    {err && <p className="hint warn">{err}</p>}
+                    <div className="buttons">
+                      <button className="ghost" onClick={() => setDouse(null)}>
+                        Cancel
+                      </button>
+                      <button className="primary" disabled={!!err || !a} onClick={() => { if (a) run(a); setDouse(null); }}>
+                        Declare (TI)
+                      </button>
+                    </div>
+                  </div>
+                );
+              })()}
+              {decision.kind === BREACH_SIDE_DECISION && (
+                // A HE KIA along a hexspine: the firer picks which of the two hexsides at that corner is Breached (ASLRB B23.9221).
+                <div className="composer">
+                  <p className="hint">
+                    The KIA in {hexLabel(hexOfLoc(decision.data?.['loc'] as string))} Breaches the Fortified Building Location: the line of fire ran along a hexspine, so choose which of its two hexsides is Breached (ASLRB B23.9221).
+                  </p>
+                  <div className="buttons">
+                    {((decision.data?.['options'] as string[] | undefined) ?? []).map((toward) => (
+                      <button key={toward} className="primary" onClick={() => run({ type: 'breach.choose', toward })}>
+                        The {hexLabel(toward)} side
+                      </button>
+                    ))}
+                  </div>
                 </div>
               )}
 
@@ -4290,9 +4683,7 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
                     )}
                     <div className="row">
                       <span>PF check</span>
-                      <b>
-                        dr{drm ? ` ${drm > 0 ? '+' : ''}${drm}` : ''} ≤ 3
-                      </b>
+                      <b>needs {pfCheckNeedText(drm, [])}</b>
                     </div>
                     {notes.length > 0 && <div className="muted small">{notes.join(' · ')}</div>}
                     <div className="row">
@@ -4741,14 +5132,20 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
         {secretFortList && (
           <details className="panel small fortified-list" open>
             <summary>
-              <b className={`nat nat-${secretFortList.side}`}>{sideName(secretFortList.side)}</b> fortified building{secretFortList.buildings.length === 1 ? '' : 's'} <span className="muted">{fortOpen ? '(SSR)' : '(secret)'}</span>
+              <b className={`nat nat-${secretFortList.side}`}>{sideName(secretFortList.side)}</b> fortified {secretFortList.locations ? `Location${secretFortList.locations.length === 1 ? '' : 's'}` : `building${secretFortList.buildings.length === 1 ? '' : 's'}`} <span className="muted">{fortOpen ? '(SSR)' : '(secret)'}</span>
             </summary>
             <ul>
-              {secretFortList.buildings.map((b) => (
-                <li key={b}>
-                  Building {buildingLabel(b)}{!fortOpen && <span className="muted">{secretFortList.revealed.includes(b) ? ' · revealed' : ' · hidden'}</span>}
-                </li>
-              ))}
+              {secretFortList.locations
+                ? secretFortList.locations.map((loc) => (
+                    <li key={loc}>
+                      {fortLocLabel(loc)}{!fortOpen && <span className="muted">{(secretFortList.revealedLocs ?? []).includes(loc) ? ' · revealed' : ' · hidden'}</span>}
+                    </li>
+                  ))
+                : secretFortList.buildings.map((b) => (
+                    <li key={b}>
+                      Building {buildingLabel(b)}{!fortOpen && <span className="muted">{secretFortList.revealed.includes(b) ? ' · revealed' : ' · hidden'}</span>}
+                    </li>
+                  ))}
             </ul>
           </details>
         )}
@@ -4771,6 +5168,7 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
           onToggle={togglePiece}
           actingSide={owner}
           swWithHolder={!isFireDecision}
+          fortified={fortifiedLocs}
         />
 
         <section
@@ -4800,7 +5198,7 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
                       key={l.seq + l.text}
                       className={`log-${l.kind} ${l.opens ? 'opens' : ''} ${l.los ? 'has-los' : ''} ${l.seq === losReview ? 'reviewing' : ''}`}
                       onClick={l.los ? () => setLosReview((r) => (r === l.seq ? null : l.seq)) : undefined}
-                      title={l.los ? (l.seq === losReview ? 'Hide the LOS' : 'Show this shot\'s LOS on the map') : undefined}
+                      title={l.los ? (l.seq === losReview ? 'Hide the LOS' : l.kind === 'fire' ? 'Show this shot\'s LOS on the map' : 'Show the Interdiction LOS on the map') : undefined}
                     >
                       <LogText text={l.text} />
                       {l.detail && (
@@ -4825,7 +5223,7 @@ function hexOfId(state: { pieces: Record<string, Piece> }, id: string) {
   return p?.loc.kind === 'hex' ? p.loc.hex : '';
 }
 
-function decisionTitle(kind: string, phase: string, fortifyOpen = false, endingMove = false) {
+function decisionTitle(kind: string, phase: string, fortifyOpen = false, endingMove = false, fortifyByLoc = false) {
   switch (kind) {
     case 'firstFire':
       return endingMove ? 'Move over: Defensive First Fire?' : 'Defensive First Fire?';
@@ -4840,7 +5238,12 @@ function decisionTitle(kind: string, phase: string, fortifyOpen = false, endingM
     case 'offboardSetup':
       return 'Set up reinforcements offboard';
     case 'fortify':
+      if (fortifyByLoc) return fortifyOpen ? 'Fortify Locations' : 'Fortify Locations (secret)';
       return fortifyOpen ? 'Fortify a building' : 'Fortify buildings (secret)';
+    case BREACH_SIDE_DECISION:
+      return 'Breach: which hexside?';
+    case BLAZE_ESCAPE_DECISION:
+      return 'Blaze: leave or stay?';
     case 'scatterPlan':
       return 'Stacks and rendezvous hexes';
     case 'scatterRoll':

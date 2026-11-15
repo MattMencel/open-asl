@@ -24,6 +24,8 @@ describe('Field Promotion on a self-rally: SK1/SK4 5.3 literally, ASLRB A18.11 i
     { id: 'g1', def: 'ge.467', side: 'ge', hex: 'yP9' },
   ];
   const promotions = (r: { events: { type: string; payload: unknown }[] }) => ev(r, 'sk1.leaderCreation').length;
+  /** Full ASL rolls a Wind Change DR as the RPh begins (ASLRB B25.65): the first two forced dice go to it. */
+  const wind = (extra: typeof aslCoreModules) => (extra.length ? [3, 4] : []);
 
   it('SK and ASL: a second self-rally of the RPh rolling an original 2 rallies the unit but makes no leader', () => {
     for (const extra of [[], aslCoreModules]) {
@@ -36,7 +38,7 @@ describe('Field Promotion on a self-rally: SK1/SK4 5.3 literally, ASLRB A18.11 i
           { id: 'g1', def: 'ge.467', side: 'ge', hex: 'yP9' },
         ],
         // a1: 4+4 (+1 self-rally) fails; a2: 1+1 rallies, a dr of 1 would make a leader.
-        dice: [4, 4, 1, 1, 1],
+        dice: [...wind(extra), 4, 4, 1, 1, 1],
         tables: makesLeaders,
       });
       const s = act(engine, state, { type: 'rally.selfRally', unit: 'a1' }).state;
@@ -49,7 +51,7 @@ describe('Field Promotion on a self-rally: SK1/SK4 5.3 literally, ASLRB A18.11 i
   it('SK: a leader rallying a MMC is no self-rally and leaves the first one to come; ASL: it is the first MMC Rally attempt', () => {
     // The leader rallies a1 (5+5 fails), then a2 self-rallies on an original 2.
     const run = (extra: typeof aslCoreModules) => {
-      const { engine, state } = makeEngine({ startPhase: 'RPh', extra, pieces: pieces(false), dice: [5, 5, 1, 1, 1], tables: makesLeaders });
+      const { engine, state } = makeEngine({ startPhase: 'RPh', extra, pieces: pieces(false), dice: [...wind(extra), 5, 5, 1, 1, 1], tables: makesLeaders });
       const s = act(engine, state, { type: 'rally.rally', leader: 'aL', unit: 'a1' }).state;
       return act(engine, s, { type: 'rally.selfRally', unit: 'a2' });
     };
@@ -60,7 +62,7 @@ describe('Field Promotion on a self-rally: SK1/SK4 5.3 literally, ASLRB A18.11 i
   it('SK: a leader\'s own self-rally is the side\'s first self-rally attempt; ASL: it is no MMC Rally attempt', () => {
     // The broken leader self-rallies first (5+5 fails), then a2 self-rallies on an original 2.
     const run = (extra: typeof aslCoreModules) => {
-      const { engine, state } = makeEngine({ startPhase: 'RPh', extra, pieces: pieces(true), dice: [5, 5, 1, 1, 1], tables: makesLeaders });
+      const { engine, state } = makeEngine({ startPhase: 'RPh', extra, pieces: pieces(true), dice: [...wind(extra), 5, 5, 1, 1, 1], tables: makesLeaders });
       const s = act(engine, state, { type: 'rally.selfRally', unit: 'aL' }).state;
       return act(engine, s, { type: 'rally.selfRally', unit: 'a2' });
     };
@@ -79,7 +81,7 @@ describe('Field Promotion on a self-rally: SK1/SK4 5.3 literally, ASLRB A18.11 i
           { id: 'r1', def: 'ru.527', side: 'ru', hex: 'yN5', tags: { broken: true } },
         ],
         // Rally 1+1; the Leader Creation dr (6) is rolled, and makes no leader.
-        dice: [1, 1, 6],
+        dice: [...wind(extra), 1, 1, 6],
         tables: makesLeaders,
       });
       const s = act(engine, state, { type: 'endPhase' }).state;
@@ -249,7 +251,8 @@ describe('SW repair: one attempt per unit by SK1/SK4 3.1, as many SW as it could
         { id: 'mg2', def: 'am.MMG', side: 'am', heldBy: 'a1', tags: { malf: true } },
         { id: 'g1', def: 'ge.467', side: 'ge', hex: 'yP9' },
       ],
-      dice,
+      // Full ASL rolls a Wind Change DR as the RPh begins (ASLRB B25.65): two dice go to it first.
+      dice: extra.length ? [3, 4, ...dice] : dice,
     });
 
   it('SK: a squad tries to repair one SW, its one action of the RPh', () => {

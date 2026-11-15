@@ -153,13 +153,14 @@ export class Engine {
     return state.decisions[state.decisions.length - 1];
   }
 
-  /** Concrete legal actions for `side` (empty when it's not their decision). */
-  legalActions(state: GameState, side: string): Action[] {
+  /** Concrete legal actions for `side`; optional types skip unrelated generators. */
+  legalActions(state: GameState, side: string, types?: readonly string[]): Action[] {
     const decision = this.currentDecision(state);
     if (!decision || decision.owner !== side || state.result) return [];
     const env = this.env(state);
     const out: Action[] = [];
     for (const def of this.ruleset.actions.values()) {
+      if (types && !types.includes(def.type)) continue;
       if (!def.decisionKinds.includes(decision.kind) || !def.legal) continue;
       for (const a of def.legal(env, decision)) {
         out.push({ ...a, side, decisionId: decision.id } as Action);

@@ -16,6 +16,12 @@ import { T2, caTurnedIllegal } from '../sk2/status';
 import { hitLocation } from './facing';
 import { installVehicleFacing } from './vehicleFacing';
 
+/** A Buttoned Up Open-Topped AFV fired on only from its own hex: its crew is still vulnerable (SK4 7.13; ASLRB A7.211). */
+const otOwnHex = (env: QueryEnv, attack: FireAttackCtx, unit: PieceId) => {
+  const p = pieceOf(env, unit);
+  return !isCe(p) && !!vehicle(env, p)?.openTopped && attack.parts.length > 0 && attack.parts.every((part) => part.dist === 0);
+};
+
 /*
  * Fire by and at vehicles (SK4 3.2.4, 7.2, 7.7, 7.11, 7.12; To Hit cases 10, 13, 15, 22, 24, 25).
  * A vehicle's Main Armament fires through the SK2 ordnance module as a Gun whose "manning unit" is
@@ -25,10 +31,11 @@ import { installVehicleFacing } from './vehicleFacing';
  */
 
 /** MP a vehicle has spent in the LOS of `firerHex` this move: its current trail, or the one its last move left (SK4 case 24). */
-export function mpInLosOf(env: QueryEnv, v: Piece, firerHex: HexId): number {
+export function mpInLosOf(env: QueryEnv, v: Piece, firerHex: HexId, blind = false): number {
   const ms = moveState(env);
   const trail: { hex: HexId; mp: number }[] = ms && ms.units[0] === v.id ? (ms.trail ?? []) : JSON.parse((v.tags[T3.mpTrail] as string | undefined) ?? '[]');
-  return trail.filter((t) => statics(env).map.hex(t.hex) && hasLos(env, firerHex, t.hex)).reduce((n, t) => n + t.mp, 0);
+  // A preview before the shot is declared may not trace the LOS (ASLRB A6.11): it counts every MP spent on the map.
+  return trail.filter((t) => statics(env).map.hex(t.hex) && (blind || hasLos(env, firerHex, t.hex))).reduce((n, t) => n + t.mp, 0);
 }
 
 /** Why a vehicle's Main Armament may not fire now (SK4 7.2, 7.10, 3.2.5, 3.5), or null. */
@@ -81,7 +88,7 @@ export function boundingDrm(sc: ShotCtx, env: QueryEnv): number {
   if (!bff) return 0;
   // The MP rows are Bounding First Fire's; Bounding Fire in the AFPh and a Motion vehicle's fire in any
   // other phase (case 16 "add case 14") take the first row (reading of the chart's "In AFPh or BFF > 3 MP").
-  const mp = sc.mode === 'bounding' ? mpInLosOf(env, f, sc.target) : 99;
+  const mp = sc.mode === 'bounding' ? mpInLosOf(env, f, sc.target, !!sc.losBlind) : 99;
   return (mp > 3 ? 4 : mp >= 2.5 ? 5 : 6) + nt;
 }
 
@@ -94,7 +101,7 @@ function movingTargetDrm(sc: ShotCtx, env: QueryEnv): number {
   if (!t || isWreck(t)) return 0;
   if (inMotion(t)) return 2;
   if (!isMovingTarget(t)) return 0;
-  const mp = mpInLosOf(env, t, sc.hex);
+  const mp = mpInLosOf(env, t, sc.hex, !!sc.losBlind);
   return mp <= 1 ? 4 : mp <= 3 ? 3 : 2;
 }
 /** Case 22 for a vehicle target: its printed size. */
@@ -187,7 +194,7 @@ export const vehicleFireModule: RuleModule = {
     th('withinHex', 'case 10', (sc, env) => `+${woodsBuildingOrRubble(env, sc.hex) ? 4 : 2} fire within the hex`, (sc) => sc.range === 0, (sc, env) => (woodsBuildingOrRubble(env, sc.hex) ? 4 : 2));
     th('bu', 'case 13', '+1 Buttoned Up', (sc, env) => !!firerVehicleOf(sc, env) && !isCe(firerVehicleOf(sc, env)!), () => 1);
     th('stun', 'case 15', '+1 Stun', (sc, env) => firerVehicleOf(sc, env)?.tags[T3.stun] === 'plus1', () => 1);
-    th('bounding', 'case 14', (sc, env) => `+${boundingDrm(sc, env)} Bounding ${sc.mode === 'bounding' ? 'First ' : ''}Fire (${vehicle(env, firerVehicleOf(sc, env)!)!.turret === 'NT' ? 'NT' : 'turret'}${sc.mode === 'bounding' ? `, ${mpInLosOf(env, firerVehicleOf(sc, env)!, sc.target)} MP in the target's LOS` : ''})`, (sc, env) => boundingDrm(sc, env) > 0, boundingDrm);
+    th('bounding', 'case 14', (sc, env) => `+${boundingDrm(sc, env)} Bounding ${sc.mode === 'bounding' ? 'First ' : ''}Fire (${vehicle(env, firerVehicleOf(sc, env)!)!.turret === 'NT' ? 'NT' : 'turret'}${sc.mode === 'bounding' ? (sc.losBlind ? `, ${mpInLosOf(env, firerVehicleOf(sc, env)!, sc.target, true)} MP spent; those in the target's LOS count when you fire` : `, ${mpInLosOf(env, firerVehicleOf(sc, env)!, sc.target)} MP in the target's LOS`) : ''})`, (sc, env) => boundingDrm(sc, env) > 0, boundingDrm);
     // Case 8 never applies to Bounding First Fire (SK4 3.3.2.2).
     r.suppress<'ordnance.thDrm'>({ id: 'sk3.th.suppress.ca-bff', query: 'ordnance.thDrm', target: 'sk2.th.caChange', when: (sc) => sc.mode === 'bounding' });
     // Case 16: Motion/Non-Stopped fire adds the lower die again, and +2/+1 on the ITT at 1/2 hexes.
@@ -206,7 +213,7 @@ export const vehicleFireModule: RuleModule = {
       'case 24',
       (sc, env) => {
         const t = targetVehicleOf(sc, env)!;
-        return inMotion(t) ? '+2 target in Motion' : `+${movingTargetDrm(sc, env)} moving vehicle (${mpInLosOf(env, t, sc.hex)} MP in your LOS)`;
+        return inMotion(t) ? '+2 target in Motion' : sc.losBlind ? `+${movingTargetDrm(sc, env)} moving vehicle (${mpInLosOf(env, t, sc.hex, true)} MP spent; those in your LOS count when you fire)` : `+${movingTargetDrm(sc, env)} moving vehicle (${mpInLosOf(env, t, sc.hex)} MP in your LOS)`;
       },
       (sc, env) => sc.shot.targetType === 'VTT' && movingTargetDrm(sc, env) > 0,
       movingTargetDrm,
@@ -223,7 +230,9 @@ export const vehicleFireModule: RuleModule = {
       query: 'fire.unitDrm',
       ref: 'SK4 7.7',
       label: ({ unit }, env) => `+${vehicle(env, pieceOf(env, unit))!.ceDrm} Crew Exposed`,
-      when: ({ unit, attack }, env) => !!vehicle(env, pieceOf(env, unit)) && isCe(pieceOf(env, unit)) && attack.ordnance?.targetType !== 'ATT' && env.query('hex.tem', { hex: attack.target }, 0) <= 0,
+      // A Buttoned Up Open-Topped crew fired on from its own hex is vulnerable with the same DRM (SK4 7.13 "normal CE DRM
+      // applies"; ASLRB A7.211). A full ASL Snap Shot ignores the hex's TEM (ASLRB A8.15), so the CE DRM is not on top of it.
+      when: ({ unit, attack }, env) => !!vehicle(env, pieceOf(env, unit)) && (isCe(pieceOf(env, unit)) || otOwnHex(env, attack, unit)) && attack.ordnance?.targetType !== 'ATT' && (!!attack.snap || env.query('hex.tem', { hex: attack.target }, 0) <= 0),
       apply: (v, { unit }, env) => v + vehicle(env, pieceOf(env, unit))!.ceDrm,
     });
     // Area Target Type vs an AFV (7.11): -1 when all its Armor Factors are ≤ 4, +1 when all are ≥ 8.
@@ -273,7 +282,8 @@ export const vehicleFireModule: RuleModule = {
         // Infantry fire, MG fire and the Infantry Target Type: no effect on a BU AFV; a CE crew takes the result (3.2.3, 7.7).
         // A BU Open-Topped crew is still vulnerable to fire from its own hex (7.13).
         const sameHex = attack.parts.length > 0 && attack.parts.every((part) => part.dist === 0);
-        if (!isCe(v) && !(vehicle(ctx, v)?.openTopped && sameHex)) {
+        const otExposed = !isCe(v) && !!vehicle(ctx, v)?.openTopped && sameHex;
+        if (!isCe(v) && !otExposed) {
           out[v.id] = { kind: 'none' };
           ctx.emit('sk1.fire.result', { unit: v.id, result: { kind: 'none' }, finalDr: final, explain: [{ id: 'sk3.bu', label: 'Buttoned Up: no effect' }] });
           continue;
@@ -281,7 +291,7 @@ export const vehicleFireModule: RuleModule = {
         const res = tables.ift(column, final);
         out[v.id] = res;
         ctx.emit('sk1.fire.result', { unit: v.id, result: res, finalDr: final, ...(extra.value ? { drm: extra.value, explain: extra.trace.filter((t) => !t.suppressedBy && t.label).map((t) => ({ id: t.id, label: t.label! })) } : {}) });
-        crewTakesResult(ctx, v.id, res, 'fire on the CE crew');
+        crewTakesResult(ctx, v.id, res, otExposed ? 'fire from its own hex on the Open-Topped crew' : 'fire on the CE crew', otExposed);
       }
       const rest = attack.targets.filter((u) => !vs.some((v) => v.id === u));
       if (rest.length) next?.(ctx, { ...attack, targets: rest }, column, baseFinal, out);

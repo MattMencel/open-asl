@@ -3,3 +3,15 @@ packages:
   - "apps/*"
   - "tools/*"
   - "functions"
+
+# Patched releases of transitive dependencies with security advisories, scoped to the vulnerable ranges so other
+# copies stay where their parents put them.
+# Not minimatch: forcing its 9.x/10.x copies to 11 makes firebase-tools' hosting deploy find 0 files to upload.
+overrides:
+  "hono@<4.13.16": "4.13.16"
+  "@hono/node-server@>=2.0.0 <2.1.6": "2.1.6"
+  "fast-xml-parser@<=5.11.2": "5.12.0"
+  "re2js@>=2.2.0 <2.8.7": "2.8.7"
+  "fast-uri@>=3.0.0 <3.1.9": "3.1.9"
+  "@grpc/grpc-js@<1.13.6": "1.14.6"
+  "uuid@<11.1.1": "11.1.1"

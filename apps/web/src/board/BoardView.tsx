@@ -1,8 +1,8 @@
 import { useEffect, useRef } from 'react';
 import { Application, Assets, Container, Graphics, Rectangle, Sprite, Text, Texture } from 'pixi.js';
 import { cubeDistance, cubeNeighbors, type GameState, type HexId, type Piece, type QueryEnv, type SideId } from '@asl/engine';
-import { GEO, coveredArc, defOf, gun as gunDef, gunHex, hexOf as hexOfPiece, inCoveredArc, isCaptured, isWeaponDef, isWreck, spineDirections, swHeldBy, tcaOf, vcaOf, vehicle as vehicleDef, type MapHex, type ObjectiveArea, type Statics, acquisitionOf, gunIdents, ordnanceOf, SMOKE58, hexOfLoc, levelOfLoc, locKey } from '@asl/rules';
-import { CAVE_GONE, UNKNOWN_DEF_ID, cavesParams, caveLoc, cornerOffset, hexPixel, isCaveLoc, moveState, shownFireMarker, smokeGrenades } from '@asl/rules';
+import { GEO, coveredArc, defOf, gun as gunDef, gunHex, hexOf as hexOfPiece, inCoveredArc, isCaptured, isWeaponDef, isWreck, spineDirections, swHeldBy, tcaOf, vcaOf, vehicle as vehicleDef, type MapHex, type ObjectiveArea, type Statics, acquisitionOf, gunIdents, ordnanceOf, SMOKE58, stackOrder, hexOfLoc, levelOfLoc, locKey } from '@asl/rules';
+import { CAVE_GONE, UNKNOWN_DEF_ID, cavesParams, caveLoc, cornerOffset, hexPixel, isCaveLoc, moveState, shownFireMarker, sideToward, smokeGrenades } from '@asl/rules';
 import { playableBounds, playableRect, printedRect, type CropPlacement } from './crop';
 import { boardImage, counterImage, cxMarker, loadTurrets, markerImage, splitTurret } from '../game/assets';
 import { identColor } from './ident';
@@ -94,6 +94,11 @@ export interface BoardOverlay {
   bypass?: { hex: HexId; sides: number[]; at: number; from?: HexId | null; units: Set<string> } | null;
   /** Units in Bypass: they wear a BYP tag (full ASL). */
   inBypass?: Set<string>;
+  /**
+   * Full ASL Snap Shot (ASLRB A8.15), while one is previewed or its result shown: the moving `units` are drawn back on the
+   * hexside of `hex` they crossed coming from `from`, wearing a SNAP tag, and that hexside is lit.
+   */
+  snap?: { hex: HexId; from: HexId; units: Set<string> } | null;
   /** Units that have declared fire wear this marker (e.g. FirePrep) before the shot resolves. */
   /** A declared attack not yet resolved: each firing unit or SW and the fire marker it will wear. */
   declaredFire?: { units: Map<string, string> };
@@ -190,8 +195,12 @@ interface Props {
   objectives?: ObjectiveArea[];
   /** Hexes under a side's Control: a small nationality chit sits in the hex centre, under the counters. */
   control?: Record<HexId, SideId>;
-  /** Hexes of fortified buildings this viewer may know about (SSR): drawn as a ramparted outline under the counters. */
-  fortified?: HexId[];
+  /** Fortified building hexes this viewer may know about (SSR): drawn as a ramparted outline under the counters. */
+  fortified?: FortifiedHex[];
+  /** Locations on fire (full ASL B25): a ring on the hex, the Flame or Blaze chit and the Blaze's smoke above the stack. */
+  fires?: FireHex[];
+  /** Hexes rubbled in play (full ASL B24): a grey ring on the hex and the rubble chit. */
+  rubble?: RubbleHex[];
   /** Map hexes out of play (S36: the boards a secret game length leaves out, once revealed): drawn dark. */
   outOfPlay?: HexId[];
   /** Hide every counter and marker so the terrain underneath can be seen. */
@@ -305,6 +314,8 @@ const STACK_DX = 4;
 const STACK_DY = -4;
 /** The pile key suffix of the units of a hex that are in Bypass (drawn on a corner, full ASL). */
 const BYPASS_PILE = '#bypass';
+/** The pile key suffix of the units drawn on the hexside they crossed, for a Snap Shot (full ASL). */
+const SNAP_PILE = '#snap';
 /** How far the piles of a hex with an upper building level move apart: the upper one up-right, the ground one down-left (full ASL). */
 const LEVEL_SHIFT = 12;
 /** Extra edge of the Level counter left showing under the pile on it. */
@@ -687,25 +698,100 @@ function drawOutOfPlay(g: Graphics, hexes: HexId[], hexOf: (id: HexId) => MapHex
   }
 }
 
+/**
+ * A fortified building hex as the board shows it: the rampart outline round the fortified hexes of a building, a
+ * badge when its upper level is fortified too (ASLRB B23.912), and a gap with a red broken edge on each Breached
+ * hexside (B23.9221). `breached` lists hexsides as `sideToward` numbers them (0 south-east, clockwise).
+ */
+export interface FortifiedHex {
+  hex: HexId;
+  /** Level 1 is fortified as well as the ground. */
+  upper?: boolean;
+  /** Only the upper level is known fortified (never by the rules; kept for a view that shows a level alone). */
+  upperOnly?: boolean;
+  breached?: number[];
+}
+
+/** A Location on fire as the board shows it (ASLRB B25): the Blaze or its Flames, and whether the Blaze's smoke is drawn. */
+export interface FireHex {
+  loc: string;
+  blaze?: boolean;
+  /** Flame counters in the Location (none when a Blaze). */
+  flames: number;
+  hampered?: boolean;
+  /** The Blaze's smoke (none in Heavy Winds, B25.63). */
+  smoke?: boolean;
+}
+/** A hex rubbled in play (ASLRB B24): from the ground up, or from level 1 with the ground intact. */
+export interface RubbleHex {
+  hex: HexId;
+  from: number;
+  kind: 'stone' | 'wood';
+  burning?: boolean;
+}
+
+const BLAZE_COLOR = 0xe11e14;
+const FLAME_COLOR = 0xff8c00;
+const RUBBLE_COLOR = 0xb0b0b0;
+/** Fire and rubble rings: a tinted wash and a thick ring on the hex, so a burning or rubbled hex reads under a stack and from afar. */
+function drawFires(g: Graphics, fires: FireHex[], rubble: RubbleHex[], hexOf: (id: HexId) => MapHex | undefined, t: ViewTransform) {
+  const ring = (hex: HexId, color: number, fill: number, width: number) => {
+    const h = hexOf(hex);
+    if (!h) return;
+    const c = hexCenter(h, placementsUnused);
+    const poly = hexPolygon(c.x, c.y, t);
+    g.poly(poly).fill({ color, alpha: fill });
+    g.poly(poly).stroke({ color, width, alpha: 0.9 });
+  };
+  for (const r of rubble) ring(r.hex, RUBBLE_COLOR, r.from === 0 ? 0.28 : 0.12, 5);
+  // A Flame's ring under a Blaze's, when a hex holds both at different levels.
+  for (const f of fires.filter((x) => !x.blaze)) ring(hexOfLoc(f.loc), FLAME_COLOR, 0.1, 5);
+  for (const f of fires.filter((x) => x.blaze)) ring(hexOfLoc(f.loc), BLAZE_COLOR, 0.18, 6);
+}
+
 /** Fortified building hexes: a rampart-coloured wash and a thick double outline around the building. */
 const FORT_COLOR = 0x8a3b12;
-function drawFortified(g: Graphics, hexes: HexId[], hexOf: (id: HexId) => MapHex | undefined, t: ViewTransform) {
+function drawFortified(g: Graphics, labels: Container, hexes: FortifiedHex[], hexOf: (id: HexId) => MapHex | undefined, t: ViewTransform) {
   g.clear();
-  const centers = hexes.map((id) => hexOf(id)).filter((h): h is MapHex => !!h).map((h) => hexCenter(h, placementsUnused));
-  const inside = (x: number, y: number) => centers.some((c) => Math.hypot(c.x - x, c.y - y) < 4);
-  for (const c of centers) g.poly(hexPolygon(c.x, c.y, t)).fill({ color: FORT_COLOR, alpha: 0.22 });
-  for (const c of centers) {
+  labels.removeChildren();
+  const found = hexes.map((f) => ({ f, h: hexOf(f.hex) })).filter((x): x is { f: FortifiedHex; h: MapHex } => !!x.h).map((x) => ({ f: x.f, c: hexCenter(x.h, placementsUnused) }));
+  const inside = (x: number, y: number) => found.some(({ c }) => Math.hypot(c.x - x, c.y - y) < 4);
+  for (const { c } of found) g.poly(hexPolygon(c.x, c.y, t)).fill({ color: FORT_COLOR, alpha: 0.22 });
+  for (const { f, c } of found) {
     const pts = hexCorners(c.x, c.y);
     for (let i = 0; i < 12; i += 2) {
       const ax = pts[i]!;
       const ay = pts[i + 1]!;
       const bx = pts[(i + 2) % 12]!;
       const by = pts[(i + 3) % 12]!;
-      if (inside(2 * ((ax + bx) / 2) - c.x, 2 * ((ay + by) / 2) - c.y)) continue;
+      // `hexCorners` starts at the west corner; `sideToward` numbers hexsides from the one after the east corner.
+      const side = (i / 2 + 3) % 6;
       const a = t.toView(ax, ay);
       const b = t.toView(bx, by);
+      if (f.breached?.includes(side)) {
+        // A Breach: the rampart is open here; a broken red line marks the gap.
+        for (let k = 0; k < 6; k += 2) {
+          const p = { x: a.x + ((b.x - a.x) * k) / 6, y: a.y + ((b.y - a.y) * k) / 6 };
+          const q = { x: a.x + ((b.x - a.x) * (k + 1)) / 6, y: a.y + ((b.y - a.y) * (k + 1)) / 6 };
+          g.moveTo(p.x, p.y).lineTo(q.x, q.y).stroke({ color: 0xe0504a, width: 3, alpha: 1 });
+        }
+        continue;
+      }
+      if (inside(2 * ((ax + bx) / 2) - c.x, 2 * ((ay + by) / 2) - c.y)) continue;
       g.moveTo(a.x, a.y).lineTo(b.x, b.y).stroke({ color: 0xf2e8c8, width: 6, alpha: 0.9 });
       g.moveTo(a.x, a.y).lineTo(b.x, b.y).stroke({ color: FORT_COLOR, width: 3, alpha: 1 });
+    }
+    if (f.upper || f.upperOnly) {
+      // The upper level is fortified too: a small badge at the top of the hex (map pixels: the layer zooms with the board).
+      const text = new Text({ text: f.upperOnly ? 'F·1' : 'F·G+1', resolution: 3, style: { fontFamily: 'Oswald, Impact, sans-serif', fontWeight: '700', fontSize: 10, letterSpacing: 0.6, fill: 0xf6ecc8 } });
+      const v = t.toView(c.x, c.y - GEO.px.hexHeight * 0.36);
+      const w = text.width + 8;
+      const h = text.height + 3;
+      const box = new Graphics();
+      box.roundRect(v.x - w / 2, v.y - h / 2, w, h, 2).fill({ color: FORT_COLOR, alpha: 0.95 }).stroke({ color: 0xf2e8c8, width: 1, alpha: 0.9 });
+      text.x = v.x - text.width / 2;
+      text.y = v.y - text.height / 2;
+      labels.addChild(box, text);
     }
   }
 }
@@ -744,6 +830,9 @@ function unitMarkers(p: Piece, nationality?: string, moving?: string): string[] 
   if (fire === 'first') m.push('First');
   if (fire === 'final') m.push('Final');
   if (t['wounds']) m.push('Wound');
+  // Full ASL: TI for the Player Turn and a Labor counter (ASLRB B24.7, B24.8).
+  if (t['ti']) m.push('TI');
+  if (typeof t['labor'] === 'string') m.push(String(t['labor']).endsWith('@-2') ? 'Labor2' : 'Labor1');
   // A hidden (HIP) unit wears no "?": that is concealment's counter. Its owner sees it drawn faint instead (`hipFaint`).
   // SK4 8.3: the owner's concealed units wear their "?" (the enemy sees a bare "?" stand-in instead).
   if (t['concealed'] && nationality && p.defId !== UNKNOWN_DEF_ID) m.push(`qmark-${nationality}`);
@@ -799,6 +888,8 @@ export function BoardView({
   objectives = [],
   control = {},
   fortified = [],
+  fires = [],
+  rubble = [],
   outOfPlay = [],
   hidePieces = false,
   hideMarkers = false,
@@ -810,7 +901,7 @@ export function BoardView({
   const finder = useRef<HTMLButtonElement>(null);
   const appRef = useRef<Application | null>(null);
   const world = useRef<Container | null>(null);
-  const layers = useRef<{ highlights: Graphics; fort: Graphics; control: Graphics; ca: Graphics; pieces: Container; fx: Container; top: Graphics; controls: Container } | null>(null);
+  const layers = useRef<{ highlights: Graphics; fort: Graphics; fortLabels: Container; control: Graphics; ca: Graphics; pieces: Container; fx: Container; top: Graphics; controls: Container } | null>(null);
   /** The drawn handles' view-space hit circles, and the one under the pointer. */
   const controlHits = useRef<{ c: HexControl; hit(vx: number, vy: number): boolean; dist?(vx: number, vy: number): number }[]>([]);
   const hoverControl = useRef<string | null>(null);
@@ -1160,6 +1251,8 @@ export function BoardView({
       w.addChild(objLayer);
       const highlights = new Graphics();
       const fort = new Graphics();
+      const fortLabels = new Container();
+      fortLabels.eventMode = 'none';
       const control = new Graphics();
       const ca = new Graphics();
       const pieces = new Container();
@@ -1168,8 +1261,8 @@ export function BoardView({
       const fxLayer = new Container();
       const top = new Graphics();
       const controls = new Container();
-      w.addChild(fort, highlights, control, ca, pieces, fxLayer, top, controls);
-      layers.current = { highlights, fort, control, ca, pieces, fx: fxLayer, top, controls };
+      w.addChild(fort, fortLabels, highlights, control, ca, pieces, fxLayer, top, controls);
+      layers.current = { highlights, fort, fortLabels, control, ca, pieces, fx: fxLayer, top, controls };
       showUnitLayers(layers.current, !hideRef.current);
       // Weather over the whole pane, in screen space above the map; it takes no pointer events.
       const weatherLayer = new Graphics();
@@ -1285,7 +1378,7 @@ export function BoardView({
   useEffect(() => {
     if (ready.current) void redraw();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state, overlay, control, fortified, outOfPlay]);
+  }, [state, overlay, control, fortified, fires, rubble, outOfPlay]);
 
   const hideMarkersRef = useRef(hideMarkers);
   hideMarkersRef.current = hideMarkers;
@@ -1967,8 +2060,9 @@ export function BoardView({
     const bare = hideMarkersRef.current;
     const markersOf = (p: Piece) => (bare ? [] : [...unitMarkers(p, natOf(p), moving), ...vehicleMgMarkers(env, p)]);
     drawControl(L.control, ctl, statics, anyHex, center);
-    drawFortified(L.fort, fort, anyHex, xf.current);
+    drawFortified(L.fort, L.fortLabels, fort, anyHex, xf.current);
     drawOutOfPlay(L.fort, dead, anyHex, xf.current);
+    drawFires(L.fort, fires, rubble, anyHex, xf.current);
     drawArcs();
     const urls: (string | null)[] = [];
     await loadTurrets();
@@ -1980,7 +2074,7 @@ export function BoardView({
       if (split) urls.push(split.hull, split.turret);
       for (const m of markersOf(p)) urls.push(markerImage(m));
     }
-    for (const m of ['Smk2', 'Smk3', 'WP1', 'WP2', 'CC', 'Melee', 'RFP01', 'RFP02', 'RFP04', 'RFP06', 'RFP08', 'RFP12', 'acq1wh', 'acq2wh', 'Lev1', 'Lev2', 'Cave', 'CaveOG']) urls.push(markerImage(m));
+    for (const m of ['Smk2', 'Smk3', 'WP1', 'WP2', 'CC', 'Melee', 'RFP01', 'RFP02', 'RFP04', 'RFP06', 'RFP08', 'RFP12', 'acq1wh', 'acq2wh', 'Lev1', 'Lev2', 'Cave', 'CaveOG', 'Blaze', 'Flame', 'Rubble', 'TI', 'Labor1', 'Labor2']) urls.push(markerImage(m));
     if (o.declaredFire) for (const m of new Set(o.declaredFire.units.values())) urls.push(markerImage(m));
     await preload(urls);
     if (token !== redrawToken.current) return;
@@ -2013,6 +2107,7 @@ export function BoardView({
       let at = p.loc.kind === 'hex' ? locKey(p.loc) : p.loc.kind === 'offboard' ? p.loc.hex : undefined;
       if (!at) continue;
       if (byp && p.loc.kind === 'hex' && at === byp.hex && byp.units.has(p.id)) at = `${at}${BYPASS_PILE}`;
+      if (o.snap && p.loc.kind === 'hex' && p.loc.hex === o.snap.hex && o.snap.units.has(p.id)) at = `${at}${SNAP_PILE}`;
       byHex.set(at, [...(byHex.get(at) ?? []), p]);
     }
     const leveledHexes = new Set([...byHex.keys()].filter((k) => k.includes(':')).map(hexOfLoc));
@@ -2054,17 +2149,26 @@ export function BoardView({
       list.push({ level: a.level, area: a.type === 'ATT', letter: idents.get(p.id) ?? '' });
       acquired.set(a.hex, list);
     }
-    const order = [...new Set([...byHex.keys(), ...markedHexes, ...acquired.keys(), ...[...caveHexes].flatMap(([h, gone]) => (gone ? [h] : [caveLoc(h)]))])].sort();
+    // Burning and rubbled Locations show their chits with or without a stack (full ASL B25, B24).
+    const fireByLoc = new Map(fires.map((f) => [f.loc, f] as const));
+    const rubbleByHex = new Map(rubble.map((r) => [r.hex, r] as const));
+    for (const f of fires) if (f.loc.includes(':')) leveledHexes.add(hexOfLoc(f.loc));
+    const order = [...new Set([...byHex.keys(), ...markedHexes, ...acquired.keys(), ...fireByLoc.keys(), ...rubbleByHex.keys(), ...[...caveHexes].flatMap(([h, gone]) => (gone ? [h] : [caveLoc(h)]))])].sort();
     for (const key of order) {
-      const onCorner = key.endsWith(BYPASS_PILE);
-      const hex = onCorner ? key.slice(0, -BYPASS_PILE.length) : key;
+      const onSide = key.endsWith(SNAP_PILE);
+      const onCorner = key.endsWith(BYPASS_PILE) || onSide;
+      const hex = onSide ? key.slice(0, -SNAP_PILE.length) : onCorner ? key.slice(0, -BYPASS_PILE.length) : key;
       const h = anyHex(hexOfLoc(hex));
       // A hidden hex (S70's Connection Location) is on no board: its units are listed in the side panel.
       if (!h || statics.map.isHidden?.(h.id)) continue;
       const level = levelOfLoc(hex);
       const inCave = isCaveLoc(hex);
       const caveHex = caveHexes.get(h.id) === false;
-      const cornerAt = onCorner && byp ? (() => { const m = hexCenter(h, placements); const off = cornerOffset(byp.at); return xf.current.toView(m.x + off.x, m.y + off.y); })() : null;
+      const k = onSide && o.snap ? sideToward(statics.map, o.snap.hex, o.snap.from) : null;
+      const cornerAt =
+        onSide && k !== null
+          ? (() => { const m = hexCenter(h, placements); const a = cornerOffset(k); const b = cornerOffset((k + 1) % 6); return xf.current.toView(m.x + (a.x + b.x) / 2, m.y + (a.y + b.y) / 2); })()
+          : onCorner && byp && !onSide ? (() => { const m = hexCenter(h, placements); const off = cornerOffset(byp.at); return xf.current.toView(m.x + off.x, m.y + off.y); })() : null;
       const c0 = cornerAt ?? center(h);
       const shift = onCorner || !leveledHexes.has(h.id) ? 0 : caveHex ? (inCave ? -LEVEL_SHIFT : LEVEL_SHIFT) : level ? LEVEL_SHIFT * level : -LEVEL_SHIFT;
       const c = { x: c0.x + shift, y: c0.y - shift };
@@ -2247,9 +2351,9 @@ export function BoardView({
           const letter = gunIdents(s, env).get(p.id);
           if (letter) box.addChild(identBadge(letter, 9, 9, 8));
         }
-        const badges = d.kind === 'gun' ? unitBadges(p, isCaptured(env as never, p)) : [...(o.onRoad?.has(p.id) ? ['ROAD'] : []), ...(o.assaultMoving?.has(p.id) ? ['AM'] : []), ...(o.inBypass?.has(p.id) ? ['BYP'] : []), ...(o.smokeTried?.has(p.id) ? ['SMK'] : [])];
+        const badges = d.kind === 'gun' ? unitBadges(p, isCaptured(env as never, p)) : [...(o.onRoad?.has(p.id) ? ['ROAD'] : []), ...(o.assaultMoving?.has(p.id) ? ['AM'] : []), ...(o.inBypass?.has(p.id) ? ['BYP'] : []), ...(o.snap?.units.has(p.id) ? ['SNAP'] : []), ...(o.smokeTried?.has(p.id) ? ['SMK'] : [])];
         badges.forEach((label, k) => {
-          const bg = new Graphics().roundRect(size - 26, 2 + k * 14, 24, 12, 3).fill({ color: label === 'CAPT' ? 0xc0392b : label === 'ROAD' ? 0x8a6a2c : label === 'BYP' ? 0xc77d0a : label === 'SMK' ? 0x5b6670 : label === 'AM' ? 0x1f8a5b : 0x2a2a2a, alpha: 0.9 });
+          const bg = new Graphics().roundRect(size - 26, 2 + k * 14, 24, 12, 3).fill({ color: label === 'CAPT' ? 0xc0392b : label === 'ROAD' ? 0x8a6a2c : label === 'BYP' ? 0xc77d0a : label === 'SNAP' ? 0x2f7fd6 : label === 'SMK' ? 0x5b6670 : label === 'AM' ? 0x1f8a5b : 0x2a2a2a, alpha: 0.9 });
           const tx = new Text({ text: label, style: { fontSize: 9, fill: 0xffffff, fontWeight: 'bold' } });
           tx.position.set(size - 24, 2 + k * 14);
           box.addChild(bg, tx);
@@ -2309,6 +2413,17 @@ export function BoardView({
       if (markers[CAVE_GONE] && caveHexes.has(hex)) locMarkers.push('CaveOG');
       const rfp = markers['residualFp'] as number | undefined;
       if (rfp) locMarkers.push(`RFP${String(Math.min(12, rfp)).padStart(2, '0')}`);
+      // Rubble under the pile's markers; Fire above everything: a Flame hex's units must not hide the fire, and a Blaze
+      // hex holds none for long (ASLRB B25.4). The Blaze's smoke is the dispersed-Smoke marker (B25.2: no counter is placed, the
+      // Hindrance follows from the Blaze itself).
+      const rb = !onCorner && level === 0 ? rubbleByHex.get(hex) : undefined;
+      if (rb) locMarkers.unshift('Rubble');
+      const fire = onCorner ? undefined : fireByLoc.get(hex);
+      if (fire) {
+        if (fire.blaze) locMarkers.push('Blaze');
+        else for (let n = 0; n < fire.flames; n++) locMarkers.push('Flame');
+        if (fire.blaze && fire.smoke) locMarkers.push('Smk2');
+      }
       for (const m of bare ? [] : locMarkers) {
         const mt = texture(markerImage(m));
         if (!mt) continue;
@@ -2408,6 +2523,18 @@ export function BoardView({
       // An end on an upper level: a ring per level around its circle (the thread is traced from that height).
       for (let i = 1; i <= (t.fromLevel ?? 0); i++) L.top.circle(pa.x, pa.y, 5 + 5 * i).stroke({ color: t.clear === false ? LOS_BLOCKED : LOS_CLEAR, width: 2 });
       for (let i = 1; i <= (t.toLevel ?? 0); i++) L.top.circle(pb.x, pb.y, 6 + 5 * i).stroke({ color: t.clear === null ? LOS_UNKNOWN : t.clear ? LOS_CLEAR : LOS_BLOCKED, width: 2 });
+    }
+    // A Snap Shot (full ASL, ASLRB A8.15): the hexside crossed, where the shot is traced.
+    if (o.snap) {
+      const h = anyHex(o.snap.hex);
+      const k = sideToward(statics.map, o.snap.hex, o.snap.from);
+      if (h && k !== null) {
+        const m = hexCenter(h, placements);
+        const pt = (j: number) => { const off = cornerOffset(j); return xf.current.toView(m.x + off.x, m.y + off.y); };
+        const [p, q] = [pt(k), pt((k + 1) % 6)];
+        L.top.moveTo(p.x, p.y).lineTo(q.x, q.y).stroke({ color: 0x2f7fd6, width: 12, alpha: 0.25 });
+        L.top.moveTo(p.x, p.y).lineTo(q.x, q.y).stroke({ color: 0x2f7fd6, width: 4, alpha: 0.95, cap: 'round' });
+      }
     }
     // A stack in Bypass (full ASL): its way round the hex, from the hex it came from along the hexsides it went along.
     if (o.bypass) {

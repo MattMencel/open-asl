@@ -361,6 +361,8 @@ export const rallyModule: RuleModule = {
         const u = env.state.pieces[a.unit];
         const s = env.state.pieces[a.sw];
         if (!u || !s || u.side !== rallySide(env)) return 'Not your unit';
+        if (!(mmc(env, u) || smc(env, u))) return 'SW/Gun repair requires Infantry';
+        if (isFixedWeapon(env, s)) return 'A fixed vehicular weapon requires vehicle repair';
         if (!goodOrderUnpinned(env, a.unit)) return 'Repair needs a Good Order unit';
         // "Each unit may undertake only one action per RPh" (SK1/SK4 3.1), so one repair attempt; full ASL lets a squad
         // try two (asl/swRepair.ts, A9.72). `rphAction` counts its repairs; `true` is a Recovery or rally, its sole action.

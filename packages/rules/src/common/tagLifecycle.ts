@@ -98,6 +98,12 @@ export const TAG_LIFECYCLE: Record<string, 'playerTurn' | 'lasting'> = {
   // SK4 (sk4/status T4)
   concealed: 'lasting',
   dcVsConcealed: 'playerTurn',
+  // Full ASL (asl/fortified): a Placed DC declared as a Breach attempt, gone with the DC in the AFPh.
+  dcBreach: 'playerTurn',
+  // Full ASL (asl/fire): Task Indicator for the Player Turn (ASLRB B24.7: Flame clearance; no fire, movement or advance).
+  ti: 'playerTurn',
+  // Full ASL (asl/fire): Labor Status (ASLRB B24.8): { task, drm } until the Task is achieved or the unit leaves the Location.
+  labor: 'lasting',
   hipFired: 'playerTurn',
   banzai: 'playerTurn',
   recombined: 'lasting',

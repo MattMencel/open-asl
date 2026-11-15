@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Decision, GameState, HexId, LoggedEvent, PieceId, QueryEnv, SideId } from '@asl/engine';
-import { defOf, type IftResult, type Statics, isVisibleTo } from '@asl/rules';
+import { defOf, type IftResult, type Statics, isVisibleTo, hexOfLoc } from '@asl/rules';
 import { playSfx } from '../audio/engine';
 import type { SfxName, SfxParams } from '../audio/sfx';
+import { mgSound, ordnanceSound, vehicleMoveSound } from '../audio/weapons';
 import { counterImage } from '../game/assets';
 import { NATION, defLabel, entryRoll, hexLabel, humanize, pieceLabel, sideNameOf } from '../game/describe';
 import type { FxLevel } from './settings';
@@ -465,15 +466,15 @@ export function useGameFx(env: QueryEnv, log: LoggedEvent[], decision: Decision 
         const pc = state.pieces[id];
         if (!pc) continue;
         const d = defOf(env, pc);
-        if (d.kind === 'gun') {
-          // A Gun: its IFE sounds like a heavy MG; an ordnance shot has its own beat.
-          out.push({ name: 'fire.hmg', params: { nation: d.nationality } });
+        if (d.kind === 'gun' || d.kind === 'vehicle') {
+          // A Gun or a vehicle's MA firing its IFE (SK4 6.8): the gun itself is heard.
+          const w = ordnanceSound(d);
+          if (w) out.push(w);
         } else if (d.kind === 'sw') {
           // A captured MG42 still sounds like an MG42: the weapon's own nationality.
           const params = { nation: d.nationality };
-          if (d.type === 'LMG') out.push({ name: 'fire.lmg', params });
-          else if (d.type === 'MMG') out.push({ name: 'fire.mmg', params });
-          else if (d.type === 'HMG') out.push({ name: 'fire.hmg', params });
+          const w = mgSound(d) ?? ordnanceSound(d);
+          if (w) out.push(w);
           else if (d.type === 'FT') out.push({ name: 'fire.ft', params });
           else if (d.type === 'DC') out.push({ name: 'fire.explosion', params });
         } else {
@@ -487,8 +488,19 @@ export function useGameFx(env: QueryEnv, log: LoggedEvent[], decision: Decision 
       else if (leaders) out.push({ name: 'fire.pistol', params: { nation } });
       return out;
     };
-    // One footstep sound per batch even when a whole stack moves.
+    // One footstep sound per batch even when a whole stack moves. A vehicle on the move drowns out
+    // the boots of its riders.
     let stepped = false;
+    const vehicleMoving = fresh.some((e) => {
+      if (e.type !== 'piece.moved' || state.phase === 'setup') return false;
+      const pc = state.pieces[(e.payload as { id: PieceId }).id];
+      return !!pc && defOf(env, pc).kind === 'vehicle' && (e.payload as { loc: { kind: string } }).loc.kind === 'hex';
+    });
+    // The ordnance fired in this batch: a hit it scores is resolved on the IFT with the weapon as the
+    // attack's only part, and the shot's own beat has already been heard.
+    const ordnanceFired = new Set<PieceId>();
+    // An engine started in this batch: the first hex it enters is heard once it has caught.
+    let engineStarted = false;
     for (const e of fresh) {
       const p = e.payload as Record<string, unknown>;
       if (PHASE_EVENTS.has(e.type) && beat.splitSeq === undefined) beat.splitSeq = e.seq - 1;
@@ -517,7 +529,13 @@ export function useGameFx(env: QueryEnv, log: LoggedEvent[], decision: Decision 
           const from = [...new Set(attack.parts.map((id) => hexOfPiece(state, id)).filter((h): h is HexId => !!h))];
           fx.push({ id: nextId.current++, kind: 'tracer', from, to: attack.target, color: 0xffc85a });
           fx.push({ id: nextId.current++, kind: 'burst', hex: attack.target, color: 0xffa040, delay: 180 });
-          for (const w of weaponSounds(attack.parts)) snd(w.name, 0, w.params);
+          const ordnanceHit = attack.parts.length === 1 && ordnanceFired.has(attack.parts[0]!);
+          if (!ordnanceHit) for (const w of weaponSounds(attack.parts)) snd(w.name, 0, w.params);
+          // Offboard artillery (an OBA SSR) has no firer on the map: the barrage lands.
+          if (!attack.parts.length && ((p['explain'] as { id?: string }[] | undefined) ?? []).some((x) => x.id === 'ssr.oba')) {
+            snd('fire.explosion', 0);
+            snd('fire.explosion', 350);
+          }
           delay = 450;
           if (lastToast) {
             const drm = p['drm'] as number;
@@ -688,6 +706,89 @@ export function useGameFx(env: QueryEnv, log: LoggedEvent[], decision: Decision 
           }
           break;
         }
+        // Full ASL Fire, rubble and wind (ASLRB B25, B24): the roll's toast says what it did, the board shows it.
+        case 'asl.fire.ntc': {
+          if (lastToast) {
+            lastToast.results.push(`${labelOf(p['unit'] as string)}: NTC ${p['passed'] ? 'passed' : 'failed: no Kindling attempt'}`);
+            lastToast.tone = p['passed'] ? 'good' : 'bad';
+          }
+          break;
+        }
+        case 'asl.fire.kindle': {
+          const flame = p['flame'] as boolean;
+          if (lastToast) {
+            lastToast.results.push(`${labelOf(p['unit'] as string)}: needs ${p['needed']}${(p['drm'] as number) ? ` (${(p['drm'] as number) > 0 ? '+' : ''}${p['drm']})` : ''}: ${flame ? 'a FLAME' : 'no fire'}`);
+            lastToast.tone = flame ? 'good' : 'neutral';
+          }
+          if (flame) fx.push({ id: nextId.current++, kind: 'burst', hex: hexOfLoc(p['loc'] as string), color: 0xff8c00, delay });
+          break;
+        }
+        case 'asl.fire.attackFlame': {
+          if (lastToast) {
+            lastToast.results.push(`Flame in ${hexLabel(hexOfLoc(p['loc'] as string))}: needs ${p['needed']}: ${p['flame'] ? 'a FLAME' : 'no fire'}`);
+            if (p['flame']) lastToast.tone = 'bad';
+          }
+          break;
+        }
+        case 'asl.fire.blazeCheck': {
+          const o = p['outcome'] as string;
+          if (lastToast) {
+            lastToast.results.push(`${hexLabel(hexOfLoc(p['loc'] as string))}: ${o === 'blaze' ? 'BLAZE' : o === 'out' ? 'the Flame goes out' : 'still a Flame'} (needs ${p['needed']})`);
+            lastToast.tone = o === 'blaze' ? 'bad' : 'neutral';
+          }
+          if (o === 'blaze') fx.push({ id: nextId.current++, kind: 'burst', hex: hexOfLoc(p['loc'] as string), color: 0xe11e14, delay });
+          break;
+        }
+        case 'asl.fire.spread': {
+          const to = p['to'] as string;
+          if (p['dr'] && lastToast) {
+            lastToast.results.push(`${hexLabel(hexOfLoc(p['from'] as string))} → ${hexLabel(hexOfLoc(to))}: ${p['flame'] ? 'SPREADS' : 'no spread'} (needs ${p['needed']})`);
+            if (p['flame']) lastToast.tone = 'bad';
+          }
+          if (p['flame']) fx.push({ id: nextId.current++, kind: 'text', hex: hexOfLoc(to), text: p['auto'] === 'gust' ? (p['far'] ? 'GUST: FIRE SPREADS 2 HEXES' : 'GUST: FIRE SPREADS') : p['auto'] === 'heavy' ? 'WIND: FIRE SPREADS' : 'FIRE SPREADS', color: 0xff8c00, delay });
+          break;
+        }
+        case 'asl.fire.eliminated': {
+          for (const u of p['units'] as string[]) unitText(u, 'LOST IN THE BLAZE', 0xff3b30, true, 'hit.kia');
+          break;
+        }
+        case 'asl.fire.extinguish': {
+          const o = p['outcome'] as string;
+          if (lastToast) {
+            lastToast.results.push(`${hexLabel(hexOfLoc(p['loc'] as string))}: ${o === 'extinguished' ? 'FLAME OUT' : o === 'hampered' ? 'Hampered this Player Turn' : `no effect${p['labor'] !== undefined ? ` · Labor ${p['labor']}` : ''}`}`);
+            lastToast.tone = o === 'extinguished' ? 'good' : 'neutral';
+          }
+          break;
+        }
+        case 'asl.rubble.check': {
+          if (lastToast) {
+            lastToast.results.push(`Rubble dr ${p['dr']}${(p['drm'] as number) ? ` +${p['drm']} stone` : ''} vs ${p['kia']}KIA: ${p['rubbled'] ? 'the building COLLAPSES' : 'the building stands'}`);
+            if (p['rubbled']) lastToast.tone = 'bad';
+          }
+          break;
+        }
+        case 'asl.rubble': {
+          const hex = p['hex'] as HexId;
+          snd('building.collapse', delay);
+          fx.push({ id: nextId.current++, kind: 'burst', hex, color: 0xb0b0b0, delay });
+          fx.push({ id: nextId.current++, kind: 'text', hex, text: p['by'] === 'falling' ? 'FALLING RUBBLE' : 'COLLAPSE', color: 0xd0d0d0, delay, big: true });
+          delay += 600;
+          break;
+        }
+        case 'asl.rubble.falling': {
+          if (lastToast) {
+            lastToast.results.push(`Falling rubble from ${hexLabel(p['hex'] as string)}: colored ${(p['dr'] as number[])[1]}${(p['drm'] as number) ? ` +${p['drm']}` : ''}: ${p['falls'] ? `FALLS into ${hexLabel((p['to'] as string | undefined) ?? '')}` : 'stays'}`);
+            if (p['falls']) lastToast.tone = 'bad';
+          }
+          break;
+        }
+        case 'asl.wind.changeDr': {
+          if (lastToast) {
+            lastToast.results.push(p['gusts'] ? 'GUSTS this Player Turn' : p['change'] !== null ? 'the wind changes' : 'no change');
+            if (p['gusts']) lastToast.tone = 'bad';
+          }
+          break;
+        }
         case 'piece.eliminated': {
           const id = p['id'] as string;
           const pc = state.pieces[id];
@@ -771,8 +872,10 @@ export function useGameFx(env: QueryEnv, log: LoggedEvent[], decision: Decision 
           const pc = state.pieces[p['id'] as string];
           const loc = p['loc'] as { kind: string };
           if (stepped || !pc || defOf(env, pc).kind === 'sw') break;
+          if (vehicleMoving && loc.kind === 'hex' && defOf(env, pc).kind !== 'vehicle') break;
           stepped = true;
           if (state.phase === 'setup' || loc.kind === 'offboard') snd('ui.place', 0);
+          else if (loc.kind === 'hex' && defOf(env, pc).kind === 'vehicle') snd(vehicleMoveSound(defOf(env, pc)), engineStarted ? 1500 : 0);
           else if (loc.kind === 'hex') snd(state.phase === 'RtPh' ? 'rout' : 'move.step', 0);
           break;
         }
@@ -798,11 +901,20 @@ export function useGameFx(env: QueryEnv, log: LoggedEvent[], decision: Decision 
             break;
           }
           const hit = outcome !== 'miss';
+          ordnanceFired.add(weapon);
           const from = hexOfPiece(state, weapon);
           if (from) fx.push({ id: nextId.current++, kind: 'tracer', from: [from], to: target, color: hit ? 0xffc85a : 0xb0b0b0 });
           fx.push({ id: nextId.current++, kind: 'text', hex: target, text: hit && (ammo === 'SMOKE' || ammo === 'WP') ? (ammo === 'WP' ? 'WP' : 'SMOKE') : outcome === 'ch' ? 'CRITICAL HIT!' : hit ? 'HIT' : 'MISS', color: outcome === 'ch' ? 0xff5f55 : hit ? 0xffb347 : 0xa8b098, delay: 250, big: hit });
-          snd('fire.explosion', 0);
-          if (!hit) snd('hit.none', 300);
+          // The weapon fires; a moment later the round arrives: Smoke or WP bursts, AP rings off the
+          // armor it hit, HE explodes, and a miss tears past to land beyond.
+          const wpn = state.pieces[weapon];
+          const launch = wpn ? ordnanceSound(defOf(env, wpn)) : null;
+          snd(launch?.name ?? 'fire.cannon', 0, launch?.params);
+          const kinetic = ammo === 'AP' || ammo === 'APCR' || ammo === 'APDS' || ammo === 'HEAT';
+          if (!hit) snd('impact.miss', 300);
+          else if (ammo === 'SMOKE' || ammo === 'WP') snd('move.smoke', 350);
+          else if (p['targetType'] === 'VTT' && kinetic) snd('impact.armor', 350);
+          else snd('fire.explosion', 350);
           delay = 500;
           if (lastToast) {
             const drm = p['drm'] as number;
@@ -861,7 +973,10 @@ export function useGameFx(env: QueryEnv, log: LoggedEvent[], decision: Decision 
           if (p['reason'] !== 'setup') snd('ui.flip', 0);
           break;
         case 'sk3.vehicle.faced':
-          snd('ui.flip', 0);
+          snd(p['vca'] !== undefined && p['vca'] !== p['fromVca'] ? 'vehicle.turn' : 'vehicle.turret', 0);
+          break;
+        case 'sk3.vehicle.motionTurn':
+          snd('vehicle.turret', 0);
           break;
         case 'sk2.gun.manhandle': {
           const gun = p['gun'] as PieceId;
@@ -933,7 +1048,7 @@ export function useGameFx(env: QueryEnv, log: LoggedEvent[], decision: Decision 
         }
         case 'sk3.vehicle.wrecked': {
           const v = p['vehicle'] as PieceId;
-          unitText(v, 'KNOCKED OUT', 0xff3b30, true, 'hit.kia');
+          unitText(v, 'KNOCKED OUT', 0xff3b30, true, 'fire.explosion');
           face(v, 'wrecked');
           break;
         }
@@ -985,7 +1100,7 @@ export function useGameFx(env: QueryEnv, log: LoggedEvent[], decision: Decision 
             lastToast.tone = r === 'ok' ? 'good' : 'bad';
             lastToast.firers = [chip(p['vehicle'] as PieceId)];
           }
-          if (r !== 'ok') unitText(p['vehicle'] as PieceId, r === 'stall' ? 'STALLED' : 'IMMOBILIZED', 0xff8a65, true, 'ui.deny');
+          if (r !== 'ok') unitText(p['vehicle'] as PieceId, r === 'stall' ? 'STALLED' : 'IMMOBILIZED', 0xff8a65, true, 'vehicle.stall');
           break;
         }
         case 'sk3.vehicle.bog': {
@@ -997,7 +1112,7 @@ export function useGameFx(env: QueryEnv, log: LoggedEvent[], decision: Decision 
             lastToast.tone = bogged ? 'bad' : 'good';
             lastToast.firers = [chip(p['vehicle'] as PieceId)];
           }
-          if (bogged) unitText(p['vehicle'] as PieceId, 'BOGGED', 0xff8a65, true, 'ui.deny');
+          if (bogged) unitText(p['vehicle'] as PieceId, 'BOGGED', 0xff8a65, true, 'vehicle.bog');
           break;
         }
         case 'sk3.vehicle.unbog': {
@@ -1007,14 +1122,36 @@ export function useGameFx(env: QueryEnv, log: LoggedEvent[], decision: Decision 
             lastToast.tone = r === 'freed' ? 'good' : 'bad';
             lastToast.firers = [chip(p['vehicle'] as PieceId)];
           }
-          unitText(p['vehicle'] as PieceId, r === 'freed' ? 'FREED' : r === 'mired' ? 'MIRED' : 'IMMOBILIZED', r === 'freed' ? 0x9fe07a : 0xff8a65, r !== 'freed', r === 'freed' ? 'move.step' : 'ui.deny');
+          unitText(p['vehicle'] as PieceId, r === 'freed' ? 'FREED' : r === 'mired' ? 'MIRED' : 'IMMOBILIZED', r === 'freed' ? 0x9fe07a : 0xff8a65, r !== 'freed', r === 'freed' ? 'vehicle.move' : 'vehicle.bog');
           break;
         }
         case 'sk3.vehicle.move': {
           const kind = p['kind'] as string;
           if (kind === 'motion') unitText(p['vehicle'] as PieceId, 'IN MOTION', 0xffe066, false, 'ui.flip');
-          else if (kind === 'turn' || kind === 'turret') snd('ui.flip', 0);
-          else if (kind === 'start' || kind === 'restart') snd('move.step', 0);
+          else if (kind === 'turn') snd('vehicle.turn', 0);
+          else if (kind === 'turret') snd('vehicle.turret', 0);
+          // A start that costs MP brings the engine up (SK4 3.3.2); one already in Motion just goes on.
+          else if (kind === 'start' && (p['mp'] as number) > 0) {
+            snd('vehicle.start', 0);
+            engineStarted = true;
+          } else if (kind === 'restart') snd('vehicle.move', 0);
+          else if (kind === 'stop') snd('vehicle.stop', 0);
+          break;
+        }
+        case 'sk3.pf.check': {
+          // The die alone can look like a success: a leader's 2 is a final 4 with the +2 SMC (SK4 4.4.2).
+          const unit = p['unit'] as PieceId;
+          const r = p['result'] as string;
+          const drm = p['drm'] as number;
+          const sum = `dr ${p['dr']}${drm ? ` ${drm > 0 ? '+' : ''}${drm} = ${p['final']}` : ''}`;
+          if (lastToast) {
+            lastToast.label = `Panzerfaust check: ${chip(unit).label}`;
+            lastToast.detail = `${sum} · a final 1-3 finds a PF${(p['notes'] as string[]).length ? ` (${(p['notes'] as string[]).join(', ')})` : ''}`;
+            lastToast.results.push(r === 'pf' ? 'has a PF: fires it' : r === 'none' ? 'no PF shot' : r === 'pinned' ? 'no PF, pinned (original 6)' : 'no PF, broken (original 6 while pinned)');
+            lastToast.tone = r === 'pf' ? 'good' : 'bad';
+            lastToast.firers = [chip(unit)];
+          }
+          unitText(unit, r === 'pf' ? 'PANZERFAUST!' : r === 'none' ? 'NO PF SHOT' : r === 'pinned' ? 'NO PF · PINNED' : 'NO PF · BROKEN', r === 'pf' ? 0x9fe07a : 0xff8a65, r !== 'none', r === 'none' || r === 'pf' ? undefined : 'hit.pin');
           break;
         }
         case 'sk2.smoke.placed':

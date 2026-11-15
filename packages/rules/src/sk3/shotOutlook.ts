@@ -33,7 +33,8 @@ export function shotOutlook(env: QueryEnv, shot: OrdnanceShot, mode: FireMode, s
   const none: ShotOutlook = { illegal, th: null, red: false, ch: null, drm: 0, parts: [], hitOn: null, caChange: 0, nonStopped: false };
   if (shot.targetType === 'IFE') return none;
   try {
-    const sc = { ...shotContext(env, shot, mode, side, moving ? { moving } : {}), hindrance: 0 };
+    // Before the shot is declared nothing that needs the LOS is worked out (ASLRB A6.11, SK4 3.2.1).
+    const sc = { ...shotContext(env, shot, mode, side, moving ? { moving } : {}), hindrance: 0, losBlind: true };
     const thn = toHitNumber(env, sc);
     const drm = withoutSecrets(env.explain('ordnance.thDrm', sc, 0));
     // Case 16 shows as an extra on the dice: with a 1 and a 1 the extra is the lower die, 1.

@@ -69,6 +69,33 @@ describe('catalogued scenarios', () => {
     expect(wrecks).toBeGreaterThan(0);
   }, 60_000);
 
+  it('asl-testbed-fire: weighted random play kindles, spreads and fights fires, and every Player Turn boundary is clean', () => {
+    const scenario = scenarioById('asl-testbed-fire')!;
+    const counts: Record<string, number> = {};
+    const bump = (k: string) => (counts[k] = (counts[k] ?? 0) + 1);
+    // Kindle whenever offered, fight a Flame whenever offered, otherwise mostly end phases so the AFPh ends come round.
+    const weigh = weightedPicker((a) => (a.type === 'fire.kindle' ? 40 : a.type === 'fire.extinguish' ? 20 : a.type === 'endPhase' ? 6 : a.type === 'blaze.break' ? 5 : 1));
+    for (const seed of [1, 2, 3]) {
+      const check = turnBoundaryCheck(`asl-testbed-fire seed ${seed}`);
+      const { state, steps } = playRandom(scenario, `fire-${seed}`, {
+        rand: mulberry(seed),
+        maxSteps: 8000,
+        pick: weigh,
+        onStep: (st, events, a) => {
+          bump(a.type);
+          for (const ev of events) if (ev.type.startsWith('asl.fire') || ev.type.startsWith('asl.rubble') || ev.type.startsWith('asl.wind')) bump(ev.type);
+          check(st, events);
+        },
+      });
+      expect(state.result, `seed ${seed} reached no result in ${steps} steps`).not.toBeNull();
+    }
+    expect(counts['fire.kindle'] ?? 0).toBeGreaterThan(0);
+    expect(counts['asl.fire.blazeCheck'] ?? 0).toBeGreaterThan(0);
+    expect(counts['asl.fire.spread'] ?? 0).toBeGreaterThan(0);
+    expect(counts['asl.fire.blaze'] ?? 0).toBeGreaterThan(0);
+    expect(counts['asl.wind.changeDr'] ?? 0).toBeGreaterThan(0);
+  }, 120_000);
+
   for (const s of PLAYABLE_SCENARIOS) {
     it(`${s.id}: builds, applies every balance option, and plays through at random`, () => {
       expect(() => sk1Ruleset(s)).not.toThrow();

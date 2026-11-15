@@ -134,6 +134,19 @@ export function pfCheckDrm(env: QueryEnv, unit: PieceId, vsAfv: boolean): { drm:
   return { drm, notes };
 }
 
+/**
+ * The highest PF check dr that finds a PF with this drm (SK4 4.4.2: a final dr of 1-3), or 0 when none can; an
+ * original 6 never does. A leader (+2) needs a 1, so the drm belongs in every place the check is shown.
+ */
+export const pfCheckNeed = (drm: number): number => Math.max(0, Math.min(5, 3 - drm));
+
+/** The PF check's requirement in words: "dr ≤ 1 (+2 SMC)", or that no dr can succeed. */
+export function pfCheckNeedText(drm: number, notes: string[]): string {
+  const need = pfCheckNeed(drm);
+  const why = drm ? ` (${notes.join(', ')})` : '';
+  return need === 0 ? `no dr can succeed${why}` : `dr ≤ ${need}${why}`;
+}
+
 const tryKey = (env: QueryEnv) => `${env.state.turn}:${env.state.attacker}:${env.state.phase}`;
 
 /** Why this unit may not try a Panzerfaust now at all, or null (target aside). */
@@ -205,7 +218,7 @@ function resolvePf(ctx: Ctx, pf: PfShot, mode: FireMode, opts: { moving?: PieceI
   const vsAfv = pf.targetType === 'VTT';
   const { drm, notes } = pfCheckDrm(ctx, p.id, vsAfv);
   setTags(ctx, p.id, { [TRIED]: tryKey(ctx) });
-  const dr = ctx.roll(`PF check by ${p.id} (needs ≤ 3)`, 1).total;
+  const dr = ctx.roll(`PF check by ${p.id}: needs ${pfCheckNeedText(drm, notes)}`, 1).total;
   const final = dr + drm;
   if (dr === 6) {
     const broken = isPinned(p);

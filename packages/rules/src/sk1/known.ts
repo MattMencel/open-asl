@@ -2,6 +2,7 @@ import { seedRng, type Engine, type GameState, type HexId, type Piece, type Piec
 import { defOf, hexOf, isVehicleDef, otherSide, statics, unitsAt } from '../common/pieces';
 import { isBroken, mmc, smc } from './status';
 import { adjacentLocs, isGroundLoc, locOf, type LocId } from '../common/location';
+import { UNKNOWN_DEF_ID } from '../common/statics';
 
 declare module '@asl/engine' {
   interface QueryCatalog {
@@ -114,7 +115,9 @@ export function visibleState(env: QueryEnv, state: GameState, viewer: SideId | n
  */
 export function hiddenFrom(env: QueryEnv, state: GameState, viewer: SideId | null): Set<PieceId> {
   const hidden = new Set<PieceId>();
-  for (const p of Object.values(state.pieces)) if (!isVisibleTo(env, p, viewer)) hidden.add(p.id);
+  // A stand-in is itself what the viewer may see (`piece.standIn`): redacting an already redacted view (an online
+  // client's snapshot) keeps it, so `redactState` is idempotent.
+  for (const p of Object.values(state.pieces)) if (p.defId !== UNKNOWN_DEF_ID && !isVisibleTo(env, p, viewer)) hidden.add(p.id);
   if (hidden.size === 0) return hidden;
   let grew = true;
   while (grew) {

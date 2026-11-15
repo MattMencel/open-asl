@@ -43,6 +43,21 @@ describe('Off-board artillery (SSR)', () => {
     expect(check(engine, r.state, { type: 'ssr.oba', hex: 'yM6', observer: 'gl' })).toMatch(/already on its way/);
   });
 
+  it('the observer\u2019s LOS is checked only once the call is made (ASLRB A6.11): none, and the attempt is spent with no contact dr', () => {
+    // A stone building in M3 blocks the leader in M2 from M5.
+    const { engine, state } = makeEngine({ pieces, scenario: { ...RU_VS_GE, firstSide: 'ge', ssr: [oba] }, extra: [offboardArtilleryModule], startPhase: 'PFPh', terrain: { yM3: { terrain: 'building-stone', buildingId: 'b' } }, dice: [1] });
+    // Offered as observer whether or not he sees the hex: being offered tells nothing.
+    expect(artilleryObservers(engine.env(state), 'ge', 'yM5').map((p) => p.id)).toEqual(['gl']);
+    expect(check(engine, state, { type: 'ssr.oba', hex: 'yM5', observer: 'gl' })).toBeNull();
+    const r = act(engine, state, { type: 'ssr.oba', hex: 'yM5', observer: 'gl' });
+    expect(ev(r, 'ssr.oba.noLos')[0]).toMatchObject({ hex: 'yM5', observer: 'gl' });
+    expect(ev(r, 'ssr.oba.contact')).toEqual([]);
+    expect(r.events.some((e) => e.type === 'dice.rolled')).toBe(false);
+    expect(r.state.pieces['gl']!.tags['fire']).toBe('prep');
+    expect(artilleryMissions(engine.env(r.state), 'ge')).toMatchObject({ left: 2, pending: null });
+    expect(artilleryCallIllegal(engine.env(r.state), 'ge', 'yM6')).toMatch(/One contact attempt per Prep Fire Phase|Good Order leader/);
+  });
+
   it('no contact on dr 5-6: the mission is kept for a later PFPh; one attempt per PFPh', () => {
     const { engine, state } = game([5]);
     const r = act(engine, state, { type: 'ssr.oba', hex: 'yM5', observer: 'gl' });

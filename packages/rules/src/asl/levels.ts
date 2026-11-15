@@ -1,6 +1,8 @@
 import type { HexId, QueryEnv, RuleModule } from '@asl/engine';
 import { adjacentLocs, hexOfLoc, isGroundLoc, levelOfLoc, locOf, locationsOf, parseLoc, type LocId } from '../common/location';
-import { statics } from '../common/pieces';
+import { defOf, statics } from '../common/pieces';
+import { heightOf } from '../sk2/elevation';
+import { ordnanceOf } from '../sk2/status';
 import { pieceOf, sw } from '../sk1/status';
 
 /**
@@ -77,6 +79,36 @@ export const aslLevelsModule: RuleModule = {
       label: ({ attack }, env) => `+${levelsAbove(env, attack.target)} Indirect Fire: ${levelsAbove(env, attack.target) === 1 ? 'a building level' : 'building levels'} above`,
       when: ({ attack }, env) => !!attack.ordnance?.indirect && levelsAbove(env, attack.target) > 0,
       apply: (v, { attack }, env) => v + levelsAbove(env, attack.target),
+    });
+
+    // C2.6 Gun depression/elevation: a Gun fires at a target on another level only at a range at least the difference
+    // in levels [EXC: mortars and AA Guns at a higher target]; in a building hex never at a lower level of its own
+    // hex, and at a higher level of its own hex only an AA Gun of at most 40mm. The same for SW ordnance (a mortar).
+    // Guns stand at an upper level only in a fortified stone building (B23.93), which is where this comes up.
+    r.contribute({
+      id: 'asl.levels.gun-elevation',
+      query: 'ordnance.illegal',
+      ref: 'ASLRB C2.6',
+      apply(v, { shot }, env) {
+        if (v) return v;
+        const w = env.state.pieces[shot.weapon];
+        const d = w ? ordnanceOf(env, w) : null;
+        const from = w ? locOf(env.state, w) : null;
+        if (!w || !d || !from || defOf(env, w).kind === 'vehicle') return null;
+        const map = statics(env).map;
+        const fromHex = hexOfLoc(from);
+        const toHex = hexOfLoc(shot.target);
+        const diff = heightOf(env, shot.target) - heightOf(env, from);
+        if (diff === 0) return null;
+        const aa = d.type === 'AA' || d.type === 'MTR';
+        if (fromHex === toHex) {
+          if (diff < 0) return 'A Gun in a building hex may not fire at a lower level of its own hex (ASLRB C2.6)';
+          return d.type === 'AA' && d.caliber <= 40 ? null : 'Only an AA Gun of at most 40mm may fire at a higher level of its own hex (ASLRB C2.6)';
+        }
+        const range = map.distance(fromHex, toHex);
+        if (range >= Math.abs(diff) || (diff > 0 && aa)) return null;
+        return `A Gun may fire at a target ${Math.abs(diff)} level${Math.abs(diff) === 1 ? '' : 's'} ${diff > 0 ? 'above' : 'below'} it only at a range of at least ${Math.abs(diff)} (ASLRB C2.6)`;
+      },
     });
   },
 };

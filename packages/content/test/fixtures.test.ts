@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { ASL_TESTBED_SCENARIO, BPV, COUNTERS, DEV_FIXTURES, SK1_COUNTER_IDS, SK2_COUNTER_IDS, SK3_COUNTER_IDS, TESTBED_FORTIFIED, TESTBED_HILL_HEXES, TESTBED_VC_BUILDINGS, buildingAt, fixtureActions, fixturesFor, newGame, scenarioById, staticsFor } from '../src';
-import { fortifiableBuildings, fortifiedState, ordnanceWeaponIllegal } from '@asl/rules';
+import type { Action } from '@asl/engine';
+import { fortifiableBuildings, fortifiableLocations, fortifiedKnownTo, fortifiedState, fortifyIllegal, ordnanceWeaponIllegal } from '@asl/rules';
 
 /** A fresh test bed game with a fixture's actions applied, as the dev UI does. */
 function load(id: string) {
@@ -42,13 +43,17 @@ describe('T1 Full ASL Test Bed', () => {
     expect(TESTBED_HILL_HEXES).toEqual(expect.arrayContaining(['uE5', 'uH5', 'uC9']));
   });
 
-  it('lets the Russians secretly fortify one building of their setup area', () => {
+  it('lets the Russians secretly fortify exactly four building Locations of their setup area, the ground before an upper level', () => {
     const g = newGame(sc, 'fortify');
     const env = g.engine.env(g.state);
-    expect(g.engine.currentDecision(g.state)).toMatchObject({ kind: 'fortify', owner: 'ru', data: { count: 1 } });
-    const choices = fortifiableBuildings(env, 'ru');
-    expect(choices).toEqual(expect.arrayContaining([buildingAt('u', 'uK4'), TESTBED_FORTIFIED]));
-    expect(choices).not.toContain(buildingAt('u', 'uV8'));
+    expect(g.engine.currentDecision(g.state)).toMatchObject({ kind: 'fortify', owner: 'ru', data: { count: 4, unit: 'location', exact: true } });
+    const choices = fortifiableLocations(env, 'ru');
+    expect(choices).toEqual(expect.arrayContaining(['uK4', 'uK4:1', ...TESTBED_FORTIFIED]));
+    expect(choices.some((l) => l.startsWith('uV8'))).toBe(false);
+    expect(fortifyIllegal(env, 'ru', { locations: TESTBED_FORTIFIED })).toBeNull();
+    expect(fortifyIllegal(env, 'ru', { locations: ['uP2', 'uP3', 'uK4'] })).toMatch(/Choose 4/);
+    expect(fortifyIllegal(env, 'ru', { locations: ['uP2:1', 'uP3', 'uP3:1', 'uK4'] })).toMatch(/B23.912/);
+    expect(fortifiableBuildings(env, 'ru')).toContain(buildingAt('u', 'uK4'));
   });
 
   it('plays under the Full ASL ruleset with the full counter set', () => {
@@ -89,7 +94,8 @@ describe('BPV (A./G. National Capabilities Chart)', () => {
 
 describe('Dev fixtures', () => {
   it('lists the test bed fixtures', () => {
-    expect(fixturesFor('asl-testbed').map((f) => f.id)).toEqual(['start', 'melee', 'building-assault', 'two-story-house', 'los-heights', 'orchard-road', 'bypass']);
+    expect(fixturesFor('asl-testbed').map((f) => f.id)).toEqual(['kindling', 'start', 'melee', 'building-assault', 'two-story-house', 'los-heights', 'orchard-road', 'bypass', 'fortified-breach', 'fortified-hidden', 'snap-shot']);
+    expect(fixturesFor('asl-testbed-fire').map((f) => f.id)).toEqual(['blaze-spread', 'flame-clearance']);
     expect(DEV_FIXTURES.every((f) => f.title && f.description)).toBe(true);
   });
 
@@ -97,7 +103,7 @@ describe('Dev fixtures', () => {
     const { engine, state, env } = load('start');
     expect([state.phase, state.turn, state.attacker]).toEqual(['RPh', 1, 'ge']);
     expect(engine.currentDecision(state)?.owner).toBe('ge');
-    expect(fortifiedState(env)?.buildings).toEqual([TESTBED_FORTIFIED]);
+    expect(fortifiedState(env)?.locations).toEqual(TESTBED_FORTIFIED);
     const at = (hex: string) => Object.values(state.pieces).filter((p) => p.loc.kind === 'hex' && p.loc.hex === hex).map((p) => p.defId).sort();
     expect(at('uK4')).toEqual(['ru.458', 'ru.L91']);
     expect(at('uT3')).toEqual(['ge.548', 'ge.838', 'ge.L92']);
@@ -120,7 +126,32 @@ describe('Dev fixtures', () => {
     const ae = Object.values(state.pieces).find((p) => p.defId === 'ge.838')!;
     expect(hexOf(state, ae.id)).toBe('uQ3');
     expect(staticsFor(ASL_TESTBED_SCENARIO).map.distance('uQ3', 'uP3')).toBe(1);
-    expect(fortifiedState(env)?.buildings).toEqual([TESTBED_FORTIFIED]);
+    expect(fortifiedState(env)?.locations).toEqual(TESTBED_FORTIFIED);
+  });
+
+  it('fortified-breach: P3 is revealed fortified, the Breach is offered to the DC in Q3, and the Russian 5-2-7 is still inside', () => {
+    const { engine, state, env } = load('fortified-breach');
+    expect([state.phase, state.turn, state.attacker]).toEqual(['MPh', 2, 'ge']);
+    expect(fortifiedKnownTo(env, 'uP3', 'ge')).toBe(true);
+    expect(fortifiedKnownTo(env, 'uP2', 'ge')).toBe(false);
+    const ae = Object.values(state.pieces).find((p) => p.defId === 'ge.838')!;
+    const dc = Object.values(state.pieces).find((p) => p.defId === 'ge.DC')!;
+    expect(hexOf(state, ae.id)).toBe('uQ3');
+    expect(Object.values(state.pieces).find((p) => p.defId === 'ge.548')!.tags['advanced']).toBeUndefined();
+    const s = engine.submit(state, { side: 'ge', decisionId: engine.currentDecision(state)!.id, type: 'move.start', units: [ae.id] } as Action).state;
+    expect(engine.legalActions(s, 'ge').filter((a) => a.type === 'move.breach')).toEqual([expect.objectContaining({ dc: dc.id, target: 'uP3' })]);
+  });
+
+  it('fortified-hidden: the 5-2-7 is hidden in P3 and the German stack in Q4 may try to enter', () => {
+    const { engine, state } = load('fortified-hidden');
+    expect([state.phase, state.turn, state.attacker]).toEqual(['MPh', 2, 'ge']);
+    const r = Object.values(state.pieces).find((p) => p.defId === 'ru.527')!;
+    expect(hexOf(state, r.id)).toBe('uP3');
+    expect(r.tags['hip']).toBe(true);
+    const l = Object.values(state.pieces).find((p) => p.defId === 'ge.L80')!;
+    expect(hexOf(state, l.id)).toBe('uQ4');
+    const s = engine.submit(state, { side: 'ge', decisionId: engine.currentDecision(state)!.id, type: 'move.start', units: [l.id] } as Action).state;
+    expect(engine.legalActions(s, 'ge').some((a) => a.type === 'move.step' && a['to'] === 'uP3')).toBe(true);
   });
 
   it('two-story-house: Russians on both levels of P3, the Germans beside it in Q3, German Turn 2 PFPh', () => {
@@ -174,6 +205,23 @@ describe('Dev fixtures', () => {
     const s = engine.submit(state, { type: 'move.start', units: stack.map((p) => p.id), side: 'ge', decisionId: d.id } as never).state;
     const round = engine.legalActions(s, 'ge').filter((a) => a.type === 'move.step' && a['to'] === 'uR3' && a['bypass']);
     expect(round.map((a) => (a['bypass'] as string[]).join('-'))).toEqual(expect.arrayContaining(['uR4-uS4', 'uQ3-uR2']));
+  });
+
+  it('snap-shot: entering R3 from R4, the Russians are asked; N3 sees the whole R3-R4 hexside but not R3 (ASLRB A8.15)', () => {
+    const { engine, state } = load('snap-shot');
+    expect([state.phase, state.turn, state.attacker]).toEqual(['MPh', 2, 'ge']);
+    const stack = Object.values(state.pieces).filter((p) => p.side === 'ge' && p.loc.kind === 'hex' && p.loc.hex === 'uR4');
+    const n3 = Object.values(state.pieces).find((p) => p.side === 'ru' && p.loc.kind === 'hex' && p.loc.hex === 'uN3')!;
+    const sub = (s: typeof state, a: Record<string, unknown>) => engine.submit(s, { side: engine.currentDecision(s)!.owner, decisionId: engine.currentDecision(s)!.id, ...a } as never).state;
+    let s = sub(state, { type: 'move.start', units: stack.map((p) => p.id) });
+    s = sub(s, { type: 'move.step', to: 'uR3' });
+    expect(engine.currentDecision(s)).toMatchObject({ kind: 'firstFire', owner: 'ru' });
+    const env = engine.env(s);
+    expect(env.query('fire.snapSide', { target: 'uR3' }, null)).toEqual(['uR3', 'uR4']);
+    const los = (decl: { target: string; snap?: [string, string] }) => env.query('fire.los', { from: 'uN3', decl }, env.query('los.trace', { from: 'uN3', to: 'uR3' }, { clear: true, hindrance: 0, parts: [] }));
+    expect(los({ target: 'uR3' }).clear).toBe(false);
+    expect(los({ target: 'uR3', snap: ['uR3', 'uR4'] }).clear).toBe(true);
+    expect(engine.validate(s, { side: 'ru', decisionId: engine.currentDecision(s)!.id, type: 'defFire', decl: { units: [n3.id], sw: [], target: 'uR3', snap: ['uR3', 'uR4'] } } as never)).toBeNull();
   });
 
   it('replays: the actions are an ordinary recording', () => {

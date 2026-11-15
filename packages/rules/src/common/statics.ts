@@ -282,6 +282,12 @@ export interface TerrainDef {
    * between heights (`GameMap.losAt`); a hex's `MapHex.obstacleHeight` overrides it.
    */
   height?: number;
+  /**
+   * Burnable Terrain (ASLRB B25.1, the Terrain Chart's Kindle #/Spread # column): the Final DR needed to Kindle a Flame
+   * in it (B25.11) and for a Flame to become a Blaze or a Blaze to spread into it (B25.151, B25.6). Absent for terrain
+   * that cannot burn (Open Ground, roads). Read only by the full ASL Fire rules.
+   */
+  fire?: { kindle: number; spread: number };
   // ---- SK4 8.2 PTO Terrain (the PTO Terrain Effects Chart); 8.3 Concealment Terrain.
   /** Concealment Terrain (SK4 8.3, the chart's red entries): a unit may set up or gain "?" in it. */
   concealment?: true;
@@ -373,6 +379,17 @@ export interface LosEnd {
 export interface LosAtOptions {
   /** Orchards are in season (April–October, or as an SSR says): a one-level obstacle to a LOS to/from a higher elevation. */
   orchardInSeason?: boolean;
+  /**
+   * Blind Hex rules off (A6.4, B10.23): a Snap Shot is traced to a hexside "even if that hexside is part of a Blind hex"
+   * (ASLRB A8.15); obstacles still block.
+   */
+  noBlind?: boolean;
+  /**
+   * Hexes rubbled during play (ASLRB B24.2), with the height in levels of the Inherent half-level obstacle the whole hex
+   * now is (`hex`) and, when the building art still stands over an intact ground level, that art's own height (`art`).
+   * The tracers treat such a hex as an Inherent obstacle of those heights whatever its printed terrain.
+   */
+  rubbled?: Record<HexId, { hex: number; art?: number }>;
 }
 
 export interface LosResult {
@@ -520,11 +537,18 @@ export type WindFrom = 'N' | 'NE' | 'E' | 'SE' | 'S' | 'SW' | 'W' | 'NW';
 /** How hard the wind blows (ASL E3.5): none, a mild breeze, heavy winds, or gusts. */
 export type WindForce = 'calm' | 'breeze' | 'heavy' | 'gusts';
 
+/** Environmental Conditions (ASLRB B25.5, the EC Chart): the ground's dryness, a DRM to Kindling and Spreading Fire. */
+export type Ec = 'snow' | 'mud' | 'wet' | 'moist' | 'moderate' | 'dry' | 'veryDry';
+
 /** The weather in play: sky, ground and wind. Kept in the game state, shown on the HUD, changed by rules. */
 export interface Weather {
   sky: Sky;
   ground: Ground;
-  wind: { from: WindFrom; force: WindForce };
+  /**
+   * `dir`: the hexside of the hex grid the wind blows toward, numbered as a Random Direction dr (ASLRB B.8: 1 is the
+   * hexside holding the grid coordinate, clockwise from there), where a card fixes it. Read by the full ASL wind rules.
+   */
+  wind: { from: WindFrom; force: WindForce; dir?: number };
 }
 
 /**
@@ -574,6 +598,8 @@ export interface ScenarioDef {
    * dry ground, a mild breeze from the west). Special rules change it during play.
    */
   weather?: Partial<Weather>;
+  /** Environmental Conditions where the card states them (ASLRB B25.5); otherwise the EC Chart dr decides. Full ASL only. */
+  ec?: Ec;
   firstSide: SideId;
   /**
    * `san`: the side's Sniper Activation Number (ASLRB A14.1), as the card prints it. Data only until the full ASL

@@ -467,7 +467,8 @@ export class HexGridMap implements GameMap {
     if (this.hidden.has(a.id) || this.hidden.has(b.id)) return { clear: a.id === b.id, crossed: [] };
     const [hi, lo] = to.height > from.height || (to.height === from.height && b.id < a.id) ? [{ ...to, hex: b.id }, { ...from, hex: a.id }] : [{ ...from, hex: a.id }, { ...to, hex: b.id }];
     const pt = (e: LosEnd) => (e.vertex !== undefined ? `v${e.vertex}` : e.side !== undefined ? `s${e.side}` : '');
-    const k = `${hi.hex}@${hi.height}${pt(hi)}>${lo.hex}@${lo.height}${pt(lo)}${opts.orchardInSeason ? '+o' : ''}`;
+    const rub = opts.rubbled ? Object.entries(opts.rubbled).map(([h, r]) => `${h}:${r.hex}${r.art !== undefined ? `/${r.art}` : ''}`).sort().join(',') : '';
+    const k = `${hi.hex}@${hi.height}${pt(hi)}>${lo.hex}@${lo.height}${pt(lo)}${opts.orchardInSeason ? '+o' : ''}${opts.noBlind ? '+nb' : ''}${rub ? `+r${rub}` : ''}`;
     let res = this.losAtCache.get(k);
     if (!res) {
       const atPoint = pt(hi) !== '' || pt(lo) !== '';
@@ -510,7 +511,8 @@ export class HexGridMap implements GameMap {
     const { hexes, alt } = cubeLine(a.cube, b.cube);
     const crossed: LosResult['crossed'] = [];
     const over: HeightObstacle[] = [];
-    const inherent = (h: MapHex) => this.opts.inherent?.(h.terrain, h) ?? false;
+    const rubbled = opts.rubbled ?? {};
+    const inherent = (h: MapHex) => (rubbled[h.id] ? true : (this.opts.inherent?.(h.terrain, h) ?? false));
     /** The obstacles of one hex, lowest first, and its Hindrance (if any) for this LOS. */
     const judge = (h: MapHex, onRoad: boolean) => {
       const base = h.elevation ?? 0;
@@ -519,7 +521,10 @@ export class HexGridMap implements GameMap {
       let hindrance = false;
       if (base > lo.height) obs.push({ hex: h.id, terrain: 'hill', top: base, hexLevel: base, crest: true, range });
       const effect = this.opts.losEffect(h.terrain);
-      if (effect === 'obstacle') obs.push({ hex: h.id, terrain: h.terrain, top: base + this.obstacleHeightOf(h), hexLevel: base, range });
+      // A hex rubbled in play: an Inherent obstacle of the rubble's height (and its standing building art's), B24.2.
+      const rb = rubbled[h.id];
+      if (rb) obs.push({ hex: h.id, terrain: 'rubble', top: base + Math.max(rb.hex, rb.art ?? 0), hexLevel: base, range });
+      else if (effect === 'obstacle') obs.push({ hex: h.id, terrain: h.terrain, top: base + this.obstacleHeightOf(h), hexLevel: base, range });
       else if (h.terrain === 'orchard' && !onRoad) {
         const hindersHere = orchardHinders(base, lo.height, hi.height, opts.orchardInSeason ?? false, cubeDistance(h.cube, b.cube) === 1);
         if (hindersHere === 'obstacle') obs.push({ hex: h.id, terrain: h.terrain, top: base + 1, hexLevel: base, range });
@@ -552,7 +557,7 @@ export class HexGridMap implements GameMap {
         crossed.push({ hex: c.h.id, terrain: c.h.terrain, ...(cands.length > 1 && inherent(c.h) ? { inherentHexside: true } : {}) });
       }
     }
-    const blind = over.find((o) => blindHexesBehind(o, hi.height, lo.height, b.elevation ?? 0, cubeDistance(this.hex(o.hex)!.cube, b.cube)));
+    const blind = opts.noBlind ? undefined : over.find((o) => blindHexesBehind(o, hi.height, lo.height, b.elevation ?? 0, cubeDistance(this.hex(o.hex)!.cube, b.cube)));
     if (blind) return { clear: false, crossed, obstacle: { hex: blind.hex, terrain: blind.terrain, blind: true }, ...(blind.crest ? { crest: true } : {}) };
     return { clear: true, crossed, ...this.orchardEnds(hexes) };
   }
@@ -583,7 +588,8 @@ export class HexGridMap implements GameMap {
     const exempt = new Set<HexId>();
     if (hi.vertex === undefined && hi.side === undefined) exempt.add(a.id);
     if (lo.vertex === undefined && lo.side === undefined) exempt.add(b.id);
-    const inherent = (h: MapHex) => this.opts.inherent?.(h.terrain, h) ?? false;
+    const rubbled = opts.rubbled ?? {};
+    const inherent = (h: MapHex) => (rubbled[h.id] ? true : (this.opts.inherent?.(h.terrain, h) ?? false));
     const crossed: LosResult['crossed'] = [];
     const seen = new Set<HexId>();
     const over: HeightObstacle[] = [];
@@ -597,7 +603,9 @@ export class HexGridMap implements GameMap {
       let hinders = false;
       if (base > lo.height) obs.push({ hex: h.id, terrain: 'hill', top: base, hexLevel: base, crest: true, range });
       const effect = this.opts.losEffect(h.terrain);
-      if (effect === 'obstacle') obs.push({ hex: h.id, terrain: h.terrain, top: base + this.obstacleHeightOf(h), hexLevel: base, range });
+      const rb = rubbled[h.id];
+      if (rb) obs.push({ hex: h.id, terrain: 'rubble', top: base + Math.max(rb.hex, rb.art ?? 0), hexLevel: base, range });
+      else if (effect === 'obstacle') obs.push({ hex: h.id, terrain: h.terrain, top: base + this.obstacleHeightOf(h), hexLevel: base, range });
       else if (h.terrain === 'orchard') {
         const o = orchardHinders(base, lo.height, hi.height, opts.orchardInSeason ?? false, cubeDistance(h.cube, b.cube) === 1);
         if (o === 'obstacle') obs.push({ hex: h.id, terrain: h.terrain, top: base + 1, hexLevel: base, range });
@@ -642,7 +650,7 @@ export class HexGridMap implements GameMap {
         }
       }
     }
-    const blind = over.find((o) => o.hex !== b.id && blindHexesBehind(o, hi.height, lo.height, b.elevation ?? 0, cubeDistance(this.hex(o.hex)!.cube, b.cube)));
+    const blind = opts.noBlind ? undefined : over.find((o) => o.hex !== b.id && blindHexesBehind(o, hi.height, lo.height, b.elevation ?? 0, cubeDistance(this.hex(o.hex)!.cube, b.cube)));
     if (blind) return { clear: false, crossed, obstacle: { hex: blind.hex, terrain: blind.terrain, blind: true }, ...(blind.crest ? { crest: true } : {}) };
     return { clear: true, crossed };
   }

@@ -27,9 +27,16 @@ declare module '@asl/engine' {
      * Smoke (S22's victory conditions: "a LOS (disregarding Smoke hindrances)"). `from`/`to` are LocIds
      * (a hex id is the ground Location); outside full ASL's LOS with heights it is traced between their hexes.
      * `fromAt`/`toAt` (full ASL only): a corner or hexside point of that end's hex instead of its centre dot (Bypass,
-     * ASLRB A4.34; the A4.132 road point). The Starter Kit never sets them.
+     * ASLRB A4.34; the A4.132 road point). The Starter Kit never sets them. `noBlind` (full ASL, a Snap Shot): Blind Hex
+     * rules off (ASLRB A8.15). `noTargetSmoke` (full ASL, a Snap Shot): Smoke in the target hex does not count, only Smoke
+     * the LOF crosses on its way (A8.15).
      */
-    'los.trace': { ctx: { from: LocId; to: LocId; noSmoke?: boolean; fromAt?: LosPoint; toAt?: LosPoint }; value: LosTrace };
+    'los.trace': { ctx: { from: LocId; to: LocId; noSmoke?: boolean; fromAt?: LosPoint; toAt?: LosPoint; noBlind?: boolean; noTargetSmoke?: boolean }; value: LosTrace };
+    /**
+     * Whether the Smoke counters in `hex` hinder a LOS between `from` and `to`: always in the Starter Kit (SK4 1.2.5 has no
+     * heights); full ASL answers by the Smoke's height (ASLRB A24.4: two levels above its Location, WP and a Blaze four).
+     */
+    'smoke.reaches': { ctx: { hex: HexId; from: LocId; to: LocId }; value: boolean };
   }
 }
 
@@ -253,16 +260,17 @@ export const terrainModule: RuleModule = {
         if (!v.clear || c.noSmoke) return v;
         const [from, to] = [hexOfLoc(c.from), hexOfLoc(c.to)];
         const parts = [...v.parts];
+        const reaches = (hex: HexId) => env.query('smoke.reaches', { hex, from: c.from, to: c.to }, true);
         // Fire traced out of a Smoke hex takes that hex's Smoke DRM +1 (SK1 3.3: "+3" for ½" Smoke).
-        if (smokeIn(env, from)) parts.push({ label: `+${smokeDrm(env, from) + 1} firing out of Smoke`, hex: from, drm: smokeDrm(env, from) + 1 });
+        if (smokeIn(env, from) && reaches(from)) parts.push({ label: `+${smokeDrm(env, from) + 1} firing out of Smoke`, hex: from, drm: smokeDrm(env, from) + 1 });
         // Every hex the line passes through, whatever its terrain. A line exactly along a hexside is
         // affected by Smoke on either side, as one hex: the larger DRM (ASLRB A24.2, B.6).
         const map = statics(env).map;
         const steps = map.lineSteps
           ? map.lineSteps(from, to)
           : map.los(from, to).crossed.filter((c) => c.hex !== from && c.hex !== to).map((c) => [c.hex]);
-        for (const step of [...steps, [to]]) {
-          const h = step.filter((x) => smokeIn(env, x)).sort((x, y) => smokeDrm(env, y) - smokeDrm(env, x))[0];
+        for (const step of c.noTargetSmoke ? steps : [...steps, [to]]) {
+          const h = step.filter((x) => smokeIn(env, x) && reaches(x)).sort((x, y) => smokeDrm(env, y) - smokeDrm(env, x))[0];
           if (h) parts.push({ label: `+${smokeDrm(env, h)} ${smoke58Label(env, h)}`, hex: h, drm: smokeDrm(env, h) });
         }
         return { ...v, parts, hindrance: parts.reduce((a, p) => a + p.drm, 0) };

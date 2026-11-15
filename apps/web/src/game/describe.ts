@@ -1,5 +1,5 @@
 import type { GameState, LoggedEvent, QueryEnv, SideId } from '@asl/engine';
-import { SKY_NAME, chartLabel, defOf, entryAfterFireParams, entryGroupsParams, secretLengthParams, fortifiedParams, hexOf, scatterParams, isVisibleTo, isWeaponDef, statics, weatherLabel, type CounterDef, type IftResult, type VariableReinforcementsEvent, type EntryOrderDrEvent, type EntryLossesEvent, entryOrderDrParams, entryOrderLabel, type ForceChartEvent, type ScatterState, type ScatterLanding, type EntryGroupsState, type Weather, NATION, PHASE_NAME, defLabel, hexLabel, humanize, nameIds, nationName, pieceLabel, sideNameOf, entryStretchParams, type LeaderReliefEvent, type OnceDrEvent, type OnceDrNmcEvent, type OnceDrRallyEvent, type LeaderPtcEvent, type RoutStep } from '@asl/rules';
+import { SKY_NAME, chartLabel, defOf, hexOfLoc, levelOfLoc, entryAfterFireParams, entryGroupsParams, secretLengthParams, fortifiedParams, hexOf, scatterParams, isVisibleTo, isWeaponDef, statics, weatherLabel, type CounterDef, type IftResult, type VariableReinforcementsEvent, type EntryOrderDrEvent, type EntryLossesEvent, entryOrderDrParams, entryOrderLabel, type ForceChartEvent, type ScatterState, type ScatterLanding, type EntryGroupsState, type Weather, NATION, PHASE_NAME, defLabel, hexLabel, humanize, nameIds, nationName, pieceLabel, sideNameOf, entryStretchParams, type LeaderReliefEvent, type OnceDrEvent, type OnceDrNmcEvent, type OnceDrRallyEvent, type LeaderPtcEvent, type RoutStep } from '@asl/rules';
 
 // The naming helpers live in @asl/rules (labels.ts) so the server can name units too; re-exported for the many callers here.
 export { NATION, PHASE_NAME, defLabel, hexLabel, humanize, nameIds, nationName, pieceLabel, sideNameOf };
@@ -24,7 +24,9 @@ export interface LogLine {
   detail?: string;
   /** A shot's LOS, firing hexes to target, so the player can have it drawn on the map again. */
   /** `at`: the corner each firing hex traced to, firing at a stack in Bypass (full ASL, ASLRB A4.34). */
-  los?: { from: string[]; to: string; at?: Record<string, [string, string]> };
+  /** `snap`: the hexside a Snap Shot was aimed at (full ASL, ASLRB A8.15). */
+  /** `blocked`: the shot found no LOS (A6.11: declared, then checked). A shot without it had its LOS. */
+  los?: { from: string[]; to: string; at?: Record<string, [string, string]>; snap?: [string, string]; blocked?: true };
   /** Set by `phaseSections` on the line that opens an entry (a shot, a check, a move), not its results. */
   opens?: boolean;
   /** On a `phase` line: the Player Turn and phase it opens, for the log's section headings. */
@@ -84,6 +86,10 @@ const FIRE_MODE_NAME: Record<string, string> = {
  * draws every "c+w=t" as the two dice, so each two-dice roll is written this way.
  */
 const drText = (dr: readonly number[]) => `${dr[1]}+${dr[0]}=${dr[0]! + dr[1]!}`;
+/** The hexsides of the hex grid by `sideToward`'s numbering (0 south-east, clockwise), as the wind and falling rubble name them. */
+const HEXSIDE_NAME = ['south-east', 'south', 'south-west', 'north-west', 'north', 'north-east'];
+/** A Location for the log: its hex, and the level when above ground. */
+const locText = (loc: string) => `${hexLabel(hexOfLoc(loc))}${levelOfLoc(loc) ? ` level ${levelOfLoc(loc)}` : ''}`;
 const noteLabels = (xs: unknown) => ((xs as { label?: string }[] | undefined) ?? []).map((x) => x.label).filter((l): l is string => !!l);
 
 /**
@@ -122,6 +128,8 @@ export function describeEvents(env: QueryEnv, events: LoggedEvent[], viewer: Sid
     const pc = env.state.pieces[id];
     return pc ? (hexOf(env.state, pc) ?? undefined) : undefined;
   };
+  /** The IFT column an attack of `fp` uses before any shift (the highest column not above it). */
+  const fpColumn = (fp: number): number => (env.statics as { tables: { iftColumns: number[] } }).tables.iftColumns.filter((c) => c <= fp).pop() ?? 0;
   // The LOS of a shot from one hex, for the map, when it was fired from somewhere else than the target.
   const losOf = (from: string | undefined, to: string): Pick<LogLine, 'los'> => (from && from !== to ? { los: { from: [from], to } } : {});
   // A DR an event records only as its total (a MC, a CC attack, the weather): the dice come from the
@@ -170,27 +178,28 @@ export function describeEvents(env: QueryEnv, events: LoggedEvent[], viewer: Sid
         const fp = noteLabels(p['fpExplain']).join(', ');
         const drm = noteLabels(p['explain']).join(', ');
         const detail = [fp ? `FP: ${fp}` : '', drm ? `DRM: ${drm}` : ''].filter(Boolean).join(' · ');
-        const a = p['attack'] as { target: string; parts: string[]; mode?: string; at?: Record<string, [string, string]> };
+        const a = p['attack'] as { target: string; parts: string[]; mode?: string; at?: Record<string, [string, string]>; snap?: [string, string] };
         // The hexes fired from: on the event since 2026-10-26, else where the firers (or whoever holds
         // them, for a Gun or SW) stand now.
         const from = (p['from'] as string[] | undefined) ?? [...new Set(a.parts.map(hexOfNow).filter((h): h is string => !!h))];
         out.push({
           seq: e.seq,
           kind: 'fire',
-          text: `${a.parts.length ? (FIRE_MODE_NAME[a.mode ?? ''] ?? 'Fire') : 'Residual FP'} on ${hexLabel(a.target)}: ${p['fp']} FP → ${p['column'] ?? '—'} column, DR ${drText(dr)} ${(p['drm'] as number) >= 0 ? '+' : ''}${p['drm']}${p['cowered'] ? ' (cowers)' : ''}`,
+          // A cowering attack (original doubles, no leader directing; SK1 3.2) is resolved columns lower: both shown.
+          text: `${a.parts.length ? (FIRE_MODE_NAME[a.mode ?? ''] ?? 'Fire') : 'Residual FP'}${a.snap ? ` (Snap Shot at ${a.snap.map(hexLabel).join('-')})` : ''} on ${hexLabel(a.target)}: ${p['fp']} FP → ${p['cowered'] ? `${fpColumn(p['fp'] as number)} column, cowers to the ${p['column'] ?? '—'} column` : `${p['column'] ?? '—'} column`}, DR ${drText(dr)} ${(p['drm'] as number) >= 0 ? '+' : ''}${p['drm']}`,
           ...(detail ? { detail } : {}),
-          ...(from.length && from.some((h) => h !== a.target) ? { los: { from: from.filter((h) => h !== a.target), to: a.target, ...(a.at ? { at: a.at } : {}) } } : {}),
+          ...(from.length && from.some((h) => h !== a.target) ? { los: { from: from.filter((h) => h !== a.target), to: a.target, ...(a.at ? { at: a.at } : {}), ...(a.snap ? { snap: a.snap } : {}) } } : {}),
         });
         break;
       }
       case 'sk1.fire.noLos': {
-        const a = p['attack'] as { target: string; parts: string[]; mode?: string; at?: Record<string, [string, string]> };
+        const a = p['attack'] as { target: string; parts: string[]; mode?: string; at?: Record<string, [string, string]>; snap?: [string, string] };
         const from = (p['from'] as string[]).map(hexLabel).join(', ');
         out.push({
           seq: e.seq,
           kind: 'fire',
-          text: `${FIRE_MODE_NAME[a.mode ?? ''] ?? 'Fire'} on ${hexLabel(a.target)} from ${from}: no LOS (${(p['blockedBy'] as string[]).join('; ')}) — ${a.parts.map(name).join(', ')} fired for nothing${p['dr'] ? ` (DR ${drText(p['dr'] as number[])} for breakdown and ROF${p['cowered'] ? ', cowers' : ''})` : ''}`,
-          los: { from: p['from'] as string[], to: a.target, ...(a.at ? { at: a.at } : {}) },
+          text: `${FIRE_MODE_NAME[a.mode ?? ''] ?? 'Fire'}${a.snap ? ` (Snap Shot at ${a.snap.map(hexLabel).join('-')})` : ''} on ${hexLabel(a.target)} from ${from}: no LOS (${(p['blockedBy'] as string[]).join('; ')}) — ${a.parts.map(name).join(', ')} fired for nothing${p['dr'] ? ` (DR ${drText(p['dr'] as number[])} for breakdown and ROF${p['cowered'] ? ', cowers' : ''})` : ''}`,
+          los: { from: p['from'] as string[], to: a.target, ...(a.at ? { at: a.at } : {}), ...(a.snap ? { snap: a.snap } : {}), blocked: true },
         });
         break;
       }
@@ -271,7 +280,9 @@ export function describeEvents(env: QueryEnv, events: LoggedEvent[], viewer: Sid
                 : step.interdiction === 'notOpen'
                   ? 'no Interdiction (not Open Ground)'
                   : 'no Interdiction (no enemy able to interdict)';
-          out.push({ seq: e.seq, kind: 'info', text: `${step.lowCrawl ? 'Low Crawl' : 'Rout'}: ${name(step.unit)} to ${where} · ${why}` });
+          // Interdiction is decided along an unhindered LOS, already traced: clicking the line draws it as a shot's does.
+          const interdictors = step.interdiction === 'checked' && step.byFrom?.length && !step.by!.some(hiddenFrom) ? [...new Set(step.byFrom)].filter((h) => h !== step.to) : [];
+          out.push({ seq: e.seq, kind: 'info', text: `${step.lowCrawl ? 'Low Crawl' : 'Rout'}: ${name(step.unit)} to ${where} · ${why}`, ...(interdictors.length ? { los: { from: interdictors, to: step.to } } : {}) });
           break;
         }
         if (pc && isWeaponDef(defOf(env, pc))) {
@@ -344,13 +355,163 @@ export function describeEvents(env: QueryEnv, events: LoggedEvent[], viewer: Sid
       }
       case 'sk1.fortified': {
         // The buildings themselves stay out of the log: the designation is secret (SSR), unless the card makes it open.
-        const st = p['state'] as { side: string; buildings: string[] };
+        const st = p['state'] as { side: string; buildings: string[]; locations?: string[] };
+        const locLabel = (loc: string) => `${hexLabel(hexOfLoc(loc))}${levelOfLoc(loc) ? ` level ${levelOfLoc(loc)}` : ''}`;
+        if (st.locations) {
+          if (st.locations.length && fortifiedParams(env)?.open) out.push({ seq: e.seq, kind: 'info', text: `${sideNameOf(env, st.side)} fortified ${st.locations.map(locLabel).join(', ')} (SSR)` });
+          else if (st.locations.length) out.push({ seq: e.seq, kind: 'info', text: `${sideNameOf(env, st.side)} secretly designated ${st.locations.length} Fortified Building Location${st.locations.length === 1 ? '' : 's'} (SSR)` });
+          break;
+        }
         if (st.buildings.length && fortifiedParams(env)?.open) {
           const named = st.buildings.map((b) => [...statics(env).map.hexes()].filter((h) => h.buildingId === b).map((h) => hexLabel(h.id)).join('/')).join(', ');
           out.push({ seq: e.seq, kind: 'info', text: `${sideNameOf(env, st.side)} fortified building ${named} (SSR)` });
         } else if (st.buildings.length) out.push({ seq: e.seq, kind: 'info', text: `${sideNameOf(env, st.side)} secretly designated ${st.buildings.length} fortified building${st.buildings.length === 1 ? '' : 's'} (SSR)` });
         break;
       }
+      case 'asl.fortified.refused': {
+        const units = (p['units'] as string[]).map(name).join(', ');
+        const loc = p['loc'] as string;
+        const where = `${hexLabel(hexOfLoc(loc))}${levelOfLoc(loc) ? ` level ${levelOfLoc(loc)}` : ''}`;
+        out.push({
+          seq: e.seq,
+          kind: 'move',
+          text:
+            p['reason'] === 'gun'
+              ? `  ▣ ${units} cannot push the Gun into ${where}: a Fortified Building Location (ASLRB B23.93); the MF are spent where they stand and the move is over`
+              : `  ▣ ${where} is a Fortified Building Location held by an unpinned Good Order squad: ${units} ${p['phase'] === 'APh' ? 'stays put and loses its advance' : 'stops short, the MF spent where it stands, and its move is over'} (ASLRB B23.922)`,
+        });
+        break;
+      }
+      case 'asl.breach.declared':
+        out.push({ seq: e.seq, kind: 'move', text: `  ✸ ${name(p['placer'] as string)} places a DC against the ${hexLabel(hexOfLoc(p['loc'] as string))}/${hexLabel(p['toward'] as string)} hexside to Breach it (1 MF, ASLRB B23.9221)` });
+        break;
+      case 'asl.breach.attempt': {
+        const loc = p['loc'] as string;
+        const side = `${hexLabel(hexOfLoc(loc))}/${hexLabel(p['toward'] as string)}`;
+        const text = p['malfunctioned']
+          ? `  ✸ Breach attempt on the ${side} hexside: the DC fails to detonate (DR ${dr2(p['dr'], 'Breach')})`
+          : `  ✸ Breach attempt on the ${side} hexside: DR ${dr2(p['dr'], 'Breach')}${(p['drm'] as number) ? ` ${(p['drm'] as number) > 0 ? '+' : ''}${p['drm']}` : ''} — ${p['result'] === 'none' ? 'no effect' : p['result']}: ${p['breached'] ? 'the hexside is Breached' : 'the wall holds'}`;
+        out.push({ seq: e.seq, kind: 'fire', text });
+        break;
+      }
+      case 'asl.breach': {
+        const b = p['breach'] as { loc: string; toward: string; by: string };
+        out.push({ seq: e.seq, kind: 'info', text: `  ⟋ Breach: the ${hexLabel(hexOfLoc(b.loc))}/${hexLabel(b.toward)} hexside${levelOfLoc(b.loc) ? ` at level ${levelOfLoc(b.loc)}` : ''} is open${b.by === 'he' ? ' (a HE KIA)' : ''}: Infantry may enter through it (ASLRB B23.9221)` });
+        break;
+      }
+      // Full ASL Fire, rubble and wind (ASLRB B25, B24, B25.5, B25.63–B25.66).
+      case 'asl.ec.set': {
+        const ec = p['ec'] as { ec: string; drm: number; dr?: number; monthDrm?: number };
+        const name = { snow: 'Snow', mud: 'Mud', wet: 'Wet', moist: 'Moist', moderate: 'Moderate', dry: 'Dry', veryDry: 'Very Dry' }[ec.ec] ?? ec.ec;
+        out.push({ seq: e.seq, kind: 'info', text: `Environmental Conditions: ${name} (${ec.drm >= 0 ? '+' : ''}${ec.drm} DRM)${ec.dr !== undefined ? ` — dr ${ec.dr}${ec.monthDrm ? ` ${ec.monthDrm > 0 ? '+' : ''}${ec.monthDrm} for the month` : ''} (ASLRB B25.5)` : ' (scenario)'}` });
+        break;
+      }
+      case 'asl.wind.set': {
+        const w = p['wind'] as { force: string; dir?: number; gusts?: boolean };
+        const force = { none: 'No Wind', breeze: 'Mild Breeze', heavy: 'Heavy Winds' }[w.force] ?? w.force;
+        const dir = w.dir !== undefined ? ` toward the ${HEXSIDE_NAME[w.dir]} hexside` : '';
+        const reason = p['reason'] as string;
+        if (reason === 'gusts' || reason === 'gustsOver') break;
+        out.push({ seq: e.seq, kind: 'info', text: `Wind: ${force}${dir}${reason === 'dr' ? ` (Wind Force dr ${p['dr']}${p['dirDr'] !== undefined ? `, direction dr ${p['dirDr']}` : ''}; ASLRB B25.63)` : reason === 'card' ? ' (scenario)' : reason === 'change' ? ` (Wind Change dr ${p['dr']}${p['dirDr'] !== undefined ? `, direction dr ${p['dirDr']}` : ''}; ASLRB B25.65)` : ''}` });
+        break;
+      }
+      case 'asl.wind.changeDr': {
+        const dr = p['dr'] as number[];
+        const gusts = p['gusts'] as boolean;
+        out.push({ seq: e.seq, kind: 'info', text: `Wind Change DR ${drText(dr)}: ${gusts ? `GUSTS this Player Turn${p['dir'] !== undefined ? ` toward the ${HEXSIDE_NAME[p['dir'] as number]} hexside` : ''} — every Blaze spreads downwind, one of them two hexes, Smoke disperses, a burning building may collapse (ASLRB B25.651, B25.66)` : p['change'] !== null ? 'the wind changes (ASLRB B25.65)' : 'no change'}` });
+        break;
+      }
+      case 'asl.wind.smokeCleared':
+        out.push({ seq: e.seq, kind: 'info', text: '  Heavy Winds: every Smoke counter is removed (ASLRB A24.6, B25.63)' });
+        break;
+      case 'asl.wind.smokeGusted':
+        out.push({ seq: e.seq, kind: 'info', text: `  Gusts (${p['when']}): Dispersed Smoke removed, the rest flipped to Dispersed (ASLRB A24.62)` });
+        break;
+      case 'asl.fire.ntc':
+        out.push({ seq: e.seq, kind: 'check', text: `  ${name(p['unit'] as string)} Kindling NTC: DR ${drText(p['dr'] as number[])} vs ${p['target']}: ${p['passed'] ? 'passed' : 'failed, no attempt'} (ASLRB B25.11)` });
+        break;
+      case 'asl.fire.kindle': {
+        const ex = (p['explain'] as string[]).join(', ');
+        out.push({ seq: e.seq, kind: 'fire', text: `  🔥 ${name(p['unit'] as string)}${p['director'] ? ` (directed by ${name(p['director'] as string)})` : ''} tries to Kindle ${hexLabel(hexOfLoc(p['loc'] as string))}: DR ${drText(p['dr'] as number[])}${(p['drm'] as number) ? ` ${(p['drm'] as number) > 0 ? '+' : ''}${p['drm']}` : ''}${ex ? ` (${ex})` : ''} vs Kindle # ${p['needed']}: ${p['flame'] ? 'a Flame' : 'no fire'}` });
+        break;
+      }
+      case 'asl.fire.attackFlame': {
+        const ex = (p['explain'] as string[]).join(', ');
+        out.push({ seq: e.seq, kind: 'fire', text: `  🔥 ${String(p['source']).toUpperCase()} fire in ${hexLabel(hexOfLoc(p['loc'] as string))}: Flame DR ${drText(p['dr'] as number[])}${(p['drm'] as number) ? ` ${(p['drm'] as number) > 0 ? '+' : ''}${p['drm']}` : ''}${ex ? ` (${ex})` : ''} vs Kindle # ${p['needed']}: ${p['flame'] ? 'a Flame' : 'no fire'} (ASLRB B25.12, B25.13)` });
+        break;
+      }
+      case 'asl.fire.flame': {
+        const src = p['source'] as string;
+        const from = p['from'] as string | undefined;
+        if (src === 'spread' || src === 'gust' || src === 'heavy' || src === 'kindle' || src === 'ft' || src === 'he' || src === 'dc') break;
+        out.push({ seq: e.seq, kind: 'info', text: `  🔥 A Flame in ${locText(p['loc'] as string)}${from ? ` from ${locText(from)}` : ''}${src === 'ssr' ? ' (scenario)' : ''}` });
+        break;
+      }
+      case 'asl.fire.blaze':
+        out.push({ seq: e.seq, kind: 'info', text: `  🔥 BLAZE in ${locText(p['loc'] as string)}${p['source'] === 'rubble' ? ': burning rubble' : p['source'] === 'ssr' ? ' (scenario)' : ''} — no entry; its units must leave by the end of the next RtPh; +3 smoke (ASLRB B25.2, B25.4)` });
+        break;
+      case 'asl.fire.flameGone': {
+        const why = p['reason'] as string;
+        out.push({ seq: e.seq, kind: 'info', text: `  The Flame in ${locText(p['loc'] as string)} ${why === 'extinguished' ? 'is put out' : why === 'rubble' ? 'is smothered by the rubble' : 'goes out'}` });
+        break;
+      }
+      case 'asl.fire.blazeCheck': {
+        const o = p['outcome'] as string;
+        const ex = (p['explain'] as string[]).join(', ');
+        out.push({ seq: e.seq, kind: 'fire', text: `  🔥 Blaze DR for the Flame in ${locText(p['loc'] as string)}: ${drText(p['dr'] as number[])}${(p['drm'] as number) ? ` ${(p['drm'] as number) > 0 ? '+' : ''}${p['drm']}` : ''}${ex ? ` (${ex})` : ''} vs Spread # ${p['needed']}: ${o === 'blaze' ? 'a Blaze' : o === 'out' ? 'the Flame goes out' : 'still a Flame'} (ASLRB B25.151)` });
+        break;
+      }
+      case 'asl.fire.spread': {
+        const from = locText(p['from'] as string);
+        const to = locText(p['to'] as string);
+        if (p['auto']) {
+          out.push({ seq: e.seq, kind: 'fire', text: `  🔥 ${p['auto'] === 'gust' ? `Gusts: the Blaze in ${from} spreads${p['far'] ? ' two hexes' : ''} downwind` : `Heavy Winds: the Blaze in ${from} spreads downwind`} to ${to}: a Flame (ASLRB ${p['auto'] === 'gust' ? 'B25.651' : 'B25.63'})` });
+          break;
+        }
+        const ex = ((p['explain'] as string[] | undefined) ?? []).join(', ');
+        out.push({ seq: e.seq, kind: 'fire', text: `  🔥 Spreading Fire from ${from} to ${to}: DR ${drText(p['dr'] as number[])}${(p['drm'] as number) ? ` ${(p['drm'] as number) > 0 ? '+' : ''}${p['drm']}` : ''}${ex ? ` (${ex})` : ''} vs Spread # ${p['needed']}: ${p['flame'] ? 'a Flame' : 'no spread'} (ASLRB B25.6)` });
+        break;
+      }
+      case 'asl.fire.gustSelect':
+        out.push({ seq: e.seq, kind: 'info', text: `  Gusts: Random Selection among ${(p['candidates'] as string[]).map((l) => hexLabel(hexOfLoc(l))).join(', ')}: ${(p['chosen'] as string[]).map((l) => hexLabel(hexOfLoc(l))).join(', ')} spread${(p['chosen'] as string[]).length === 1 ? 's' : ''} two hexes (ASLRB B25.651)` });
+        break;
+      case 'asl.fire.eliminated':
+        out.push({ seq: e.seq, kind: 'info', text: `  ☠ ${(p['units'] as string[]).map(name).join(', ')} eliminated in the Blaze in ${locText(p['loc'] as string)} (ASLRB B25.4)` });
+        break;
+      case 'asl.fire.escape': {
+        const c = p['choice'] as string;
+        out.push({ seq: e.seq, kind: 'move', text: `  ${name(p['unit'] as string)} ${c === 'break' ? 'breaks voluntarily to rout out of the Blaze' : c === 'move' ? `moves out of the Blaze to ${hexLabel(hexOfLoc(p['to'] as string))}` : 'stays in the Blaze'} (ASLRB B25.4)` });
+        break;
+      }
+      case 'asl.fire.extinguish': {
+        const o = p['outcome'] as string;
+        const ex = (p['explain'] as string[]).join(', ');
+        const who = [...(p['units'] as string[]), ...(p['director'] ? [p['director'] as string] : [])].map(name).join(', ');
+        out.push({ seq: e.seq, kind: 'check', text: `  🧯 ${who} fight the Flame in ${locText(p['loc'] as string)} (TI): Clearance DR ${drText(p['dr'] as number[])}${(p['drm'] as number) ? ` ${(p['drm'] as number) > 0 ? '+' : ''}${p['drm']}` : ''}${ex ? ` (${ex})` : ''}: ${o === 'extinguished' ? 'the Flame is out' : o === 'hampered' ? 'Hampered: no Blaze this Player Turn' : `no effect${p['labor'] !== undefined ? `; Labor ${p['labor']} next time` : ''}`} (ASLRB B24.72)` });
+        break;
+      }
+      case 'asl.rubble.check':
+        out.push({ seq: e.seq, kind: 'fire', text: `  ▦ Rubble dr for ${locText(p['loc'] as string)}: ${p['dr']}${(p['drm'] as number) ? ` +${p['drm']} stone` : ''} vs the ${p['kia']}KIA: ${p['rubbled'] ? 'the building collapses' : 'it stands'} (ASLRB B24.11)` });
+        break;
+      case 'asl.rubble.whole':
+        out.push({ seq: e.seq, kind: 'fire', text: `  ▦ Whole-hex collapse dr for ${hexLabel(p['hex'] as string)}: ${p['dr']}${(p['drm'] as number) ? ` +${p['drm']}` : ''}: ${p['rubbled'] ? 'the whole hex comes down' : 'the lower levels stand'} (ASLRB B24.11)` });
+        break;
+      case 'asl.rubble': {
+        const by = p['by'] as string;
+        out.push({ seq: e.seq, kind: 'info', text: `  ▦ ${hexLabel(p['hex'] as string)}${(p['from'] as number) ? ` from level ${p['from']} up` : ''} is ${p['kind']} rubble${p['burning'] ? ', burning' : ''}${by === 'collapse' ? ' (the burning building collapsed, ASLRB B25.66)' : by === 'falling' ? ' (falling rubble, ASLRB B24.121)' : by === 'ssr' ? ' (scenario)' : ' (ASLRB B24.11)'}` });
+        break;
+      }
+      case 'asl.rubble.falling': {
+        const dr = p['dr'] as number[];
+        out.push({ seq: e.seq, kind: 'fire', text: `  ▦ Falling rubble DR from ${hexLabel(p['hex'] as string)}: colored ${dr[1]}${(p['drm'] as number) ? ` +${p['drm']}` : ''}, white ${dr[0]}: ${p['falls'] ? `it falls across the ${HEXSIDE_NAME[p['hexside'] as number]} hexside${p['to'] ? ` into ${hexLabel(p['to'] as string)}` : ' off the map'}` : 'it stays'} (ASLRB B24.12)` });
+        break;
+      }
+      case 'asl.rubble.eliminated':
+        out.push({ seq: e.seq, kind: 'info', text: `  ☠ ${[...(p['units'] as string[]), ...(p['weapons'] as string[])].map(name).join(', ')} ${p['falling'] ? 'crushed by the falling rubble' : 'buried in the rubble'} of ${hexLabel(p['hex'] as string)} (ASLRB B24.11, B24.121)` });
+        break;
+      case 'asl.rubble.collapse':
+        out.push({ seq: e.seq, kind: 'info', text: `  ▦ Collapse: ${(p['chosen'] as string[]).map(locText).join(', ')} (Random Selection among ${(p['candidates'] as string[]).map(locText).join(', ')}) (ASLRB B25.66)` });
+        break;
       case 'ssr.variableReinforcements': {
         // The reinforcement dr: what it was for, what it rolled and what it brought.
         const v = p as unknown as VariableReinforcementsEvent;
@@ -533,16 +694,25 @@ export function describeEvents(env: QueryEnv, events: LoggedEvent[], viewer: Sid
         out.push({ seq: e.seq, kind: 'info', text: `  ☁ Weather now: ${weatherLabel(p['weather'] as Weather)}` });
         break;
       }
-      case 'sk1.fortified.revealed':
-        out.push({
-          seq: e.seq,
-          kind: 'info',
-          text: `  ▣ Building ${hexLabel(p['hex'] as string)} is fortified (+1 TEM): revealed by ${p['reason'] === 'fire' ? 'fire on' : 'a unit entering'} ${hexLabel(p['hex'] as string)}`,
-        });
+      case 'sk1.fortified.revealed': {
+        const loc = p['loc'] as string | undefined;
+        const what = loc ? `${hexLabel(hexOfLoc(loc))}${levelOfLoc(loc) ? ` level ${levelOfLoc(loc)}` : ''} is a Fortified Building Location` : `Building ${hexLabel(p['hex'] as string)} is fortified`;
+        const how = p['reason'] === 'fire' ? 'fire on' : p['reason'] === 'attempt' ? 'a unit trying to enter' : 'a unit entering';
+        out.push({ seq: e.seq, kind: 'info', text: `  ▣ ${what} (+1 TEM): revealed by ${how} ${hexLabel(p['hex'] as string)}` });
         break;
-      case 'sk1.cc.attack':
-        out.push({ seq: e.seq, kind: 'cc', text: `CC in ${p['hex']} (${sideNameOf(env, p['side'] as string)}): ${p['odds']}, DR ${dr2(p['dr'], `CC ${p['side']} in`)}${(p['drm'] as number) ? ` ${(p['drm'] as number) > 0 ? '+' : ''}${p['drm']}` : ''} vs kill ${p['kill']} — ${p['result']}` });
+      }
+      case 'sk1.cc.attack': {
+        // The strengths behind the odds, unit by unit (a pinned unit's FP halved), where the rules recorded them.
+        const fp = p['fp'] as { attack: [string, number][]; defense: [string, number][] } | undefined;
+        const side = (xs: [string, number][]) => {
+          const total = xs.reduce((n, [, v]) => n + v, 0);
+          const each = xs.map(([id, v]) => `${hiddenFrom(id) ? '?' : name(id)} ${v}`).join(' + ');
+          return xs.length > 1 ? `${each} = ${total}` : each;
+        };
+        const strength = fp ? `${side(fp.attack)} vs ${side(fp.defense)} → ` : '';
+        out.push({ seq: e.seq, kind: 'cc', text: `CC in ${p['hex']} (${sideNameOf(env, p['side'] as string)}): ${strength}${p['odds']}, DR ${dr2(p['dr'], `CC ${p['side']} in`)}${(p['drm'] as number) ? ` ${(p['drm'] as number) > 0 ? '+' : ''}${p['drm']}` : ''} vs kill ${p['kill']} — ${p['result']}` });
         break;
+      }
       case 'dice.rolled': {
         const label = p['label'] as string;
         // Random Selection (ASLRB A.9): one dr per unit, highest selected, ties rolled again among the tied. The rules
@@ -560,26 +730,35 @@ export function describeEvents(env: QueryEnv, events: LoggedEvent[], viewer: Sid
             rolls.push({ id: m[2]!, v: (f.payload as { dice: number[] }).dice[0]! });
           }
           if (rolls.some((r) => hiddenFrom(r.id))) break;
-          // A round ends where a unit rolls again; a round whose highest dr is shared is followed by a re-roll of
-          // the tied units (or, under full ASL A.9, all of them are selected).
-          const rounds: { id: string; v: number }[][] = [];
-          for (const r of rolls) {
-            const cur = rounds[rounds.length - 1];
-            if (!cur || cur.some((x) => x.id === r.id)) rounds.push([r]);
-            else cur.push(r);
-          }
-          const tops = rounds.map((round) => {
-            const max = Math.max(...round.map((x) => x.v));
-            return round.filter((x) => x.v === max).map((x) => x.id);
-          });
-          const reRoll = (k: number) => k > 0 && tops[k - 1]!.length > 1 && rounds[k]!.every((x) => tops[k - 1]!.includes(x.id));
+          // The first round is every candidate once (it ends where a unit rolls again). A round whose highest dr is
+          // shared is followed by a re-roll of the tied units (or, under full ASL A.9, all of them are selected); a
+          // clean pick by a round of the units left, if more are to be picked. The rolls may stop partway through a
+          // round while the dice are still being revealed.
+          let n = rolls.findIndex((r, j) => rolls.slice(0, j).some((x) => x.id === r.id));
+          if (n < 0) n = rolls.length;
+          const rounds: { round: { id: string; v: number }[]; reRoll: boolean }[] = [{ round: rolls.slice(0, n), reRoll: false }];
+          let left = rounds[0]!.round.map((x) => x.id);
           const picked: string[] = [];
-          tops.forEach((top, k) => {
-            if (top.length === 1) picked.push(top[0]!);
-            else if (!reRoll(k + 1)) picked.push(...top);
-          });
-          const text = rounds.map((round, k) => `${reRoll(k) ? 'tie, re-roll: ' : k > 0 ? 'next: ' : ''}${round.map((x) => `${name(x.id)} ${x.v}`).join(', ')}`).join(' · ');
-          out.push({ seq: e.seq, kind: 'info', text: `  ${sel[1]}, Random Selection (highest dr): ${text} → ${picked.map(name).join(', ')}` });
+          for (;;) {
+            const last = rounds[rounds.length - 1]!.round;
+            const max = Math.max(...last.map((x) => x.v));
+            const top = last.filter((x) => x.v === max).map((x) => x.id);
+            const tie = top.length > 1;
+            if (!tie) {
+              picked.push(top[0]!);
+              left = left.filter((id) => id !== top[0]);
+            }
+            if (n >= rolls.length) {
+              if (tie) picked.push(...top);
+              break;
+            }
+            const size = tie ? top.length : left.length;
+            rounds.push({ round: rolls.slice(n, n + size), reRoll: tie });
+            n += size;
+            if (n > rolls.length) break;
+          }
+          const text = rounds.map(({ round, reRoll }, k) => `${reRoll ? 'tie, re-roll: ' : k > 0 ? 'next: ' : ''}${round.map((x) => `${name(x.id)} ${x.v}`).join(', ')}`).join(' · ');
+          out.push({ seq: e.seq, kind: 'info', text: `  ${sel[1]}, Random Selection (highest dr): ${text}${picked.length ? ` → ${picked.map(name).join(', ')}` : ''}` });
           break;
         }
         // Interdiction (SK1 3.6): the rules record only the dice, so the outcome is read from what
@@ -672,14 +851,22 @@ export function describeEvents(env: QueryEnv, events: LoggedEvent[], viewer: Sid
           seq: e.seq,
           kind: 'fire',
           text: `${name(p['weapon'] as string)} at ${hexLabel(p['target'] as string)}${p['ammo'] ? ` (${p['ammo']})` : ''}: no LOS (${p['blockedBy']}) — ${p['noAmmo'] ? 'and no ammo: it has not fired' : `the Gun has fired for nothing${p['dr'] ? ` (TH DR ${drText(p['dr'] as number[])} for breakdown, depletion and ROF)` : ''}`}`,
-          ...losOf((p['from'] as string | undefined) ?? hexOfNow(p['weapon'] as string), p['target'] as string),
+          ...(() => {
+            const l = losOf((p['from'] as string | undefined) ?? hexOfNow(p['weapon'] as string), p['target'] as string);
+            return l.los ? { los: { ...l.los, blocked: true as const } } : {};
+          })(),
         });
         break;
       case 'sk2.ordnance.rof': {
         const kept = p['kept'] as boolean;
         const why = p['why'] as string | null;
         const ROF_WHY: Record<string, string> = { intensive: 'Intensive Fire never retains ROF', malfunction: 'the Gun malfunctioned', pinned: 'a pinned crew\'s Gun cannot retain ROF' };
-        out.push({ seq: e.seq, kind: 'fire', text: `  ${name(p['weapon'] as string)} ${kept ? `keeps ROF (colored dr ${p['colored']} ≤ ${p['rof']}): it may fire again this phase` : `loses ROF${why === 'exceeded' ? `: colored dr ${p['colored']} > ${p['rof']}` : why ? `: ${ROF_WHY[why] ?? why}` : ''}`}` });
+        // A Defensive First Fire hit leaves Residual FP, but not from a Weapon that uses Intensive Fire or
+        // malfunctions (SK4 3.3.5): said here, since no counter appears.
+        let shot: Record<string, unknown> | undefined;
+        for (let j = i - 1; j >= 0 && !shot; j--) if (events[j]!.type === 'sk2.ordnance.shot' && (events[j]!.payload as { weapon: string }).weapon === p['weapon']) shot = events[j]!.payload as Record<string, unknown>;
+        const noResidual = (why === 'intensive' || why === 'malfunction') && shot && ['first', 'subsequentFirst', 'fpf'].includes(shot['mode'] as string) && (shot['outcome'] === 'hit' || shot['outcome'] === 'ch');
+        out.push({ seq: e.seq, kind: 'fire', text: `  ${name(p['weapon'] as string)} ${kept ? `keeps ROF (colored dr ${p['colored']} ≤ ${p['rof']}): it may fire again this phase` : `loses ROF${why === 'exceeded' ? `: colored dr ${p['colored']} > ${p['rof']}` : why ? `: ${ROF_WHY[why] ?? why}` : ''}`}${noResidual ? `; no Residual FP (${why === 'intensive' ? 'Intensive Fire' : 'a malfunctioned Weapon'} leaves none)` : ''}` });
         break;
       }
       case 'sk2.acquired': {
@@ -797,7 +984,7 @@ export function describeEvents(env: QueryEnv, events: LoggedEvent[], viewer: Sid
         out.push({
           seq: e.seq,
           kind: 'fire',
-          text: `${name(p['unit'] as string)} Panzerfaust check: dr ${p['dr']}${p['drm'] ? ` ${(p['drm'] as number) > 0 ? '+' : ''}${p['drm']}` : ''} → ${r === 'pf' ? 'has a PF and fires it' : r === 'none' ? 'no PF' : r === 'pinned' ? 'no PF, pinned (original 6)' : 'no PF, broken (original 6 while pinned)'}`,
+          text: `${name(p['unit'] as string)} Panzerfaust check: dr ${p['dr']}${p['drm'] ? ` ${(p['drm'] as number) > 0 ? '+' : ''}${p['drm']} = ${p['final']}` : ''} (final 1-3 finds a PF) → ${r === 'pf' ? 'has a PF and fires it' : r === 'none' ? 'no PF' : r === 'pinned' ? 'no PF, pinned (original 6)' : 'no PF, broken (original 6 while pinned)'}`,
           ...(notes ? { detail: notes } : {}),
         });
         break;
@@ -824,6 +1011,9 @@ export function describeEvents(env: QueryEnv, events: LoggedEvent[], viewer: Sid
         });
         break;
       }
+      case 'ssr.oba.noLos':
+        out.push({ seq: e.seq, kind: 'fire', text: `${p['label']} (${p['rule']}): ${name(p['observer'] as string)} calls a fire mission on ${hexLabel(p['hex'] as string)} but has no LOS to it: no contact, this phase's attempt is spent` });
+        break;
       case 'ssr.oba.landed': {
         const dirs = ['north', 'north-east', 'south-east', 'south', 'south-west', 'north-west'];
         const dist = p['distance'] as number;

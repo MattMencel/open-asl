@@ -151,14 +151,21 @@ export const concealmentModule: RuleModule = {
       query: 'piece.standIn',
       apply(v, { piece, viewer }, env) {
         const p = env.state.pieces[piece];
-        if (!p || !isConcealed(p) || viewer === p.side || !isInfantry(env, p) || p.loc.kind !== 'hex' || !concealmentActive(env)) return v;
+        if (!p || !isConcealed(p) || viewer === p.side || !isInfantry(env, p) || !concealmentActive(env)) return v;
+        // On the map, or waiting in an offboard hex to enter: reinforcements "may always set up concealed" (8.3), and
+        // their "?" stands where they wait as it would on the map (not while still being set up, nor once exited).
+        const offboard = p.loc.kind === 'offboard' && !!p.loc.hex && p.loc.edge !== 'setup' && p.loc.edge !== 'exited' ? p.loc.hex : null;
+        if (p.loc.kind !== 'hex' && !offboard) return v;
         // One stand-in per concealed stack of a side in a hex; 5/8" when a Gun is in it (8.3.3). It tells how many
         // counters lie under the "?" (the units and the weapons they hold): at the table the stack's height is plain to
         // see, only what the counters are is hidden (8.3, ASLRB A12.1).
-        const stack = concealedAt(env, locOf(env.state, p)!, p.side).filter((q) => isInfantry(env, q));
+        const at = offboard ?? locOf(env.state, p)!;
+        const stack = offboard
+          ? Object.values(env.state.pieces).filter((q) => q.side === p.side && q.loc.kind === 'offboard' && q.loc.hex === offboard && isConcealed(q) && isInfantry(env, q))
+          : concealedAt(env, at, p.side).filter((q) => isInfantry(env, q));
         const big = stack.some((q) => swHeldBy(env.state, q.id).some((w) => gun(env, w)));
         const counters = stack.reduce((n, q) => n + 1 + swHeldBy(env.state, q.id).length, 0);
-        return { id: `?:${p.side}:${locOf(env.state, p)!}`, defId: UNKNOWN_DEF_ID, side: p.side, loc: p.loc, tags: { [T4.concealed]: true, counters, ...(big ? { big: true } : {}) } };
+        return { id: `?:${p.side}:${at}`, defId: UNKNOWN_DEF_ID, side: p.side, loc: p.loc, tags: { [T4.concealed]: true, counters, ...(big ? { big: true } : {}) } };
       },
     });
     r.contribute({
@@ -358,8 +365,9 @@ export const concealmentModule: RuleModule = {
       next?.(ctx, ms, to, cost, woods);
       const cur = moveState(ctx);
       if (!cur) return;
-      const seenAt = [...(ms.hex ? [ms.hex] : []), toHex];
-      if (!cur.assault) dropConcealment(ctx, cur.units, 'moved', seenAt);
+      // Judged where the MF are spent, the hex entered (ASLRB A12.14 EX: no loss "because the hexes in which it expends
+      // those MF are not in LOS"): a unit seen where it was but stepping out of sight keeps its "?".
+      if (!cur.assault) dropConcealment(ctx, cur.units, 'moved', [toHex]);
       else if (seenInTheOpen(ctx, toHex, ctx.state.attacker, cur.viaRoad)) dropConcealment(ctx, cur.units, 'open');
     });
     // Advancing into Open Ground in the LOS of a Good Order enemy (8.3.2).

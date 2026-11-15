@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Action, Ctx, RuleModule } from '@asl/engine';
-import { FORTIFIED_MODULE, FP, fortifiableBuildings, fortifiedModule, fortifiedKnownTo, fortifiedState, withoutSecrets, type FireAttackCtx, type FireDeclaration, type FireMode, type ResolveFireFn } from '../src';
-import { act, makeEngine } from './fixtures';
+import { FORTIFIED_MODULE, FP, FPP, fortifiableBuildings, fortifiedModule, fortifiedKnownTo, fortifiedState, inCoveredArc, nearestSpine, sk2CoreModules, statics, withoutSecrets, type FireAttackCtx, type FireDeclaration, type FireMode, type ResolveDcFn, type ResolveFireFn } from '../src';
+import { GE_VS_BR, act, makeEngine } from './fixtures';
 
 /** Test-only action: resolve a fire declaration in a given mode. */
 const testFire: RuleModule = {
@@ -150,5 +150,113 @@ describe('fortified buildings (SSR)', () => {
     const t = act(e2, r1, { type: 'test.move', id: 'a1', hex: 'yP6' });
     expect((t.events.find((e) => e.type === 'sk1.fortified.revealed')!.payload as { reason: string }).reason).toBe('entered');
     expect(fortifiedState(e2.env(t.state))!.revealed).toEqual(['b-P5']);
+  });
+});
+
+/*
+ * The +1 applies to every attack that takes the building's TEM, not only small arms: a Placed DC (the card: "an
+ * additional +1 to the regular building TEM"; ASLRB B23.921 "including vs DC"), the To Hit DR of ordnance against the
+ * Infantry Target Type (TEM is a To Hit DRM, case 17) and a Critical Hit's reversed TEM (-4 for stone, -3 for wood,
+ * B23.921). Each stays secret until it changes a result, like the small-arms +1.
+ */
+describe('the +1 against a DC attack, on the To Hit DR and in a Critical Hit', () => {
+  const attackOf = (t: { events: { type: string; payload: unknown }[] }) =>
+    t.events.find((e) => e.type === 'sk1.fire.attack')!.payload as { drm: number; explain: { id: string; label?: string }[] };
+  const revealed = (t: { events: { type: string }[] }) => t.events.some((e) => e.type === 'sk1.fortified.revealed');
+
+  describe('a Placed DC', () => {
+    // A DC placed in the stone building P5 by a1 attacks (as in the AFPh): 30 FP, +3 TEM, secretly +4.
+    const testDc: RuleModule = {
+      id: 'test.dc',
+      install(r) {
+        r.action<Action & { dc: string }>({
+          type: 'test.dc',
+          decisionKinds: ['phase'],
+          resolve(ctx: Ctx, a) {
+            ctx.proc<ResolveDcFn>(FPP.resolveDc)(ctx, ctx.state.pieces[a.dc]!);
+          },
+        });
+      },
+    };
+    const dcGame = (dice: number[]) =>
+      makeEngine({
+        terrain,
+        extra: [fortifiedModule, testDc],
+        scenario,
+        dice,
+        pieces: [
+          { id: 'a1', def: 'am.747', side: 'am', hex: 'yO5' },
+          { id: 'd1', def: 'am.DC', side: 'am', hex: 'yP5', tags: { dcPlaced: true, dcPlacer: 'a1' } },
+          { id: 'g1', def: 'ge.467', side: 'ge', hex: 'yP5' },
+        ],
+      });
+    it('takes the +1 when it changes the result, and reveals the building', () => {
+      // DR 10: +3 is a NMC, +4 a PTC on the fixture's 30 column.
+      const { engine, state: s0 } = dcGame([5, 5]);
+      const s1 = act(engine, s0, { type: 'fortify.designate', buildings: ['b-P5'] }).state;
+      const t = act(engine, s1, { type: 'test.dc', dc: 'd1' });
+      expect(attackOf(t).drm).toBe(4);
+      expect(attackOf(t).explain.map((n) => n.label)).toContain('+1 Fortified Building');
+      expect(revealed(t)).toBe(true);
+      expect(t.events.find((e) => e.type === 'sk1.fire.result')!.payload).toMatchObject({ result: { kind: 'PTC' } });
+    });
+    it('is reported without the +1 when the result is the same either way', () => {
+      // DR 2: a KIA with +3 or +4.
+      const { engine, state: s0 } = dcGame([1, 1]);
+      const s1 = act(engine, s0, { type: 'fortify.designate', buildings: ['b-P5'] }).state;
+      const t = act(engine, s1, { type: 'test.dc', dc: 'd1' });
+      expect(attackOf(t).drm).toBe(3);
+      expect(attackOf(t).explain.map((n) => n.label)).not.toContain('+1 Fortified Building');
+      expect(revealed(t)).toBe(false);
+    });
+  });
+
+  describe('ordnance', () => {
+    // A German 88 in O4 fires at a British squad in O5, a building the British fortified (range 1: To Hit 10, CH 5).
+    const gunGame = (dice: number[], building: 'building-stone' | 'building-wood', open = false) => {
+      const scenario = {
+        ...GE_VS_BR,
+        forces: [{ side: 'br', units: [], setup: { kind: 'area' as const, description: 'O5', hexes: ['yO5'] } }],
+        ssr: [{ module: FORTIFIED_MODULE, params: { side: 'br', count: 1, within: 'setup', ...(open ? { open: true } : {}) } }],
+      };
+      const terrain = { yO5: { terrain: building, buildingId: 'b-O5' } };
+      const pieces = (ca: number) => [
+        { id: 'c1', def: 'ge.228c', side: 'ge', hex: 'yO4' },
+        { id: 'g88', def: 'ge.AA88L', side: 'ge', heldBy: 'c1', tags: { ca } },
+        { id: 'b1', def: 'br.457', side: 'br', hex: 'yO5' },
+      ];
+      const probe = makeEngine({ scenario, extra: [...sk2CoreModules, fortifiedModule], terrain, pieces: pieces(0) });
+      const map = statics(probe.engine.env(probe.state)).map;
+      const ca = inCoveredArc(map.hex('yO4')!.cube, 0, map.hex('yO5')!.cube) ? 0 : nearestSpine(map.hex('yO4')!.cube, 0, map.hex('yO5')!.cube)!;
+      const { engine, state } = makeEngine({ scenario, extra: [...sk2CoreModules, fortifiedModule], terrain, dice, pieces: pieces(ca) });
+      return { engine, state: act(engine, state, { type: 'fortify.designate', buildings: ['b-O5'] }).state };
+    };
+    const shotOf = (t: { events: { type: string; payload: unknown }[] }) => t.events.find((e) => e.type === 'sk2.ordnance.shot')!.payload as { drm: number; outcome: string; explain: { label?: string }[] };
+    const fire = { type: 'fire.ordnance', shot: { weapon: 'g88', target: 'yO5', targetType: 'ITT' } };
+
+    it('adds the +1 to the To Hit DR when it changes the hit or the Critical Hit, revealing the building', () => {
+      // Original 2: with +3 a Critical Hit (5), with +4 an ordinary hit (6).
+      const { engine, state } = gunGame([1, 1, 3, 3], 'building-stone');
+      const t = act(engine, state, fire);
+      expect(shotOf(t)).toMatchObject({ drm: 4, outcome: 'hit' });
+      expect(shotOf(t).explain.map((n) => n.label)).toContain('+1 Fortified Building');
+      expect(revealed(t)).toBe(true);
+    });
+    it('leaves it out of the To Hit DR when the shot hits the same either way', () => {
+      // Original 3: 6 or 7, both an ordinary hit against 10.
+      const { engine, state } = gunGame([1, 2, 3, 3], 'building-stone');
+      const t = act(engine, state, fire);
+      expect(shotOf(t)).toMatchObject({ drm: 3, outcome: 'hit' });
+      expect(shotOf(t).explain.map((n) => n.label)).not.toContain('+1 Fortified Building');
+      expect(revealed(t)).toBe(false);
+    });
+    it('reverses the fortified TEM on a Critical Hit: -3 for a wooden building (B23.921)', () => {
+      // Known from the start (the card names it). Original 2 +3 = 5: a Critical Hit; its IFT DR takes -3, not -2.
+      const { engine, state } = gunGame([1, 1, 3, 3], 'building-wood', true);
+      const t = act(engine, state, fire);
+      expect(shotOf(t)).toMatchObject({ drm: 3, outcome: 'ch' });
+      expect(attackOf(t).drm).toBe(-3);
+      expect(attackOf(t).explain.map((n) => n.label)).toEqual(expect.arrayContaining(['-2 Critical Hit: TEM reversed', '-1 Critical Hit: Fortified Building TEM reversed']));
+    });
   });
 });
