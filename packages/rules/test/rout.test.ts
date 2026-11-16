@@ -31,7 +31,9 @@ describe('Rout Phase', () => {
     expect(state.pieces['a1']!.tags['dm']).toBe(true);
     // Neither staying put nor ending the phase is allowed while it has not routed.
     expect(() => act(engine, state, { type: 'rout.stay', unit: 'a1' })).toThrow(/must rout/);
-    expect(() => act(engine, state, { type: 'endPhase' })).toThrow(/must rout first/);
+    // The refusal names the units it waits on (the interface shows them as "unit in hex").
+    expect(() => act(engine, state, { type: 'endPhase' })).toThrow(/1 unit must rout first: a1$/);
+    expect(env.query('phase.endBlocked', {}, null)).toBe('1 unit must rout first: a1');
     expect(engine.legalActions(state, 'am').some((a) => a.type === 'endPhase')).toBe(false);
     // The rout is walked a hex at a time toward the woods: any way that does not close on the enemy will do.
     const targets = stepTargets(engine, state, 'am', 'a1');

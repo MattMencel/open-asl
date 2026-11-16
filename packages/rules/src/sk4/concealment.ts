@@ -3,7 +3,7 @@ import { byId, defOf, hexOf, isVehicleDef, otherSide, personnelAt, statics, swHe
 import { hexOfLoc, locKey, locOf, type LocId } from '../common/location';
 import { UNKNOWN_DEF_ID } from '../common/statics';
 import { PHASE_DECISION, PHASE_DONE, type PhaseDoneFn } from '../common/turn';
-import { FP, iftColumn, type ApplyResultFn, type FireMode } from '../sk1/fire';
+import { FP, areaFireColumn, type ApplyResultFn, type FireAttackCtx, type FireMode } from '../sk1/fire';
 import { hasLos, isVisibleTo, knownEnemyAt } from '../sk1/known';
 import { MOVE_ENTER, moveInternals, moveState, type MoveEnterFn } from '../sk1/movement';
 import { P as MP, type CasualtyFn, type UnitFn } from '../sk1/morale';
@@ -542,15 +542,30 @@ export const concealmentModule: RuleModule = {
 
     // ---------------------------------------------------------------- effects of being fired at (8.3.2)
     // Small arms vs concealed units: Area Fire, half FP; a mixed hex is resolved once per kind with the same DR (A12.13).
+    // Each firer's FP is halved before Assault Fire's +1 (SK1 3.5: "after all modification"; ASLRB A7.36), so the
+    // concealed targets' FP is worked out again (`vsConcealed`), not the attack's column halved.
+    const concealedTargets = (env: QueryEnv, attack: FireAttackCtx): PieceId[] => {
+      if (!concealmentActive(env) || attack.ordnance) return [];
+      const dcVs = attack.parts.some((p) => p.kind === 'sw' && env.state.pieces[p.piece]?.tags[T4.dcVsConcealed] === true);
+      return attack.targets.filter((u) => dcVs || (isConcealed(pieceOf(env, u)) && !isVisibleTo(env, pieceOf(env, u), attack.side)));
+    };
+    r.contribute({ id: 'sk4.concealment.area-targets', query: 'fire.areaTargets', ref: 'SK4 8.3.2', apply: (v, { attack }, env) => (v.length ? v : concealedTargets(env, attack)) });
+    r.contribute({
+      id: 'sk4.fp.vs-concealed',
+      query: 'fire.partFp',
+      layer: 250,
+      ref: 'SK4 8.3.2; ASLRB A12.13',
+      label: '½ Area Fire (concealed target)',
+      when: ({ attack }) => !!attack.vsConcealed,
+      apply: (v) => v / 2,
+    });
     r.procedure<ApplyResultFn>(FP.applyResult, (next) => (ctx, attack, column, baseFinal, out) => {
-      if (!concealmentActive(ctx) || attack.ordnance) return next?.(ctx, attack, column, baseFinal, out);
-      const dcVs = attack.parts.some((p) => p.kind === 'sw' && ctx.state.pieces[p.piece]?.tags[T4.dcVsConcealed] === true);
-      const concealed = attack.targets.filter((u) => dcVs || (isConcealed(pieceOf(ctx, u)) && !isVisibleTo(ctx, pieceOf(ctx, u), attack.side)));
+      const concealed = attack.vsConcealed ? [] : concealedTargets(ctx, attack);
       if (concealed.length === 0) return next?.(ctx, attack, column, baseFinal, out);
       const rest = attack.targets.filter((u) => !concealed.includes(u));
       if (rest.length) next?.(ctx, { ...attack, targets: rest }, column, baseFinal, out);
-      const half = iftColumn(ctx, column / 2);
-      if (half !== null) next?.(ctx, { ...attack, targets: concealed }, half, baseFinal, out);
+      const half = areaFireColumn(ctx, { ...attack, targets: concealed }, column);
+      if (half !== null) next?.(ctx, { ...attack, targets: concealed, vsConcealed: true }, half, baseFinal, out);
     });
     r.contribute({
       id: 'sk4.th.concealed-target',

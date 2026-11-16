@@ -16,10 +16,11 @@ export type Scalar = string | number | boolean | null;
 export type Location =
   /**
    * On the map. `level`, `sub` and `pos` place it within the hex (ASLRB A2.8: upper building levels, a pillbox,
-   * a rooftop or bridge are Locations of their own; a foxhole or trench is a position within one, B27.13). They
+   * a rooftop or bridge are Locations of their own; a foxhole or trench is a position within one, B27.13; a unit in a
+   * Wire hex is on top of the counter or beneath it, B26.4). They
    * are never written as 0 or false: a piece at ground level is `{ kind: 'hex', hex }`, as in the Starter Kit.
    */
-  | { kind: 'hex'; hex: HexId; level?: number; sub?: 'pb' | 'roof' | 'bridge' | 'cave'; pos?: { ent?: 'foxhole' | 'trench' | 'ditch' } }
+  | { kind: 'hex'; hex: HexId; level?: number; sub?: 'pb' | 'roof' | 'bridge' | 'cave'; pos?: { ent?: 'foxhole' | 'trench' | 'ditch'; wire?: 'on' | 'beneath' } }
   /** Off the map. `hex` is a virtual offboard hex beside the entry edge once the unit is set up there. */
   | { kind: 'offboard'; edge?: string; hex?: HexId }
   | { kind: 'held'; by: PieceId }

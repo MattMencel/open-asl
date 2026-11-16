@@ -70,7 +70,9 @@ type RallyAction =
   | (Action & { type: 'rally.rallyAll'; leader: PieceId })
   | (Action & { type: 'rally.recover'; unit: PieceId; sw: PieceId })
   | (Action & { type: 'rally.repair'; unit: PieceId; sw: PieceId })
-  | (Action & { type: 'rally.transfer'; sw: PieceId; to: PieceId });
+  | (Action & { type: 'rally.transfer'; sw: PieceId; to: PieceId })
+  | (Action & { type: 'rally.dmRemove'; unit: PieceId })
+  | (Action & { type: 'rally.dmKeep'; unit: PieceId });
 
 const rallySide = (env: QueryEnv) =>
   ((env.state.decisions[env.state.decisions.length - 1]?.data?.['side'] as string | undefined) ?? env.state.attacker);
@@ -96,6 +98,32 @@ const selfRallyCapable = (env: QueryEnv, unit: PieceId): boolean => {
   const p = pieceOf(env, unit);
   return env.query('unit.selfRally', { unit }, smc(env, p) ? true : !!mmc(env, p)?.selfRally);
 };
+
+/**
+ * Why `unit`'s owner has no choice about its DM counter at the end of this RPh, or null when he has. "All DM counters
+ * are removed at the end of the RPh unless the DM unit is adjacent to a Known Enemy Unit. A broken unit may opt to keep
+ * its DM status unless in woods or building" (SK1 3.1 g; ASLRB A10.62, "so as to guarantee its ability to rout again in
+ * the next RtPh": only a broken unit under DM may rout, SK1 3.6). Jungle and huts count as woods and building (SK4 8.2).
+ * Deferred (full ASL A10.62): pillbox and trench Locations, and the overstacked unit in woods/building that may keep it.
+ */
+export function dmChoiceIllegal(env: QueryEnv, side: string, unit: PieceId): string | null {
+  const p = env.state.pieces[unit];
+  if (!p || p.side !== side) return 'Not your unit';
+  if (!hasDm(p) || !isBroken(p)) return 'Only a broken unit under DM';
+  const loc = p.loc.kind === 'hex' ? locOf(env.state, p) : undefined;
+  if (!loc) return 'Not on the map';
+  if (adjacentToKnownEnemy(env, side, loc)) return 'Adjacent to a Known enemy unit: it keeps its DM (SK1 3.1 g)';
+  if (terrainOf(env, hexOf(env.state, p)!).routShelter) return 'In woods or a building: its DM comes off at the end of the RPh (SK1 3.1 g)';
+  return null;
+}
+
+/** Whether `unit`'s DM counter stays on at the end of this RPh: beside a Known enemy, or kept by its owner's choice (the default). */
+export function dmStaysOn(env: QueryEnv, unit: PieceId): boolean {
+  const p = env.state.pieces[unit];
+  if (!p || !hasDm(p) || p.loc.kind !== 'hex') return false;
+  if (adjacentToKnownEnemy(env, p.side, locOf(env.state, p)!)) return true;
+  return !dmChoiceIllegal(env, p.side, unit) && p.tags[T.dmRemove] !== true;
+}
 
 function selfRallyIllegal(env: QueryEnv, side: string, unit: PieceId): string | null {
   const p = env.state.pieces[unit];
@@ -238,10 +266,11 @@ export const rallyModule: RuleModule = {
       event: 'turn.phaseEnded',
       handler(ctx, ev) {
         if (ev.payload.phase !== 'RPh') return;
-        // DM removed unless adjacent to a Known Enemy Unit.
+        // DM removed unless adjacent to a Known Enemy Unit, or kept by its owner where he may keep it (SK1 3.1 g).
         for (const p of Object.values(ctx.state.pieces).filter((x) => hasDm(x) && x.loc.kind === 'hex').sort(byId)) {
-          if (!adjacentToKnownEnemy(ctx, p.side, locOf(ctx.state, p)!)) setTags(ctx, p.id, { [T.dm]: null });
+          if (!dmStaysOn(ctx, p.id)) setTags(ctx, p.id, { [T.dm]: null });
         }
+        for (const p of Object.values(ctx.state.pieces).filter((x) => x.tags[T.dmRemove]).sort(byId)) setTags(ctx, p.id, { [T.dmRemove]: null });
         ctx.emit('sk1.rph.state', { state: null });
         for (const p of Object.values(ctx.state.pieces).filter((x) => x.tags[T.rphAction] || x.tags[T.recoveredPhase] || x.tags[T.repairTried]).sort(byId)) {
           setTags(ctx, p.id, { [T.rphAction]: null, [T.recoveredPhase]: null, [T.repairTried]: null });
@@ -253,6 +282,37 @@ export const rallyModule: RuleModule = {
       ctx.popDecision();
       askPhaseOwner(ctx, side, { side });
     };
+
+    // The DM choice (SK1 3.1 g): a unit that may keep its DM keeps it unless its owner has it removed. Only the removal
+    // is listed among the legal actions (so a player and the computer opponent are offered it, but random play never
+    // toggles it back and forth); the undo is validated alike. Neither is the unit's one RPh action.
+    r.action<RallyAction & { type: 'rally.dmRemove' }>({
+      type: 'rally.dmRemove',
+      decisionKinds: [PHASE_DECISION],
+      legal: (env) =>
+        env.state.phase !== 'RPh'
+          ? []
+          : Object.values(env.state.pieces)
+              .filter((p) => p.tags[T.dmRemove] !== true && !dmChoiceIllegal(env, rallySide(env), p.id))
+              .sort(byId)
+              .map((p) => ({ type: 'rally.dmRemove' as const, unit: p.id })),
+      validate: (env, a) =>
+        env.state.phase !== 'RPh' ? 'Not the Rally Phase' : (dmChoiceIllegal(env, rallySide(env), a.unit) ?? (env.state.pieces[a.unit]?.tags[T.dmRemove] ? 'Its DM already comes off' : null)),
+      resolve(ctx, a) {
+        setTags(ctx, a.unit, { [T.dmRemove]: true });
+        reAsk(ctx, a.side);
+      },
+    });
+    r.action<RallyAction & { type: 'rally.dmKeep' }>({
+      type: 'rally.dmKeep',
+      decisionKinds: [PHASE_DECISION],
+      validate: (env, a) =>
+        env.state.phase !== 'RPh' ? 'Not the Rally Phase' : (dmChoiceIllegal(env, rallySide(env), a.unit) ?? (env.state.pieces[a.unit]?.tags[T.dmRemove] ? null : 'It keeps its DM already')),
+      resolve(ctx, a) {
+        setTags(ctx, a.unit, { [T.dmRemove]: null });
+        reAsk(ctx, a.side);
+      },
+    });
 
     r.action<RallyAction & { type: 'rally.selfRally' }>({
       type: 'rally.selfRally',

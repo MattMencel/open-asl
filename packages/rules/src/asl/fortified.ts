@@ -188,6 +188,21 @@ export const aslFortifiedModule: RuleModule = {
       askPhaseOwner(ctx, ctx.state.attacker);
     });
 
+    // A Breach attempt is something a moving stack may still do where it stands (the move.breach check).
+    r.contribute({
+      id: 'asl.fortified.more-to-do',
+      query: 'move.moreToDo',
+      ref: 'ASLRB B23.9221',
+      apply(v, _ctx, env) {
+        if (v) return v;
+        const ms = moveState(env);
+        if (!ms || !ms.hex || ms.bypass || ms.dcPending || !fortifiedState(env)) return false;
+        return ms.units.some((u) =>
+          Object.values(env.state.pieces).some((p) => p.loc.kind === 'held' && p.loc.by === u && sw(env, p)?.type === 'DC' && adjacentLocs(env, moveLoc(ms)!).some((t) => !breachIllegal(env, ms, p.id, t))),
+        );
+      },
+    });
+
     // ---------------------------------------------------------------- B23.9221: a Breach attempt with a DC
     r.action<Action & { type: 'move.breach'; dc: PieceId; target: LocId }>({
       type: 'move.breach',

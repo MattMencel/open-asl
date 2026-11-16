@@ -31,6 +31,7 @@ export const TAG_LIFECYCLE: Record<string, 'playerTurn' | 'lasting'> = {
   relieved: 'lasting',
   rallyTried: 'playerTurn',
   rphAction: 'playerTurn',
+  dmRemove: 'playerTurn',
   repairTried: 'playerTurn',
   recoveredPhase: 'lasting',
   advancedInto: 'playerTurn',
@@ -52,6 +53,7 @@ export const TAG_LIFECYCLE: Record<string, 'playerTurn' | 'lasting'> = {
   ca: 'lasting',
   emplaced: 'lasting',
   hip: 'lasting',
+  hipCrew: 'lasting',
   /** The phase key of a unit's last Panzerfaust check (SK4 4.4.2): compared on use, so it may stay. */
   pfTried: 'lasting',
   acq: 'lasting',

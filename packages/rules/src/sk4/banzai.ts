@@ -518,9 +518,18 @@ function startImpulse(ctx: Ctx) {
   // The DC charge (S71 SSR 2): in the AFV's hex after all Defensive First Fire, unbroken: the CC attack, and the end.
   if (st.vehicle && dcAttack(ctx, st)) return;
   const keep: PieceId[] = [];
+  // A leader wounded on the way has a wounded leader's MF from then on: "A wounded man is reduced to three MF" (ASLRB
+  // A17.2; SK1 3.3), so one who has spent that much is out of the charge. (A17.2 pins one who had spent more; a Banzai
+  // unit is not pinned, SK4 8.1.8, so he is simply out.)
+  const allowance = { ...st.allowance };
   for (const u of st.units) {
     const p = ctx.state.pieces[u];
-    const why = !p || p.loc.kind !== 'hex' ? 'eliminated' : isBroken(p) ? 'broken' : (st.spent[u] ?? 0) >= (st.allowance[u] ?? 0) ? 'out of MF' : enemyAt(ctx, p.loc.hex, st.side).length ? 'in a hex with an enemy unit' : null;
+    if (p && smc(ctx, p) && wounds(p) > 0 && (allowance[u] ?? 0) > BANZAI_MF_WOUNDED_LEADER) allowance[u] = BANZAI_MF_WOUNDED_LEADER;
+  }
+  for (const u of st.units) {
+    const p = ctx.state.pieces[u];
+    const out = (st.spent[u] ?? 0) >= (allowance[u] ?? 0);
+    const why = !p || p.loc.kind !== 'hex' ? 'eliminated' : isBroken(p) ? 'broken' : out ? (smc(ctx, p) && wounds(p) > 0 ? `out of MF (wounded: ${BANZAI_MF_WOUNDED_LEADER} MF)` : 'out of MF') : enemyAt(ctx, p.loc.hex, st.side).length ? 'in a hex with an enemy unit' : null;
     if (why) {
       ctx.emit('sk4.banzai.out', { unit: u, why });
       if (p && p.loc.kind === 'hex') setTags(ctx, u, { [T4.banzai]: 'done', [T.moved]: true });
@@ -528,7 +537,7 @@ function startImpulse(ctx: Ctx) {
     }
     keep.push(u);
   }
-  const next: BanzaiState = { ...st, units: keep, impulse: st.impulse + 1, moved: [], startSpent: Object.fromEntries(keep.map((u) => [u, st.spent[u] ?? 0])), dff: undefined, stepping: false };
+  const next: BanzaiState = { ...st, allowance, units: keep, impulse: st.impulse + 1, moved: [], startSpent: Object.fromEntries(keep.map((u) => [u, st.spent[u] ?? 0])), dff: undefined, stepping: false };
   setState(ctx, next);
   // Units with no legal step are out as well ("can no longer move in a Banzai Charge").
   const stuck = keep.filter((u) => banzaiSteps(ctx, u).length === 0 && endIllegal(ctx, u));

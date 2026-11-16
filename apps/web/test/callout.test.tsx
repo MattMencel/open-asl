@@ -55,4 +55,12 @@ describe('the banner for a Defensive First Fire chance', () => {
     ask(dff, null);
     expect(seen!.callout?.text).toBe('Defensive First Fire · P5');
   });
+
+  it('says a DC placement waits on the fire (SK4 4.3)', () => {
+    const { engine, state } = makeEngine({ pieces: [{ id: 'g1', def: 'ge.467', side: 'ge', hex: 'yP5' }, { id: 'a1', def: 'am.747', side: 'am', hex: 'yO5' }] });
+    const placing = { ...state, ext: { ...state.ext, 'sk1.move': { units: ['a1'], hex: 'yO5', dcPending: { dc: 'dc', placer: 'a1', target: 'yP5' } } } } as GameState;
+    reactAct(() => root!.render(createElement(Screen, { engine, state: placing, decision: undefined, viewer: 'am' })));
+    reactAct(() => root!.render(createElement(Screen, { engine, state: placing, decision: dff, viewer: 'am' })));
+    expect(seen!.callout?.text).toBe('Defensive First Fire · P5 · DC placement into P5');
+  });
 });

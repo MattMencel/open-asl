@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { sk2CoreModules, sk3CoreModules } from '@asl/rules';
-import { RU_VS_GE, makeEngine, type PieceSpec } from '../../../packages/rules/test/fixtures';
+import { GE_VS_BR, RU_VS_GE, makeEngine, type PieceSpec } from '../../../packages/rules/test/fixtures';
 import { shotOptions } from '../src/game/ordnance';
 
 const extra = [...sk2CoreModules, ...sk3CoreModules];
@@ -50,5 +50,43 @@ describe('LATW fire options', () => {
   it('from a building the vehicle shot also chooses +2 To Hit or the Backblast (SK4 4.4.3)', () => {
     const opts = baz([t34()], { yK5: { terrain: 'building-stone', buildingId: 'b1' } }).filter((o) => o.type === 'VTT');
     expect(opts.map((o) => o.backblast)).toEqual([false, true]);
+  });
+
+  it('from a building the shot at Infantry chooses +2 To Hit or the Backblast too; from a PTO hut there is no Backblast (SK4 8.2.1)', () => {
+    expect(baz([], { yK5: { terrain: 'building-stone', buildingId: 'b1' } }).filter((o) => o.type === 'ITT').map((o) => o.backblast)).toEqual([false, true]);
+    const hut = baz([t34()], { yK5: { terrain: 'hut', buildingId: 'h1' } });
+    expect(hut.map((o) => [o.type, o.backblast])).toEqual([['ITT', undefined], ['VTT', undefined]]);
+  });
+
+  it('a PIAT has no Backblast: from a building it simply fires, at Infantry or at a vehicle (SK4 4.4.3)', () => {
+    const { engine, state } = makeEngine({
+      pieces: [{ id: 'u', def: 'br.L80', side: 'br', hex: 'yK5' }, { id: 'p', def: 'br.PIAT', side: 'br', heldBy: 'u' }, { ...t34(), side: 'ge', def: 'ge.pzivf2' }],
+      scenario: { ...GE_VS_BR, firstSide: 'br' },
+      extra,
+      terrain: { yK5: { terrain: 'building-stone', buildingId: 'b1' } },
+      startPhase: 'PFPh',
+    });
+    const opts = shotOptions(engine.env(state), 'p', 'prep');
+    expect(opts.map((o) => [o.type, o.backblast])).toEqual([['ITT', undefined], ['VTT', undefined]]);
+    expect(opts.every((o) => !/Backblast/.test(o.label))).toBe(true);
+  });
+});
+
+describe('Machine Gun fire options vs AFV (SK4 4.1)', () => {
+  const mg = (pieces: PieceSpec[]) => {
+    const { engine, state } = makeEngine({
+      pieces: [{ id: 'u', def: 'ge.467', side: 'ge', hex: 'yK5' }, { id: 'm', def: 'ge.LMG', side: 'ge', heldBy: 'u' }, ...pieces],
+      scenario: { ...RU_VS_GE, firstSide: 'ge' },
+      extra,
+      startPhase: 'PFPh',
+    });
+    return shotOptions(engine.env(state), 'm', 'prep');
+  };
+
+  it('a MG is offered as ordnance only on the Vehicle Target Type, AP, saying its limits', () => {
+    const opts = mg([t34()]);
+    expect(opts.map((o) => [o.type, o.ammo])).toEqual([['VTT', undefined]]);
+    expect(opts[0]).toMatchObject({ available: true, hint: expect.stringMatching(/normal range \(8 hexes\) and without halved FP .*no Critical Hit/) });
+    expect(mg([{ id: 'sq', def: 'ru.458', side: 'ru', hex: 'yM5' }])[0]?.hint).toMatch(/No enemy vehicle/);
   });
 });

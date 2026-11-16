@@ -1,5 +1,5 @@
 import type { Action, Decision, Engine, GameState, HexId, PieceId, SideId } from '@asl/engine';
-import { byId } from '@asl/rules';
+import { byId, sideToward, statics, type FortPlacement } from '@asl/rules';
 
 /*
  * DEV FIXTURES: named positions to start a play test from (development builds only).
@@ -20,6 +20,7 @@ import { byId } from '@asl/rules';
  * - Name units by counter def and number within the side: `f.unit('ru', 'ru.447', 2)` is the side's second
  *   4-4-7 in order of battle order (a SW by its def: `f.sw('ge', 'ge.DC')`).
  * - `f.fortify(['uP2', 'uP2:1'])` answers the `fortified-buildings` designation with Locations (ASLRB B23.911).
+ * - `f.fortPlace(counters)` places a side's fortification counters in its setup decision (the `fortifications` rule).
  * - `f.setup(side, { [unit]: hex }, { [sw]: unit })` places the side's at-start units; units left out take
  *   the engine's default placement. SW go with the unit the scenario gives them to unless reassigned.
  * - `f.until(phase, { turn, attacker })` ends every phase (and declines every Defensive Fire, rout or CC
@@ -117,6 +118,12 @@ export class FixtureBuilder {
     this.act({ type: 'fortify.designate', locations });
   }
 
+  /** Place the fortification counters of the side whose setup decision is pending (ASLRB A12.33, B26–B30; the `fortifications` rule). */
+  fortPlace(counters: FortPlacement[]): void {
+    if (this.decision.kind !== 'setup') throw new Error(`Fixture: expected a setup decision, not ${this.decision.kind}`);
+    this.act({ type: 'fort.place', counters });
+  }
+
   /**
    * Answer `side`'s setup decision: the given units in the given hexes, the rest where the engine's default puts them;
    * `extra` adds to the action (`hidden`: the units set up hidden under a HIP special rule).
@@ -178,6 +185,64 @@ function testbedSetupWith(f: FixtureBuilder, fortified: string[], moved: Record<
     [ru('ru.L70')]: at('ru.L70', 1, 'uH5'),
     [ru('ru.426', 2)]: at('ru.426', 2, 'uH5'),
   }, {}, hidden.length ? { hidden: hidden.map((d) => ru(d)) } : {});
+  f.setup('ge', {
+    [ge('ge.L92')]: 'uT3',
+    [ge('ge.838')]: 'uT3',
+    [ge('ge.548')]: 'uT3',
+    [ge('ge.467', 1)]: 'uU4',
+    [ge('ge.467', 2)]: 'uT4',
+    [ge('ge.467', 3)]: 'uS5',
+    [ge('ge.L80')]: 'uS5',
+    [ge('ge.447', 1)]: 'uS5',
+    [ge('ge.447', 2)]: 'uV4',
+  });
+}
+
+/**
+ * The test bed's fortification counters (SSR 3), one of every kind, open and hidden, on the village's eastern edge:
+ * a hidden 2S foxhole in O6 and an open 1S one in O7, the trench in P6, Wire hidden in O4 and open in P9, 8 A-P
+ * factors with one A-T factor recorded in P10, a Known 6 in N9 and the Dummy in O10, the roadblock on the O9–P8 road
+ * hexside (hidden) and the 1+3+5 pillbox in O3 facing east (hidden).
+ */
+export function testbedForts(f: FixtureBuilder): FortPlacement[] {
+  const map = statics(f.engine.env(f.state)).map;
+  return [
+    { kind: 'foxhole', hex: 'uO6', hidden: true, capacity: 2 },
+    { kind: 'foxhole', hex: 'uO7', hidden: false, capacity: 1 },
+    { kind: 'trench', hex: 'uP6', hidden: false },
+    { kind: 'wire', hex: 'uO4', hidden: true },
+    { kind: 'wire', hex: 'uP9', hidden: false },
+    { kind: 'mines', hex: 'uP10', hidden: true, mines: { ap: 8, at: 1 } },
+    { kind: 'mines', hex: 'uN9', hidden: false, mines: { ap: 6, known: true } },
+    { kind: 'mines', hex: 'uO10', hidden: false, mines: { known: true, dummy: true } },
+    { kind: 'roadblock', hex: 'uO9', hidden: true, hexside: sideToward(map, 'uO9', 'uP8')! },
+    { kind: 'pillbox', hex: 'uO3', hidden: true, ca: 0, pillbox: { capacity: 1, ca: 3, nca: 5 } },
+  ];
+}
+
+/**
+ * The test bed setup with the counters of `testbedForts` down and the Russians in them: a 4-5-8 inside the pillbox,
+ * a 4-4-7 beneath the O6 foxhole, the Conscripts beneath the O7 foxhole, the other 4-5-8 beneath the trench, the
+ * 5-2-7 on top of the Wire in P9; the Germans as usual.
+ */
+function fortsSetup(f: FixtureBuilder, opts: { germans?: boolean } = {}) {
+  const ru = (def: string, n = 1) => f.unit('ru', def, n);
+  f.fortify(TESTBED_FORTIFIED);
+  f.fortPlace(testbedForts(f));
+  f.setup('ru', {
+    [ru('ru.L91')]: 'uK4',
+    [ru('ru.458', 1)]: 'uO3:pb',
+    [ru('ru.447', 1)]: 'uO6',
+    [ru('ru.458', 2)]: 'uP6',
+    [ru('ru.447', 2)]: 'uM5',
+    [ru('ru.447', 3)]: 'uN7',
+    [ru('ru.527')]: 'uP9',
+    [ru('ru.426', 1)]: 'uO7',
+    [ru('ru.L70')]: 'uH5',
+    [ru('ru.426', 2)]: 'uH5',
+  }, {}, { beneath: [ru('ru.447', 1), ru('ru.458', 2), ru('ru.426', 1)] });
+  if (opts.germans === false) return;
+  const ge = (def: string, n = 1) => f.unit('ge', def, n);
   f.setup('ge', {
     [ge('ge.L92')]: 'uT3',
     [ge('ge.838')]: 'uT3',
@@ -526,6 +591,37 @@ export const DEV_FIXTURES: DevFixture[] = [
     },
   },
   {
+    id: 'fort-setup',
+    scenarioId: 'asl-testbed',
+    title: 'Fortifications: the setup tray',
+    description:
+      'Russian setup, nothing placed yet. The tray holds the units and, under them, the fortification counters SSR 3 gives: 3 squads of foxholes, a trench, two Wire, 12 recorded A-P factors (A-T by exchange), a Known 6 with a Dummy, a roadblock and a 1+3+5 pillbox. Place them openly or hidden (the hex wheel), a roadblock by its road hexside and the pillbox by its Covered Arc; put units beneath or inside them from the wheel.',
+    build(f) {
+      f.fortify(TESTBED_FORTIFIED);
+    },
+  },
+  {
+    id: 'fort-owner',
+    scenarioId: 'asl-testbed',
+    title: 'Fortifications: the counters down, the units to place',
+    description:
+      "Russian setup with every counter placed (one of each kind, open and hidden: a hidden 2S foxhole in O6, an open 1S in O7, the trench in P6, Wire hidden in O4 and open in P9, recorded mines in P10, a Known 6 in N9 and the Dummy in O10, the roadblock on O9–P8, the pillbox in O3 facing east). The units are still in the tray: drop a squad on O6, O7, P6, P9 or O3 and the wheel offers the foxhole, trench, Wire and pillbox.",
+    build(f) {
+      f.fortify(TESTBED_FORTIFIED);
+      f.fortPlace(testbedForts(f));
+    },
+  },
+  {
+    id: 'fort-placed',
+    scenarioId: 'asl-testbed',
+    title: "Fortifications: the German's view",
+    description:
+      'German setup. The Russians have set up with their counters (fort-owner) and their units in them: a 4-5-8 in the pillbox, a 4-4-7 beneath the O6 foxhole, the Conscripts beneath the O7 foxhole, a 4-5-8 beneath the trench, the 5-2-7 on the Wire in P9. The German sees the open counters (O7, P6, P9), two blank Known Minefield counters (N9, O10) and nothing of the hidden ones until a Good Order German has a LOS to them (A12.33) when the first Player Turn begins.',
+    build(f) {
+      fortsSetup(f, { germans: false });
+    },
+  },
+  {
     id: 'snap-shot',
     scenarioId: 'asl-testbed',
     title: 'Snap Shot',
@@ -536,6 +632,35 @@ export const DEV_FIXTURES: DevFixture[] = [
       f.until('MPh', { turn: 1, attacker: 'ge' });
       f.move([f.unit('ge', 'ge.L80'), f.unit('ge', 'ge.467', 3), f.unit('ge', 'ge.447', 1)], ['uR4']);
       f.until('MPh', { turn: 2, attacker: 'ge' });
+    },
+  },
+  {
+    id: 'mg-vs-afv',
+    scenarioId: 'sk-s30',
+    title: 'Machine guns at a tank',
+    description:
+      'German Turn 1 Prep Fire Phase. The 4-6-7 with the MMG stands in E4, the 4-4-7 with the LMG in D4; an M4A3 Sherman entered at E6 and stopped there. Right-click E4: "Fire MMG at a vehicle" aims the MMG at the Sherman as ordnance (SK4 4.1): the All MG To Hit row, then the AP To Kill Table, within its normal range and never with halved FP.',
+    build(f) {
+      f.setup('ge', { [f.unit('ge', 'ge.467')]: 'vE4', [f.unit('ge', 'ge.447')]: 'vD4' });
+      for (let guard = 0; guard < 200 && !(f.state.phase === 'MPh' && f.state.attacker === 'am'); guard++) {
+        const entry = f.decision.kind === 'offboardSetup' ? f.engine.legalActions(f.state, f.decision.owner).find((x) => x.type === 'setup.offboard') : undefined;
+        if (!entry) {
+          f.pass();
+          continue;
+        }
+        const { side: _s, decisionId: _d, ...placed } = entry;
+        f.act(placed as Omit<Action, 'side' | 'decisionId'>);
+      }
+      f.act({ type: 'vmove.start', vehicle: f.unit('am', 'am.M4A3') });
+      f.settle('am');
+      // The default offboard setup waits below E6.
+      f.act({ type: 'move.step', to: 'vE6' });
+      f.settle('am');
+      f.act({ type: 'vmove.stop' });
+      f.settle('am');
+      if (f.engine.legalActions(f.state, 'am').some((a) => a.type === 'vmove.end')) f.act({ type: 'vmove.end' });
+      f.settle('am');
+      f.until('PFPh', { turn: 1, attacker: 'ge' });
     },
   },
 ];

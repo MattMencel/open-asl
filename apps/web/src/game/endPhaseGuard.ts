@@ -32,14 +32,23 @@ export function endPhaseWarning(env: QueryEnv, legal: Omit<Action, 'side' | 'dec
     for (const a of legal) {
       if (a.type === 'rally.selfRally' || a.type === 'rally.rally') units.add(a['unit'] as PieceId);
     }
-    if (units.size === 0) return null;
-    return {
-      title: 'Broken units could still rally',
-      lines: [
+    // Units keeping their DM, which their owner could still have removed (SK1 3.1 g).
+    const dm = new Set(legal.filter((a) => a.type === 'rally.dmRemove').map((a) => a['unit'] as PieceId));
+    if (units.size === 0 && dm.size === 0) return null;
+    const lines: string[] = [];
+    if (units.size)
+      lines.push(
         `${n(units.size, 'broken unit')} ${units.size === 1 ? 'has' : 'have'} not attempted to rally this turn. A rally attempt is optional (SK1 3.1), but a unit that stays broken cannot fire, move or advance and must rout away from the enemy.`,
-        'End the Rally Phase anyway?',
-      ],
-      units: [...units],
+      );
+    if (dm.size)
+      lines.push(
+        `${n(dm.size, 'broken unit')} ${dm.size === 1 ? 'keeps its' : 'keep their'} DM counter. Out of woods and buildings a broken unit may keep DM (SK1 3.1 g), so it may still rout in this turn's Rout Phase, but its next rally attempt is at +4. Choose "Remove DM" on ${dm.size === 1 ? 'it' : 'any of them'} to take it off.`,
+      );
+    lines.push('End the Rally Phase anyway?');
+    return {
+      title: units.size && dm.size ? 'Broken units could still rally, and some keep DM' : units.size ? 'Broken units could still rally' : `Broken ${dm.size === 1 ? 'unit keeps its' : 'units keep their'} DM`,
+      lines,
+      units: [...new Set([...units, ...dm])],
     };
   }
 

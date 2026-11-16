@@ -42,6 +42,30 @@ describe('end-of-phase confirmation', () => {
     expect(warn(engine, t.state)).toBeNull();
   });
 
+  it('Rally Phase: lists the broken units keeping a DM they could have removed (SK1 3.1 g), then not once it is removed', () => {
+    const { engine, state } = makeEngine({
+      startPhase: 'RPh',
+      terrain: { yM2: { terrain: 'woods' } },
+      pieces: [
+        { id: 'aL', def: 'am.L91', side: 'am', hex: 'yC5' },
+        { id: 'a1', def: 'am.747', side: 'am', hex: 'yC5', tags: { broken: true, dm: true } },
+        // In woods its DM comes off anyway: not listed.
+        { id: 'a2', def: 'am.747', side: 'am', hex: 'yM2', tags: { broken: true, dm: true, rallyTried: true } },
+        { id: 'g1', def: 'ge.467', side: 'ge', hex: 'yP9' },
+      ],
+      dice: [6, 6],
+    });
+    // The leader's rally failed: a1 keeps its DM, and the warning says so.
+    let s = act(engine, state, { type: 'rally.rally', leader: 'aL', unit: 'a1' }).state;
+    let w = warn(engine, s);
+    expect(w?.title).toMatch(/DM/);
+    expect(w?.units).toEqual(['a1']);
+    expect(w?.lines.join(' ')).toMatch(/\+4/);
+    s = act(engine, s, { type: 'rally.dmRemove', unit: 'a1' }).state;
+    w = warn(engine, s);
+    expect(w).toBeNull();
+  });
+
   it('Rally Phase: a Good Order force raises no warning', () => {
     const { engine, state } = makeEngine({
       startPhase: 'RPh',

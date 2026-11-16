@@ -187,8 +187,11 @@ export const SK_S8: ScenarioDef = {
 /** Board y hexes of the woods mass around CC6, which the card plays as Open Ground. */
 const CC6_WOODS = ['yCC6', 'yCC5', 'yDD6', 'yEE7', 'yFF7', 'yEE8', 'yFF8', 'yGG7', 'yCC4', 'yCC3', 'yCC2', 'yBB2', 'yBB1', 'yCC1'];
 
-/** Hexrow L and the ends of hexrows M-Q: the south, east and west board edges from Q10 to Q1. */
-const S19_SOUTH_EXITS = [...hexesWhere('y', { rows: ['L', 'L'] }), ...hexesWhere('y', { rows: ['M', 'Q'], numbered: [1, 1] }), ...hexesWhere('y', { rows: ['M', 'Q'], numbered: [10, 10] })];
+/**
+ * Hexrow L and the edge hexes of hexrows M-Q: the south, east and west board edges from Q10 to Q1. On the west edge
+ * hexrows N and P end in their half hexes N0 and P0 (N1 and P1 are a hex in from the edge).
+ */
+const S19_SOUTH_EXITS = [...hexesWhere('y', { rows: ['L', 'L'] }), ...edgeHexesWhere('y', 'N', ['M', 'Q']), ...edgeHexesWhere('y', 'S', ['M', 'Q'])];
 
 /** S19 Purple Heart Lane (Carentan, France, 12 June 1944). */
 export const SK_S19: ScenarioDef = {
@@ -208,7 +211,6 @@ export const SK_S19: ScenarioDef = {
   photo: { src: 'scenarios/sk-s19.jpg' },
   notes: [
     '(Only hexrows L-CC are playable)',
-    'Engine note: German reinforcements enter along the south edge; the east and west board edges from Q10 to Q1 are not yet offered for entry.',
   ],
   boards: [{ board: 'y', position: '0,0', columns: ['L', 'CC'] }],
   compass: Y_PORTRAIT,
@@ -248,7 +250,7 @@ export const SK_S19: ScenarioDef = {
         { def: 'ge.L91', count: 1 },
         { def: 'ge.L80', count: 1 },
       ],
-      setup: { kind: 'enter', turn: 1, edge: 'S', hexes: S19_SOUTH_EXITS, description: 'Enter on/after Turn 1 along the south/east/west board edges from Q10-Q1' },
+      setup: { kind: 'enter', turn: 1, edge: 'S,E,W', hexes: S19_SOUTH_EXITS, description: 'Enter on/after Turn 1 along the south/east/west board edges from Q10-Q1' },
     },
     {
       id: 'am-z7',

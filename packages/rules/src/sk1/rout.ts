@@ -272,7 +272,7 @@ function stepIllegal(env: QueryEnv, side: SideId, from: HexId, toLoc: LocId, see
   const here = personnelAt(env, toLoc, side).filter((p) => p.id !== unit);
   const all = [...here, pieceOf(env, unit)];
   const limit = stackLimit(env, special(env, toLoc) ? toLoc : to, side);
-  if (squadEquivalents(env, all) > limit.se) return `Stacking limit: ${limit.se} squad-equivalents`;
+  if (squadEquivalents(env, all) > limit.se) return `Stacking limit: ${limit.se} squad-equivalents${limit.note ? ` (${limit.note})` : ''}`;
   if (all.filter((p) => smc(env, p)).length > 4) return 'Stacking limit: 4 SMC';
   for (const eh of enemyHexes(env, side)) {
     const watching = seen.has(eh) || hasLos(env, from, eh);
@@ -706,8 +706,9 @@ export const routModule: RuleModule = {
         // Each legality search can traverse the rout graph. Compute it once and
         // preserve any earlier restriction when no rout blocks the phase.
         if (activeRoutBlocks(env)) return `${routState(env)!.active!.unit} has not finished routing`;
-        const n = blockingRouts(env).length;
-        return n ? `${n} unit${n === 1 ? '' : 's'} must rout first` : value;
+        // Named (the interface turns ids into "unit in hex"), so a player sees which units hold the phase up.
+        const units = blockingRouts(env);
+        return units.length ? `${units.length} unit${units.length === 1 ? '' : 's'} must rout first: ${units.join(', ')}` : value;
       },
     });
 

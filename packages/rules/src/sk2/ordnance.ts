@@ -54,7 +54,7 @@ import { isWoodsRoad, smoke58Counters, smoke58Markers, terrainOf } from '../sk1/
 import { AMMO_NAME, AMMO_OUT, ammoColumn, ammoKinds, ammoOut, ammoStatus, defaultAmmo, isSmokeAmmo, leavesResidual, specialAmmoOf } from './ammo';
 import { caChangeDrm, inCoveredArc, mountLabel, nearestSpine, spineChange } from './arc';
 import { emplacementThDrm, revealGun } from './guns';
-import { T2, caTurnedIllegal, coveredArc, isHidden, ACQ_CLEAR, acquisitionOf, ordnanceHeldBy, ordnanceOf } from './status';
+import { T2, caTurnedIllegal, coveredArc, isHidden, isMgOrdnance, ACQ_CLEAR, acquisitionOf, ordnanceHeldBy, ordnanceOf, shotWeaponOf } from './status';
 
 /*
  * Ordnance (SK4 3.2.4, 6.0–6.12): a Gun must secure a hit on the To Hit Chart before its effect
@@ -201,7 +201,7 @@ const scenarioYear = (env: QueryEnv): number | undefined => {
 /** Build the shot context (no legality checks). */
 export function shotContext(env: QueryEnv, shot: OrdnanceShot, mode: FireMode, side: SideId, opts: { moving?: PieceId[]; movingInfo?: FireAttackCtx['moving'] } = {}): ShotCtx {
   const g = pieceOf(env, shot.weapon);
-  const def = ordnanceOf(env, g)!;
+  const def = shotWeaponOf(env, g)!;
   const firer = g.loc.kind === 'held' ? g.loc.by : g.id;
   const hex = hexOf(env.state, g)!;
   const loc = locOf(env.state, g)!;
@@ -290,6 +290,15 @@ const directorDrm = (env: QueryEnv, leader: PieceId, firer: PieceId) => env.quer
 const hasBackblast = (def: GunDef) => !!def.latw && def.type !== 'PIAT';
 /** A building a BAZ/PSK fired from has Backblast (SK4 4.4.3), except a PTO hut (SK4 8.2.1: "no Backblast penalty for firing from a hut"). */
 const backblastHex = (env: QueryEnv, hex: HexId) => isBuildingHex(env, hex) && !terrainOf(env, hex).building;
+/** Whether a BAZ/PSK/PF fired from `hex` chooses between Backblast and the +2 To Hit DRM (SK4 4.4.3, 8.2.1). */
+export const backblastFrom = backblastHex;
+/** Whether firing this weapon where it is now brings the Backblast choice: a BAZ or PSK in a building (not a PIAT, not a hut). */
+export function latwBackblast(env: QueryEnv, weapon: PieceId): boolean {
+  const w = env.state.pieces[weapon];
+  const d = w ? ordnanceOf(env, w) : null;
+  const at = w ? hexOf(env.state, w) : undefined;
+  return !!d && !!at && hasBackblast(d) && backblastHex(env, at);
+}
 /** A Light Anti-Tank Weapon (SK4 4.4): a BAZ/PSK/PIAT on its own To Hit Table, or an ATR (4.4.4) on the chart's ATR row. */
 const isLatw = (def: GunDef) => !!def.latw || def.type === 'ATR';
 
@@ -301,7 +310,7 @@ const isLatw = (def: GunDef) => !!def.latw || def.type === 'ATR';
  */
 export function ordnanceDirectorIllegal(env: QueryEnv, weapon: PieceId, leader: PieceId, side: SideId, targetType: TargetType): string | null {
   const g = env.state.pieces[weapon];
-  const def = g ? ordnanceOf(env, g) : null;
+  const def = g ? shotWeaponOf(env, g) : null;
   const l = env.state.pieces[leader];
   if (!g || !def) return 'Not a Gun';
   if (!l || !smc(env, l) || l.side !== side) return 'Director must be a friendly leader';
@@ -344,9 +353,9 @@ function ownFpSpent(env: QueryEnv, manner: Piece, what: string): string | null {
 
 export function ordnanceWeaponIllegal(env: QueryEnv, weapon: PieceId, mode: FireMode, side: SideId): string | null {
   const g = env.state.pieces[weapon];
-  const def = g ? ordnanceOf(env, g) : null;
+  const def = g ? shotWeaponOf(env, g) : null;
   if (!g || !def || def.vehicle) return null;
-  const what = def.latw ? def.type : def.light ? 'Mortar' : 'Gun';
+  const what = weaponName(def);
   if (g.side !== side) return `Not your ${what}`;
   if (g.loc.kind !== 'held') return def.light ? `Nobody possesses the ${what}` : 'The Gun is not manned';
   const manner = pieceOf(env, g.loc.by);
@@ -355,6 +364,8 @@ export function ordnanceWeaponIllegal(env: QueryEnv, weapon: PieceId, mode: Fire
   const spent = ownFpSpent(env, manner, what);
   if (spent) return spent;
   if (isMalf(g)) return `The ${what} is malfunctioned`;
+  const halved = isMgOrdnance(def) ? mgHalvedFp(env, manner, mode, side) : null;
+  if (halved) return halved;
   const turned = caTurnedIllegal(env, g) ?? caTurnedIllegal(env, manner);
   if (turned) return turned;
   if (mode === 'advancing' && !isLatw(def) && (g.tags[T.moved] || manner.tags[T.moved])) return `A ${def.light ? 'Mortar' : 'Gun'} that moved cannot fire in the AFPh`;
@@ -362,11 +373,30 @@ export function ordnanceWeaponIllegal(env: QueryEnv, weapon: PieceId, mode: Fire
   return null;
 }
 
+/** What the messages call a weapon: a Gun, a Light Mortar, or a SW by its type (BAZ, ATR, MG ...). */
+const weaponName = (def: GunDef) => (def.latw || def.type === 'ATR' || isMgOrdnance(def) ? def.type : def.light ? 'Mortar' : 'Gun');
+
+/**
+ * Why an Infantry MG may not fire as ordnance now: the attack must be made "without any form of halved FP penalty"
+ * (SK4 4.1; ASLRB A9.61), so not in the AFPh (SK1 3.5), not by a pinned unit (3.2.1), not by a lone SMC (4.1),
+ * and not as Subsequent First Fire or FPF (3.3.1). A MG marked First Fire fires no more in the DFPh at full FP
+ * either; the fire marker check below covers that.
+ */
+function mgHalvedFp(env: QueryEnv, manner: Piece, mode: FireMode, side: SideId): string | null {
+  const why = 'A MG fires as ordnance only without halved FP (SK4 4.1)';
+  if (mode === 'advancing') return `${why}: all fire is halved in the AFPh`;
+  if (mode === 'subsequentFirst' || mode === 'fpf') return `${why}: Subsequent First Fire and FPF are halved`;
+  if (isPinned(manner)) return `${why}: a pinned unit fires at half FP`;
+  const hex = locOf(env.state, manner);
+  if (smc(env, manner) && hex && !personnelAt(env, hex, side).some((p) => p.id !== manner.id && smc(env, p) && isGoodOrder(env, p))) return `${why}: a lone SMC fires a MG at half FP`;
+  return null;
+}
+
 function ordnanceIllegal(env: QueryEnv, shot: OrdnanceShot, mode: FireMode, side: SideId, moving?: PieceId[]): string | null {
   const g = env.state.pieces[shot.weapon];
-  const def = g ? ordnanceOf(env, g) : null;
+  const def = g ? shotWeaponOf(env, g) : null;
   if (!g || !def) return 'Not a Gun';
-  const what = def.vehicle ? 'Main Armament' : def.latw ? def.type : def.light ? 'Mortar' : 'Gun';
+  const what = def.vehicle ? 'Main Armament' : weaponName(def);
   if (g.side !== side) return `Not your ${what}`;
   let manner: Piece;
   if (def.vehicle) {
@@ -402,10 +432,14 @@ function ordnanceIllegal(env: QueryEnv, shot: OrdnanceShot, mode: FireMode, side
     if (tv.tags['wreck']) return 'That vehicle is a wreck';
     if (!env.query('piece.visibleTo', { piece: tv.id, viewer: side }, true)) return 'No target there';
     if (def.type === 'MTR') return 'A Mortar cannot use the Vehicle Target Type';
+  } else if (isMgOrdnance(def)) return 'A MG fires as ordnance only at an AFV (SK4 4.1); at anything else it fires on the IFT';
+  if (isMgOrdnance(def)) {
+    const halved = mgHalvedFp(env, manner, mode, side);
+    if (halved) return halved;
   }
   if (def.light) {
     // A SW has no Covered Arc (SK4 4.5).
-    if (shot.ca !== undefined) return `A ${def.latw ? def.type : 'Light Mortar'} has no Covered Arc`;
+    if (shot.ca !== undefined) return `A ${def.type === 'MTR' ? 'Light Mortar' : def.type} has no Covered Arc`;
   } else if (shot.ca !== undefined) {
     if (!Number.isInteger(shot.ca) || shot.ca < 0 || shot.ca > 5) return 'Covered Arc is a hexspine 0-5';
     if (isPinned(manner)) return 'A pinned Gun cannot change its Covered Arc';
@@ -414,7 +448,7 @@ function ordnanceIllegal(env: QueryEnv, shot: OrdnanceShot, mode: FireMode, side
     return 'The target is outside the Covered Arc (turn the Gun first)';
   }
   if (sc.def.minRange !== undefined && sc.range < sc.def.minRange) return 'Inside the minimum range';
-  if (sc.def.maxRange !== undefined && sc.range > sc.def.maxRange) return 'Beyond the maximum range';
+  if (sc.def.maxRange !== undefined && sc.range > sc.def.maxRange) return isMgOrdnance(sc.def) ? `A MG fires as ordnance only within its normal range (${sc.def.maxRange} hexes, SK4 4.1)` : 'Beyond the maximum range';
   // A LATW may Advancing Fire after moving (+2, chart case 12); a Gun or Mortar that moved may not.
   if (mode === 'advancing' && !isLatw(def) && !def.vehicle && (g.tags[T.moved] || manner.tags[T.moved])) return `A ${def.light ? 'Mortar' : 'Gun'} that moved cannot fire in the AFPh`;
   if (mode === 'advancing' && (g.tags[T2.manhandled] || manner.tags[T2.manhandled])) return 'A manhandled Gun cannot fire in the AFPh';
@@ -736,7 +770,7 @@ function fireOrdnance(ctx: Ctx, shot: OrdnanceShot, mode: FireMode, opts: { movi
   }
 
   // Smoke and WP use an acquisition but never gain one, and lose what there was (SK4 6.10, 6.11).
-  // A LATW never gains Acquisition (SK4 4.5 grants it to Light Mortars alone among SW).
+  // A LATW or an Infantry MG never gains Acquisition (SK4 4.5 grants it to Light Mortars alone among SW).
   // The ½" counter sits on the units it acquired, so a shot that eliminates every one of them leaves
   // no counter behind (the hex keeps one only when its target leaves the LOS).
   // Only Known units are acquired (SK4 8.3.2: a concealed target is acquired by the Area Target Type, or once the shot made it drop its "?").
@@ -745,7 +779,7 @@ function fireOrdnance(ctx: Ctx, shot: OrdnanceShot, mode: FireMode, opts: { movi
   // A blocked shot acquires nothing; it keeps an acquisition of that same target and loses any other (6.10).
   if (blind) {
     if (g.tags[T2.acqHex] !== shot.target) setTags(ctx, g.id, ACQ_CLEAR);
-  } else if (acquires && !malfunctioned && !removed && !isSmokeAmmo(ammo) && !isLatw(sc.def) && (shot.targetType === 'ATT' || survivors.length > 0)) {
+  } else if (acquires && !malfunctioned && !removed && !isSmokeAmmo(ammo) && !isLatw(sc.def) && !isMgOrdnance(sc.def) && (shot.targetType === 'ATT' || survivors.length > 0)) {
     // A Vehicle Target Type acquisition is the ½" counter on the vehicle, like the Infantry Target Type's.
     const type = shot.targetType === 'ATT' ? 'ATT' : 'ITT';
     const units = type === 'ATT' ? [] : survivors;
@@ -1017,6 +1051,8 @@ export const ordnanceModule: RuleModule = {
       apply(_v, sc, env) {
         if (sc.shot.targetType === 'ATT') return true;
         if (sc.captured || sc.nonQualified) return true;
+        // Nationality picks red only for a MA or Gun; an Infantry MG uses the black numbers (SK4 3.2.4; ASLRB A9.61).
+        if (isMgOrdnance(sc.def)) return false;
         const nat = sc.def.nationality;
         if (['ru', 'it', 'al', 'ax'].includes(nat)) return true;
         const year = scenarioYear(env);

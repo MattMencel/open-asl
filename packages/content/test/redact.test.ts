@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { deepEqual, type GameState, type LoggedEvent } from '@asl/engine';
-import { fortifiedState, hiddenFrom, redactState, scatterState, type FortifiedState, type ScatterState } from '@asl/rules';
+import { fortCounters, fortifiedState, hiddenFrom, redactState, scatterState, shownCounter, type FortRecord, type FortifiedState, type ScatterState } from '@asl/rules';
 import { PLAYABLE_SCENARIOS, mulberry, newSk1Game } from '../src';
 
 /** Strings the viewer must never receive: ids of pieces hidden from them, and the other side's unrevealed secrets. */
@@ -58,6 +58,23 @@ describe('redacted views on random play', () => {
             expect(fort.buildings.every((b) => realFort.revealed.includes(b)), `${viewer} sees unrevealed fortified buildings`).toBe(true);
             for (const e of stream) if (e.type === 'sk1.fortified') expect((e.payload as { state: FortifiedState }).state.buildings.every((b) => realFort.revealed.includes(b))).toBe(true);
             if (realFort.buildings.some((b) => !realFort.revealed.includes(b))) secretsSeen++;
+          }
+          // Fortification counters (full ASL A12.33, B28.1): a viewer sees exactly what `shownCounter` allows, nothing of a hidden one's hex, factors or arc.
+          const forts = (snapshot.ext['asl.fortifications'] as { counters: FortRecord[] } | undefined)?.counters;
+          const realForts = fortCounters(engine.env(t.state));
+          if (forts && realForts.length) {
+            const allowed = realForts.map((c) => shownCounter(c, viewer)).filter((c): c is FortRecord => !!c);
+            expect(forts, `${viewer} sees other fortification counters than allowed`).toEqual(allowed);
+            for (const e of stream) if (e.type === 'asl.fort.placed') expect((e.payload as { counters: FortRecord[] }).counters.every((c) => allowed.some((a) => a.id === c.id))).toBe(true);
+            if (realForts.some((c) => c.side !== viewer)) {
+              // A Known and a Dummy minefield are alike to the enemy, with no strength; the Dummy Secret dr is its owner's.
+              const theirs = JSON.stringify([forts, stream.filter((e) => e.type.startsWith('asl.fort'))]);
+              expect(theirs, `${viewer} sees a Dummy flag`).not.toContain('"dummy"');
+              for (const c of forts.filter((c) => c.kind === 'mines' && !c.mines?.strengthRevealed)) expect(c.mines, `${viewer} sees a minefield's strength`).not.toHaveProperty('ap');
+              expect(stream.some((e) => e.type === 'asl.fort.dummies'), `${viewer} sees the Dummy Secret dr`).toBe(false);
+              secretsSeen++;
+            }
+            if (realForts.length > allowed.length) secretsSeen++;
           }
           // Scatter setup: the units are on the table for all to see; the plan (groups, rendezvous) is the secret.
           const plan = snapshot.ext['ssr.scatter'] as ScatterState | undefined;

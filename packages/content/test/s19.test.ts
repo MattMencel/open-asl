@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Action } from '@asl/engine';
-import { piecesToPlace, placementHexes } from '@asl/rules';
+import { entryHexesOf, piecesToPlace, placementHexes } from '@asl/rules';
 import { newSk1Game } from '../src';
 import { SK_S19 } from '../src/scenarios/skFree';
 
@@ -39,4 +39,17 @@ describe('S19 Purple Heart Lane', () => {
     const shots = engine.legalActions(state, 'ge').filter((x) => x.type === 'fire' || x.type === 'defFire');
     expect(shots.length).toBeGreaterThan(0);
   });
+
+  it('brings the German reinforcements on along the south, east and west edges from Q10 to Q1 (the card)', () => {
+    const { engine, state } = newSk1Game(SK_S19, 's19');
+    const env = engine.env(state);
+    const squad = Object.values(state.pieces).find((p) => p.side === 'ge' && p.defId === 'ge.548' && p.loc.kind === 'offboard')!;
+    const entry = entryHexesOf(env, squad);
+    // The south edge (hexrow L), the west edge's M1 to Q1 (N and P end in their half hexes N0 and P0), the east's M10 to Q10.
+    for (const h of ['yL0', 'yL5', 'yL10', 'yM1', 'yN0', 'yO1', 'yP0', 'yQ1', 'yM10', 'yN10', 'yQ10']) expect(entry).toContain(h);
+    expect(entry).toHaveLength(21);
+    // Not past Q, and not a hex in from the edge.
+    for (const h of ['yR1', 'yR10', 'yN1', 'yM2']) expect(entry).not.toContain(h);
+  });
 });
+

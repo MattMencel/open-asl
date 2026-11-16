@@ -96,6 +96,11 @@ export const ASL_TESTBED_SCENARIO: ScenarioDef = {
       params: { side: 'ru', quota: 1, notOpenGround: true, rule: 'SSR 2' },
       text: 'One Russian squad (or its equivalent) may set up using HIP (A12.3) in a hex that is not Open Ground.',
     },
+    {
+      module: 'fortifications',
+      params: { side: 'ru', foxholes: 3, trenches: 1, wire: 2, roadblocks: 1, pillboxes: [{ capacity: 1, ca: 3, nca: 5 }], mines: { factors: 12, known: 6, dummies: 1, at: true }, within: 'setup', rule: 'SSR 3' },
+      text: 'The Russians receive 3 squads of foxhole capacity, one trench, two Wire counters, 12 A-P minefield factors (which may be exchanged for A-T mines, B28.5), 6 Known minefield factors with one Dummy Minefield counter, one roadblock and one 1+3+5 pillbox. They are set up in the Russian setup area with the Russian units, hidden or open per A12.33; minefields are recorded (B28.1).',
+    },
   ],
 };
 

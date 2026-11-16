@@ -24,6 +24,12 @@ declare module '@asl/engine' {
      * direction, no Infantry Target Type). Default: visibility.
      */
     'piece.knownTo': { ctx: { piece: PieceId; viewer: SideId | null }; value: boolean };
+    /**
+     * A visible piece as `viewer` may see it: a module whose secret the piece's own record would give away (a unit
+     * beneath a hidden foxhole, one inside a hidden pillbox: full ASL A12.33) returns it with that part of its
+     * Location left out. Default: the piece as it is.
+     */
+    'piece.redact': { ctx: { piece: Piece; viewer: SideId | null }; value: Piece };
   }
 }
 
@@ -150,7 +156,7 @@ export function redactState(engine: Engine, state: GameState, viewer: SideId | n
   const hidden = hiddenFrom(env, state, viewer);
   const pieces: Record<string, Piece> = {};
   for (const p of Object.values(state.pieces)) {
-    if (!hidden.has(p.id)) pieces[p.id] = p;
+    if (!hidden.has(p.id)) pieces[p.id] = env.query('piece.redact', { piece: p, viewer }, p);
     else {
       const standIn = env.query('piece.standIn', { piece: p.id, viewer }, null);
       if (standIn) pieces[standIn.id] = standIn;

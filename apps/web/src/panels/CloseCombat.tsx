@@ -695,6 +695,11 @@ function Odds({ pv, ready, plain }: { pv: CcAttackPreview | null; ready: boolean
           {notes ? ` (${notes})` : ''}
         </div>
       )}
+      {pv.fpNotes.map((n) => (
+        <div key={n.unit} className="cc-math">
+          {plain(n.unit)} {n.note}
+        </div>
+      ))}
       {pv.illegal && <div className="cc-illegal">{plain(pv.illegal)}</div>}
     </div>
   );

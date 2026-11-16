@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Action, Ctx, Engine, GameState, RuleModule } from '@asl/engine';
-import { FP, inCoveredArc, isVisibleTo, sk2CoreModules, statics, type FireDeclaration, type FireMode, type ResolveFireFn } from '../src';
+import { FP, inCoveredArc, isVisibleTo, redactState, sk2CoreModules, statics, type FireDeclaration, type FireMode, type ResolveFireFn } from '../src';
 import { GE_VS_BR, act, makeEngine } from './fixtures';
 
 const testFire: RuleModule = {
@@ -29,6 +29,67 @@ const hidden = (gunHex = 'yM5', extraTags: Record<string, unknown> = {}) => [
 ];
 
 describe('Hidden Initial Placement (SK4 6.4)', () => {
+  it('reveals a departing crew and its dropped Gun, without revealing another manned Gun', () => {
+    const { engine, state } = makeEngine({
+      scenario: { ...GE_VS_BR, firstSide: 'br' }, extra,
+      terrain: { yM5: { terrain: 'woods' }, yL5: { terrain: 'woods' } }, startPhase: 'MPh',
+      pieces: [...hidden(), { id: 'c2', def: 'br.228c', side: 'br', hex: 'yM5', tags: { hip: true } },
+        { id: 'g2', def: 'br.AA40L', side: 'br', heldBy: 'c2', tags: { hip: true, ca: 0, emplaced: true } },
+        { id: 'e1', def: 'ge.467', side: 'ge', hex: 'yJ5' }],
+    });
+    let s = act(engine, state, { type: 'move.drop', sw: 'g40' }).state;
+    expect(s.pieces['c1']!.tags['hip']).toBe(true);
+    expect(s.pieces['g40']!.tags['hip']).toBe(true);
+    s = settle(engine, act(engine, s, { type: 'move.start', units: ['c1'] }).state);
+    s = settle(engine, act(engine, s, { type: 'move.step', to: 'yL5' }).state);
+    for (const id of ['c1', 'g40']) expect(isVisibleTo(engine.env(s), s.pieces[id]!, 'ge')).toBe(true);
+    for (const id of ['c2', 'g2']) expect(s.pieces[id]!.tags['hip']).toBe(true);
+    expect(s.pieces['g40']!.loc).toEqual({ kind: 'hex', hex: 'yM5' });
+    expect(s.pieces['g40']!.tags['hipCrew']).toBeUndefined();
+    s = settle(engine, act(engine, s, { type: 'move.end' }).state);
+    while (s.attacker === 'br') s = act(engine, s, { type: 'endPhase' }).state;
+    expect(s.phase).toBe('RPh');
+    for (const id of ['c1', 'g40']) expect(s.pieces[id]!.tags['hip']).toBeUndefined();
+    expect(s.pieces['c1']!.tags['moved']).toBeUndefined();
+    expect(redactState(engine, s, 'ge').pieces['c1']).toBeDefined();
+  });
+
+  it('shows an advancing crew with its leader before the opposing Close Combat declaration', () => {
+    const { engine, state } = makeEngine({
+      scenario: { ...GE_VS_BR, firstSide: 'br' }, extra,
+      terrain: { yM5: { terrain: 'woods' } }, startPhase: 'APh',
+      pieces: [...hidden(), { id: 'l1', def: 'br.L80', side: 'br', hex: 'yM5', tags: { stackedOn: 'c1' } },
+        { id: 'e1', def: 'ge.467', side: 'ge', hex: 'yL5' }],
+    });
+    let s = act(engine, state, { type: 'move.drop', sw: 'g40' }).state;
+    s = act(engine, s, { type: 'advance', units: ['c1', 'l1'], to: 'yL5' }).state;
+    expect(s.pieces['c1']!.tags['hip']).toBeUndefined();
+    expect(s.pieces['g40']!.tags['hip']).toBeUndefined();
+    s = act(engine, s, { type: 'endPhase' }).state;
+    if (engine.currentDecision(s)?.kind === 'ccHex') s = act(engine, s, { type: 'cc.choose', hex: 'yL5' }).state;
+    s = act(engine, s, { type: 'cc.declare', attacks: [] }).state;
+    expect(engine.currentDecision(s)).toMatchObject({ kind: 'ccDeclare', owner: 'ge' });
+    const visible = redactState(engine, s, 'ge');
+    const options = engine.legalActions(visible, 'ge');
+    expect(options).toEqual(engine.legalActions(s, 'ge'));
+    expect(options.some(a => JSON.stringify(a).includes('c1') && JSON.stringify(a).includes('l1'))).toBe(true);
+    for (const a of options) expect(engine.validate(s, a)).toBeNull();
+  });
+
+  it('clears the former-crew association when the hidden Gun is recovered', () => {
+    const { engine, state } = makeEngine({
+      scenario: { ...GE_VS_BR, firstSide: 'br' }, extra, dice: [1],
+      terrain: { yM5: { terrain: 'woods' } }, startPhase: 'MPh',
+      pieces: [...hidden(), { id: 'e1', def: 'ge.467', side: 'ge', hex: 'yA1' }],
+    });
+    let s = act(engine, state, { type: 'move.drop', sw: 'g40' }).state;
+    expect(s.pieces['g40']!.tags['hipCrew']).toBe('c1');
+    s = act(engine, s, { type: 'move.start', units: ['c1'] }).state;
+    s = act(engine, s, { type: 'move.recover', unit: 'c1', sw: 'g40' }).state;
+    expect(s.pieces['g40']!.loc).toEqual({ kind: 'held', by: 'c1' });
+    expect(s.pieces['g40']!.tags['hipCrew']).toBeUndefined();
+  });
+
   it('hides the Gun and crew from the other side: not a target, not a Known Enemy Unit, not an obstacle to movement orders', () => {
     const { engine, state } = makeEngine({ scenario: GE_VS_BR, extra, terrain: { yM5: { terrain: 'woods' } }, startPhase: 'PFPh', pieces: [...hidden(), { id: 'e1', def: 'ge.467', side: 'ge', hex: 'yK5' }] });
     const env = engine.env(state);

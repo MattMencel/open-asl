@@ -170,6 +170,19 @@ describe('Concealment (SK4 8.3): loss in the LOS of a Good Order enemy', () => {
     expect(events(u, 'sk1.fire.result')[0]).toMatchObject({ result: { kind: 'none' } });
   });
 
+  it('Area Fire halves each firer before Assault Fire\u2019s +1 (SK1 3.5, "after all modification"; ASLRB A7.36), and the attack says so', () => {
+    // Two Assault Fire squads (6 FP, underlined) in the AFPh at a concealed German squad: each 6 → 3 (Advancing Fire) → 1.5
+    // (Area Fire) +1 = 2.5, rounded up to 3: 6 FP, the 6 column. Halving the 8 column of their unconcealed fire would give 4.
+    const { engine, state } = game([{ id: 'a', def: 'am.666', side: 'ru', hex: 'yK7' }, { id: 'b', def: 'am.666', side: 'ru', hex: 'yK7' }, ge('g', 'yK5', { concealed: true })], 'AFPh', { dice: [3, 4, 6, 6, 6, 6] });
+    const t = act(engine, state, { type: 'test.fire', decl: { units: ['a', 'b'], sw: [], target: 'yK5' }, mode: 'advancing' });
+    const attack = events(t, 'sk1.fire.attack')[0]!;
+    expect(attack).toMatchObject({ fp: 8, column: 8, area: { targets: ['g'], fp: 6, column: 6 } });
+    expect(((attack['area'] as { fpExplain: { label: string }[] }).fpExplain).map((n) => n.label)).toEqual(['½ Advancing Fire', '½ Area Fire (concealed target)', '+1 Assault Fire']);
+    // The result is read on the 6 column.
+    const res = events(t, 'sk1.fire.result')[0]!;
+    expect(res['result']).toEqual(statics(engine.env(state)).tables.ift(6, res['finalDr'] as number));
+  });
+
   it('the attack on a concealed stack is Area Fire (half FP), resolved apart from the Known units in the hex with the same DR', () => {
     const columns: { targets: string[]; column: number }[] = [];
     const spy: RuleModule = {
@@ -220,7 +233,7 @@ describe('Concealment (SK4 8.3): loss in the LOS of a Good Order enemy', () => {
     s = play(engine, s, { type: 'move.start', units: ['c'], assault: true });
     s = settle(engine, play(engine, s, { type: 'move.step', to: 'yP6' }));
     expect(concealed(s.pieces['c'])).toBe(false);
-    s = settle(engine, play(engine, s, { type: 'move.end' }));
+    // With nothing left to do in its one hex, the Assault Movement is over by itself.
     // A unit no Good Order enemy can see moves freely under "?": the German is broken.
     const g2 = game([sq('a', 'yK5', { concealed: true }), ge('g', 'yK9', { broken: true })], 'MPh');
     let u = play(g2.engine, g2.state, { type: 'move.start', units: ['a'] });
@@ -241,7 +254,7 @@ describe('Concealment (SK4 8.3): loss in the LOS of a Good Order enemy', () => {
     let s = play(engine, smoked, { type: 'move.start', units: ['c'], assault: true });
     s = settle(engine, play(engine, s, { type: 'move.step', to: 'yP6' }));
     expect(concealed(s.pieces['c'])).toBe(true);
-    s = settle(engine, play(engine, s, { type: 'move.end' }));
+    // With nothing left to do in its one hex, the Assault Movement is over by itself.
     // Its stackmate Assault Moves into the clear open hex beside it, in the German's unhindered LOS: the "?" comes off.
     s = play(engine, s, { type: 'move.start', units: ['d'], assault: true });
     s = settle(engine, play(engine, s, { type: 'move.step', to: 'yO6' }));

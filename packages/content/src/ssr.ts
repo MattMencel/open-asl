@@ -32,6 +32,8 @@ import {
   HIDDEN_UNITS_MODULE,
   FORCE_CHART_MODULE,
   FORTIFIED_MODULE,
+  FORTIFICATIONS_MODULE,
+  fortificationsModule,
   SCATTER_MODULE,
   AMBUSH_DRM_MODULE,
   COMMISSAR_MODULE,
@@ -680,6 +682,8 @@ export const SSR_MODULES: Record<string, RuleModule> = {
   ccv: ccvModule,
   /** Secretly pre-designated fortified buildings (+1 TEM), see `fortifiedModule`; params `FortifiedParams`. */
   [FORTIFIED_MODULE]: fortifiedModule,
+  /** Fortification counters a side places at setup, openly or hidden (full ASL A12.33, B26–B30); params `FortificationsParams`. */
+  [FORTIFICATIONS_MODULE]: fortificationsModule,
   /** A sky condition that begins and ends on the attacker's RPh DR, see `weatherDrModule`; params `WeatherDrParams`. */
   [WEATHER_DR_MODULE]: weatherDrModule,
   /** Reinforcements whose number a dr decides, see `variableReinforcementsModule`; params `VariableReinforcementsParams`. */

@@ -19,6 +19,8 @@ declare module '@asl/engine' {
     'cc.attackFp': { ctx: { unit: PieceId }; value: number };
     /** CC defense strength of one target unit (`attackers`: who is attacking it; a vehicle's CC attack faces the unit's CCV, SK3). */
     'cc.defenseFp': { ctx: { unit: PieceId; attackers?: PieceId[] }; value: number };
+    /** Why a unit's CC strength is not its printed FP, for the player to read (a Reduced Japanese unit's full CCV), or null. */
+    'cc.fpNote': { ctx: { unit: PieceId }; value: string | null };
     /** DRM for one CC attack. */
     'cc.drm': { ctx: { hex: HexId; attackers: PieceId[]; targets: PieceId[]; side: SideId }; value: number };
     /** Ambush drm for a side's force in a CC hex. */
@@ -744,6 +746,8 @@ export interface CcAttackPreview {
   drmNotes: DrmNote[];
   /** Why this attack, on its own, could not be declared now, or null. */
   illegal: string | null;
+  /** Units whose CC strength is not their printed FP, and why (`cc.fpNote`). */
+  fpNotes: { unit: PieceId; note: string }[];
 }
 
 /** What one prospective CC attack would be: strengths, odds column, DRM and legality. Pure; for the interface. */
@@ -763,6 +767,10 @@ export function ccAttackPreview(env: QueryEnv, hex: HexId, side: SideId, attack:
     drm: res?.value ?? 0,
     drmNotes: res ? drmNotes(res) : [],
     illegal: declarationIllegal(env, side, hex, [attack]),
+    fpNotes: [...attackers, ...targets].flatMap((unit) => {
+      const note = env.query('cc.fpNote', { unit }, null);
+      return note ? [{ unit, note }] : [];
+    }),
   };
 }
 

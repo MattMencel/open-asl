@@ -48,6 +48,8 @@ export const T = {
   rallyTried: 'rallyTried',
   /** Took its one Rally Phase action. */
   rphAction: 'rphAction',
+  /** Its owner has its DM counter come off at the end of this RPh, though it could keep it (SK1 3.1 g). */
+  dmRemove: 'dmRemove',
   /** On a SW: a repair dr was made for it this Player Turn, its one attempt (A9.72). */
   repairTried: 'repairTried',
   /** SW recovered this phase (cannot be transferred in the same phase). */

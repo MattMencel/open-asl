@@ -36,6 +36,11 @@ declare module '@asl/engine' {
     /** Reason the stack cannot begin moving, or null. */
     'move.cannotStart': { ctx: { units: PieceId[]; doubleTime: boolean; assault: boolean; manhandle?: PieceId }; value: string | null };
     /**
+     * Whether the moving stack could still spend MF where it stands (Smoke, Recovery, a DC, full ASL a Breach): asked of
+     * an Assault Movement stack that has entered its one hex, which is finished there when it has nothing left to do.
+     */
+    'move.moreToDo': { ctx: Record<string, never>; value: boolean };
+    /**
      * The MF/MP a step of the moving stack into Location `to` costs (`declared`: extra MP a vehicle announces, SK4
      * 3.3.2). `to` is a hex id at ground level; full ASL steps may name an upper building level ('uK4:1').
      */
@@ -46,7 +51,8 @@ declare module '@asl/engine' {
      * Infantry stacking limit in a hex for a side: squad equivalents and SMC (SK4 2.0: three and four; PTO Dense jungle and
      * bamboo two squad equivalents, SK4 8.2.1).
      */
-    'stack.limit': { ctx: { hex: HexId; side: SideId }; value: { se: number; smc: number } };
+    /** `note`: why the limit is what it is, where a rule sets it (a Cave holds one squad-equivalent), for refusals. */
+    'stack.limit': { ctx: { hex: HexId; side: SideId }; value: { se: number; smc: number; note?: string } };
     /** Why a moving vehicle may not step into `to`, or null (SK3; the Infantry checks do not apply to it). */
     'vehicle.stepIllegal': { ctx: { ms: MoveState; to: HexId; declared?: number }; value: string | null };
     /** Whether the defender has any legal, plausible Defensive First Fire shot at the moving stack (so it is asked); `hex` is its Location. */
@@ -394,6 +400,35 @@ export const movementModule: RuleModule = {
       apply(v, { unit, stack, doubleTime }, env) {
         const ipc = ipcFor(env, unit, stack) - (doubleTime && !isCx(pieceOf(env, unit)) ? 1 : 0);
         return v - Math.max(0, ppCarried(env, unit) - ipc);
+      },
+    });
+
+    // What the moving stack may still spend MF on in place (the move.smoke, move.recover and move.placeDc checks).
+    r.contribute({
+      id: 'sk1.move.more-to-do',
+      query: 'move.moreToDo',
+      layer: 0,
+      apply(v, _ctx, env) {
+        if (v) return v;
+        const ms = moveState(env);
+        if (!ms?.hex) return false;
+        const loc = moveLoc(ms)!;
+        const canSpend = (u: PieceId, cost: number) => remaining(env, ms, u) >= cost && !assaultAllMf(ms, cost);
+        const smoke = ms.units.some((u) => !ms.smokeTriedBy?.includes(u) && env.query('unit.smoke', { unit: u }, 0) > 0 && canSpend(u, 1));
+        const loose = ms.bypass ? [] : unpossessedSwAt(env, loc).filter((w) => !w.tags[PORTAGED]);
+        const recover = loose.some((w) => ms.units.some((u) => !w.tags[RECOVER_TRIED + u] && canSpend(u, 1)));
+        const dc =
+          !ms.dcPending &&
+          ms.units.some((u) =>
+            Object.values(env.state.pieces).some(
+              (w) =>
+                w.loc.kind === 'held' &&
+                w.loc.by === u &&
+                sw(env, w)?.type === 'DC' &&
+                adjacentLocs(env, loc).some((t) => canSpend(u, env.query('move.cost', { unit: u, from: ms.hex!, to: hexOfLoc(t), viaRoad: false, ...(isGroundLoc(t) ? {} : { loc: t }) }, 0))),
+            ),
+          );
+        return smoke || recover || dc;
       },
     });
 
@@ -1028,7 +1063,8 @@ export function entryHexesOf(env: QueryEnv, p: Piece): HexId[] {
   const edge = (p.loc.kind === 'offboard' && p.loc.edge) || (p.tags['entryEdge'] as string | undefined);
   if (!edge) return [];
   const allowed = p.tags['entryHexes'] as string | undefined;
-  const hexes = edge.split(',').flatMap((e) => statics(env).map.edge(e));
+  // A corner hex lies on two edges: listed once.
+  const hexes = [...new Set(edge.split(',').flatMap((e) => statics(env).map.edge(e)))];
   return allowed ? hexes.filter((h) => allowed.split(',').includes(h)) : hexes;
 }
 
@@ -1173,9 +1209,9 @@ function stepIllegal(env: QueryEnv, ms: MoveState, to: LocId, pushing = false, d
   const all = [...here, ...ms.units.map((u) => pieceOf(env, u))];
   const se = squadEquivalents(env, all);
   const smcs = all.filter((p) => smc(env, p)).length;
-  const limit = offTo ? OPEN_STACK_LIMIT : stackLimit(env, to, env.state.attacker);
-  if (se > limit.se) return `Stacking limit: ${limit.se} squad-equivalents`;
-  if (smcs > limit.smc) return `Stacking limit: ${limit.smc} SMC`;
+  const limit: { se: number; smc: number; note?: string } = offTo ? OPEN_STACK_LIMIT : stackLimit(env, to, env.state.attacker);
+  if (se > limit.se) return `Stacking limit: ${limit.se} squad-equivalents${limit.note ? ` (${limit.note})` : ''}`;
+  if (smcs > limit.smc) return `Stacking limit: ${limit.smc} SMC${limit.note ? ` (${limit.note})` : ''}`;
   return null;
 }
 
@@ -1474,6 +1510,10 @@ function reAskMover(ctx: Ctx) {
   // A stack whose movement ended where it stands (bounced off a hidden Gun, a vehicle ending its move) is done once the defender has had its say.
   const cur = moveState(ctx);
   if (cur?.halted || cur?.vehicle?.ending) finishStack(ctx);
+  // An Assault Movement stack may move only one hex (SK1 3.3; ASLRB A4.61): once in it, with nothing left to spend MF on
+  // there, its move is over. The defender has had its say on that expenditure, so it is finished without the end-of-move
+  // First Fire chance (which exists for a stack that might still have moved on). With options left it ends as any other.
+  else if (cur && cur.assault && !cur.vehicle && cur.hexesEntered >= 1 && !cur.dcPending && !ctx.query('move.moreToDo', {}, false)) finishStack(ctx);
   const top = ctx.state.decisions[ctx.state.decisions.length - 1];
   if (top?.kind === 'phase') ctx.popDecision(top.id);
   if (!ctx.state.result) askPhaseOwner(ctx, ctx.state.attacker);

@@ -75,7 +75,8 @@ export interface AvailabilityBlock {
   end: Timestamp;
 }
 
-export type ListingStatus = 'open' | 'scheduled' | 'withdrawn' | 'expired';
+/** `played`: a scheduled session both players attended; it is off their schedules once its table has closed. */
+export type ListingStatus = 'open' | 'scheduled' | 'played' | 'withdrawn' | 'expired';
 
 const HALF_HOUR_MS = 30 * 60_000;
 /** How far ahead a start must be for a player to book it from the board. */

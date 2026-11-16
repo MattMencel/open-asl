@@ -92,6 +92,11 @@ export interface FireAttackCtx {
   tca?: number;
   /** Full ASL: a Snap Shot at the hexside the moving stack crossed (`FireDeclaration.snap`, ASLRB A8.15). */
   snap?: [HexId, HexId];
+  /**
+   * Resolved against targets it may attack only as Area Fire (concealed units, SK4 8.3.2; ASLRB A12.13): every firer's FP
+   * is halved before Assault Fire's +1, which comes "after all modification" (SK1 3.5; ASLRB A7.36).
+   */
+  vsConcealed?: boolean;
 }
 
 export interface FireDeclaration {
@@ -149,6 +154,8 @@ declare module '@asl/engine' {
     'fire.residualBonus': { ctx: { target: LocId; attack?: FireAttackCtx; ordnance?: { ammo: string; airBurst: boolean } }; value: number };
     /** FP of one part of an attack after all modifiers (fractions kept). */
     'fire.partFp': { ctx: { attack: FireAttackCtx; part: FirePart }; value: number };
+    /** The targets of this attack it may affect only as Area Fire (concealed units, SK4 8.3.2), resolved apart with `vsConcealed`. */
+    'fire.areaTargets': { ctx: { attack: FireAttackCtx }; value: PieceId[] };
     /**
      * The Locations an Indirect Fire hit on Location `target` attacks, each with the same IFT DR (mortars and OBA;
      * ASLRB C.1, B23.32). The Starter Kit's hexes have one Location: the target alone.
@@ -535,6 +542,17 @@ export const attackFp = (env: QueryEnv, a: FireAttackCtx, exclude: PieceId[] = [
   firerFpParts(a)
     .filter((p) => !exclude.includes(p.piece))
     .reduce((sum, part) => sum + env.query('fire.partFp', { attack: a, part }, partBaseFp(env, part)), 0);
+
+/**
+ * The IFT column an attack resolved at `column` comes to against the targets it may attack only as Area Fire (`vsConcealed`):
+ * its FP worked out again with the Area Fire halving, any column shift it took (cowering) kept. Null below the first column.
+ */
+export function areaFireColumn(env: QueryEnv, attack: FireAttackCtx, column: number): number | null {
+  const cols = statics(env).tables.iftColumns;
+  const base = iftColumn(env, attackFp(env, attack));
+  const shift = base === null ? 0 : Math.max(0, cols.indexOf(base) - cols.indexOf(column));
+  return iftColumn(env, attackFp(env, { ...attack, vsConcealed: true }), shift);
+}
 
 /** What changed the firers' FP (½ Advancing Fire, +1 Assault Fire, x2 Point Blank Fire ...), one note per kind, for the log. */
 export function fpNotes(env: QueryEnv, a: FireAttackCtx): DrmNote[] {
@@ -1199,11 +1217,15 @@ function resolveFire(
   const drmRes = discloseDrm(ctx, attack, column, roll.total, fullDrm, secretMatters);
   const drm = drmRes.value;
 
+  // Targets it may attack only as Area Fire (concealed units) are resolved apart at a lower FP: said with the attack.
+  const areaTargets = column === null ? [] : ctx.query('fire.areaTargets', { attack }, [] as PieceId[]);
+  const vsArea = { ...attack, vsConcealed: true };
   ctx.emit('sk1.fire.attack', {
     attack: { mode, target: decl.target, parts: attack.parts.map((p) => p.piece), ...(attack.directors?.length ? { directors: attack.directors } : {}), ...(decl.at ? { at: decl.at } : {}), ...(decl.snap ? { snap: decl.snap } : {}) },
     from: [...new Set(attack.parts.map((p) => partLoc(ctx, p)))].sort(),
     fp,
     fpExplain: fpNotes(ctx, attack),
+    ...(areaTargets.length ? { area: { targets: areaTargets, fp: attackFp(ctx, vsArea), column: areaFireColumn(ctx, attack, column!), fpExplain: fpNotes(ctx, vsArea) } } : {}),
     column,
     dr: [white, colored],
     drm,
@@ -1483,10 +1505,14 @@ export function markFirers(ctx: Ctx, attack: FireAttackCtx, mode: FireMode, cowe
     const n = fired + ((h.tags[T.swDestroyed] as number | undefined) ?? 0);
     if ((m?.kind === 'squad' && n >= 2) || ((m?.kind === 'hs' || m?.kind === 'crew') && n >= 1)) setTags(ctx, holder, { [T.ownFpForfeit]: true });
   }
+  // A leader "can direct the fire of a MG as many times as the MG can fire" (ASLRB A7.53): directing the Multiple ROF
+  // shot of a MG he directed before (a First Fire attack, its MG unmarked) is not his firing again, so he stays First
+  // Fire; he may not direct different firers (A7.53), so no other First Fire attack has a director already marked.
+  const directors = new Set(attack.directors ?? []);
   for (const id of [...pieces].sort()) {
     const p = ctx.state.pieces[id];
     if (!p || p.loc.kind === 'eliminated') continue;
-    const marker = markerFor(id);
+    const marker = directors.has(id) && mode === 'first' ? (cowered ? 'final' : 'first') : markerFor(id);
     // Never downgrade a Final Fire marker.
     if (fireMarker(p) === 'final' && marker !== 'final') continue;
     setTags(ctx, id, { [T.fire]: marker });

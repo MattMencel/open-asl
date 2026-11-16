@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { Action, Ctx, RuleModule } from '@asl/engine';
-import { FP, type FireDeclaration, type FireMode, type ResolveFireFn } from '@asl/rules';
+import { FP, japaneseModule, type FireDeclaration, type FireMode, type ResolveFireFn } from '@asl/rules';
 import { act, makeEngine } from '../../../packages/rules/test/fixtures';
-import { newGame, PLAYABLE_SCENARIOS } from '@asl/content';
+import { ASL_TESTBED_SCENARIO, fixtureActions, newGame, PLAYABLE_SCENARIOS } from '@asl/content';
 import type { GameState } from '@asl/engine';
 import { describeEvents, entryRoll, phaseSections, type LogLine } from '../src/game/describe';
 
@@ -61,6 +61,29 @@ describe('game log', () => {
     const ev = { seq: 1, type: 'sk1.cc.attack', payload: { hex: 'yO5', side: 'am', attack: { attackers: ['a1', 'a2'], targets: ['g1'] }, odds: '3:2', drm: 0, dr: 4, kill: 6, result: 'eliminated', fp: { attack: [['a1', 4], ['a2', 2]], defense: [['g1', 4]] } } };
     const lines = describeEvents(engine.env(state), [ev] as never).map((l) => l.text.trim());
     expect(lines[0]).toMatch(/^CC in yO5 \(American\): American 7²-4-7 4 \+ American 7²-4-7 2 = 6 vs German 4¹-6-7 4 → 3:2, DR /);
+  });
+
+  it('gives the Area Fire figure against concealed units beside the attack\u2019s own, without naming them (SK4 8.3.2)', () => {
+    const { engine, state } = makeEngine({ terrain, pieces: [{ id: 'a1', def: 'am.747', side: 'am', hex: 'yN5' }, { id: 'g1', def: 'ge.467', side: 'ge', hex: 'yO5' }] });
+    const ev = { seq: 1, type: 'sk1.fire.attack', payload: { attack: { mode: 'advancing', target: 'yO5', parts: ['a1'] }, from: ['yN5'], fp: 4.5, column: 4, area: { targets: ['g1'], fp: 3, column: 2, fpExplain: [{ id: 'x', label: '½ Area Fire (concealed target)' }] }, dr: [4, 4], drm: 0, cowered: false, explain: [] } };
+    const line = describeEvents(engine.env(state), [ev] as never)[0]!;
+    expect(line.text).toMatch(/: 4\.5 FP → 4 column; vs the concealed unit, Area Fire: 3 FP → 2 column, DR /);
+    expect(line.detail).toMatch(/Area Fire FP: ½ Area Fire \(concealed target\)/);
+  });
+
+  it('says why a strength is not the printed FP: a Reduced Japanese unit counts its full-strength CCV (SK4 8.1.8.4)', () => {
+    const { engine, state } = makeEngine({
+      scenario: { firstSide: 'ja', sides: [{ side: 'am', name: 'American', nationality: 'am', elr: 5 }, { side: 'ja', name: 'Japanese', nationality: 'ja', elr: 3 }] },
+      extra: [japaneseModule],
+      pieces: [
+        { id: 'r', def: 'ja.347r', side: 'ja', hex: 'yO5' },
+        { id: 'm', def: 'am.768', side: 'am', hex: 'yO5' },
+      ],
+    });
+    // The Reduced 3-4-7 attacks with the 4-4-7's 4: 4 vs 7, 1:2.
+    const ev = { seq: 1, type: 'sk1.cc.attack', payload: { hex: 'yO5', side: 'ja', attack: { attackers: ['r'], targets: ['m'] }, odds: '1:2', drm: -1, dr: 7, kill: 6, result: 'no effect', fp: { attack: [['r', 4]], defense: [['m', 7]] } } };
+    const line = describeEvents(engine.env(state), [ev] as never)[0]!.text;
+    expect(line).toMatch(/3.?-4-7 4 \[counts its full-strength CCV \(SK4 8\.1\.8\.4\)\] vs .*7 → 1:2/);
   });
 
   it('says how much Residual FP an attack left and why (ASLRB A8.26: one column less per point of DRM from outside the hex)', () => {
@@ -481,5 +504,38 @@ describe('rout steps in the log', () => {
     expect(lines(engine, step(engine, state, 'yM5', true))).toEqual(['Low Crawl: American 7²-4-7 to M5 · no Interdiction (Low Crawl)']);
     const far = setup('yA1');
     expect(lines(far.engine, step(far.engine, far.state, 'yO5'))).toEqual(['Rout: American 7²-4-7 to O5 · no Interdiction (no enemy able to interdict)']);
+  });
+});
+
+describe('fortification counters in the log (full ASL A12.33, B28.45, B28.47)', () => {
+  /** The test bed with its counters down and the Russians set up: the placement and the Secret dr events among the log. */
+  function placed() {
+    const g = newGame(ASL_TESTBED_SCENARIO, 'describe-forts');
+    let state = g.state;
+    // The Secret dr is rolled as the game is created, before any action.
+    const events: unknown[] = [...g.events];
+    for (const a of fixtureActions(g.engine, g.state, 'fort-placed')) {
+      const t = g.engine.submit(state, a);
+      state = t.state;
+      events.push(...t.events);
+    }
+    return { env: g.engine.env(state), events: events as never };
+  }
+  it("the other side reads of the open counters only, the Known and Dummy minefields alike and without strength, and never of the Secret dr", () => {
+    const { env, events } = placed();
+    const german = describeEvents(env, events, 'ge').map((l) => l.text).filter((t) => /fortification|Minefield|minefield|Dummy/i.test(t));
+    expect(german).toHaveLength(1);
+    const line = german[0]!;
+    expect(line).toMatch(/placed 10 fortification counters/);
+    for (const open of ['foxhole 1S O7', 'trench P6', 'Wire P9', 'minefield N9', 'minefield O10']) expect(line).toContain(open);
+    expect(line).toMatch(/5 hidden or recorded/);
+    for (const secret of ['O6', 'O4', 'P10', 'O9', 'O3', 'Dummy', 'Known', 'A-P', 'A-T', 'Secret dr', 'hidden)']) expect(line, secret).not.toContain(secret);
+  });
+  it('the owner reads every counter, its strength and the Secret dr', () => {
+    const { env, events } = placed();
+    const russian = describeEvents(env, events, 'ru').map((l) => l.text);
+    const line = russian.find((t) => /Russian placed:/.test(t))!;
+    for (const s of ['foxhole 2S O6 (hidden)', 'minefield (A-P 8 + A-T 1) P10 (recorded)', 'Known minefield (A-P 6) N9', 'Dummy minefield O10', 'roadblock O9 (hidden)', 'pillbox 1+3+5 O3 (hidden)', 'Wire O4 (hidden)']) expect(line, s).toContain(s);
+    expect(russian.some((t) => /Dummy Minefield Secret dr/.test(t))).toBe(true);
   });
 });

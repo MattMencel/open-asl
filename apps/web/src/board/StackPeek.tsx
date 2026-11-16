@@ -1,7 +1,8 @@
 import { useLayoutEffect, useRef, useState } from 'react';
 import type { HexId, Piece, PieceId, QueryEnv } from '@asl/engine';
-import { AMMO_NAME, acquisitionsAt, ammoOut, defOf, fireAt, fireMarker, fireNumbers, gunIdent, isWeaponDef, locationsOf, moveState, parseLabor, rubbleAt, shownFireMarker, smokeDrm, smokeGrenades, stackOrder, swHeldBy, terrainOf, windOf, type Statics, type VehicleDef } from '@asl/rules';
+import { AMMO_NAME, acquisitionsAt, ammoOut, defOf, fireAt, fireMarker, fireNumbers, fortCounters, fortKindName, gunIdent, isWeaponDef, locationsOf, moveState, parseLabor, rubbleAt, shownFireMarker, smokeDrm, smokeGrenades, stackOrder, swHeldBy, terrainOf, windOf, type Statics, type VehicleDef } from '@asl/rules';
 import { counterImage, cxMarker, markerImage } from '../game/assets';
+import { fortMarker } from '../panels/FortTray';
 import { identCss } from './ident';
 import { pieceLabel } from '../game/describe';
 import { smoke58Chits } from '../game/smoke';
@@ -49,7 +50,8 @@ function statusOf(env: QueryEnv, p: Piece): { label: string; marker?: string }[]
   const t = p.tags;
   const out: { label: string; marker?: string }[] = [];
   if (t['broken']) out.push({ label: 'broken' });
-  if (t['dm']) out.push({ label: 'DM', marker: 'dm' });
+  // Removed at its owner's choice at the end of the Rally Phase (SK1 3.1 g).
+  if (t['dm']) out.push({ label: t['dmRemove'] ? 'DM (comes off at the end of the Rally Phase)' : 'DM', marker: 'dm' });
   if (t['pinned']) out.push({ label: 'pinned', marker: 'pin' });
   if (t['cx']) out.push({ label: 'CX', marker: cxMarker(defOf(env, p).nationality) });
   if (t['malf']) out.push({ label: 'malfunctioned' });
@@ -213,6 +215,22 @@ function fireLines(env: QueryEnv, hex: HexId): string[] {
   return out;
 }
 
+/** The fortification counters in a hex this viewer may see (full ASL A12.33, B26–B30), as the peek lists them. */
+function fortLines(env: QueryEnv, hex: HexId): { marker: string; label: string; hidden: boolean }[] {
+  return fortCounters(env)
+    .filter((c) => c.hex === hex)
+    .map((c) => {
+      const what = fortKindName(c);
+      const extra =
+        c.kind === 'foxhole' ? ` · room for ${c.capacity ?? 1} squad${(c.capacity ?? 1) === 1 ? '' : 's'} and four SMC (ASLRB B27.12)`
+        : c.kind === 'trench' || c.kind === 'ditch' ? ' · room for three squads (ASLRB B27.51)'
+        : c.kind === 'pillbox' ? ` · ${c.pillbox?.capacity ?? 1} squad${(c.pillbox?.capacity ?? 1) === 1 ? '' : 's'}, +${c.pillbox?.ca} in its arc, +${c.pillbox?.nca} outside (ASLRB B30.11)`
+        : c.kind === 'mines' && !c.mines?.ap && !c.mines?.at && !c.mines?.dummy ? ' · strength unknown' : '';
+      const status = c.hidden && !c.revealed ? (c.kind === 'mines' ? ' · recorded (ASLRB B28.1)' : ' · hidden (ASLRB A12.33)') : c.revealed ? ' · revealed' : '';
+      return { marker: fortMarker(c), label: `${what}${extra}${status}`, hidden: !!c.hidden && !c.revealed };
+    });
+}
+
 /** Markers on the hex itself (Smoke, CC, Melee, Residual FP, Acquired Target counters). */
 function locationMarkers(env: QueryEnv, hex: HexId): { marker: string; label: string; tint?: string }[] {
   const m = env.state.hexMarkers[hex] ?? {};
@@ -259,8 +277,12 @@ export function StackPeek({ env, hex, at, bounds, placements, rotation, interact
     if (h !== drawnH) setDrawnH(h);
   });
   const stack = stackIn(env, hex);
-  if (stack.length === 0) return null;
+  const forts = fortLines(env, hex);
+  if (stack.length === 0 && forts.length === 0) return null;
   const levels = [...new Set(stack.map((e) => levelOfPiece(e.piece)))].sort((a, b) => b - a);
+  // A pillbox is a Location of its own (B30.1): its units are listed under their own heading, above the ground's.
+  const inPillbox = (p: Piece) => p.loc.kind === 'hex' && p.loc.sub === 'pb';
+  const pillboxUnits = stack.filter((e) => inPillbox(e.piece));
   const total = stack.reduce((n, e) => n + 1 + e.held.length, 0);
   // A lone vehicle on the map gets the big card: its counter unmarked, and its values read out.
   const vehicles = stack.filter((e) => defOf(env, e.piece).kind === 'vehicle');
@@ -285,6 +307,8 @@ export function StackPeek({ env, hex, at, bounds, placements, rotation, interact
       const tca = d.turret !== 'NT' && p.tags['ca'] !== undefined && p.tags['ca'] !== p.tags['vca'] ? ` · turret ${SPINE_NAME[Number(p.tags['ca'])]}` : '';
       st.unshift({ label: `faces ${vca}${tca}` });
     }
+    if (p.loc.kind === 'hex' && p.loc.pos?.ent) st.unshift({ label: `in the ${p.loc.pos.ent === 'ditch' ? 'A-T Ditch' : p.loc.pos.ent}` });
+    if (p.loc.kind === 'hex' && p.loc.pos?.wire) st.unshift({ label: p.loc.pos.wire === 'on' ? 'on top of the Wire' : 'beneath the Wire' });
     const can = !!interactive && interactive.selectable(p);
     const sel = !!interactive && interactive.selected.has(p.id);
     const sheet = p.id === big && d.kind === 'vehicle' ? vehicleSheet(env, p, d) : null;
@@ -386,19 +410,33 @@ export function StackPeek({ env, hex, at, bounds, placements, rotation, interact
           {fireLines(env, hex).map((l) => (
             <div key={l} className="peek-fire">{l}</div>
           ))}
+          {forts.map((f, i) => (
+            <div key={`f${i}`} className={`peek-fort ${f.hidden ? 'hidden' : ''}`}>
+              <img src={markerImage(f.marker) ?? ''} alt="" width={22} height={22} draggable={false} /> {f.label}
+            </div>
+          ))}
         </div>
       </div>
       {/* Top down, as on the board: a unit's weapons lie on top of it (SW over Gun), so they read first. */}
       {/* Full ASL: a building hex holding more than one Location is listed by Location, the highest first (ASLRB A2.8). */}
       <ul>
+        {pillboxUnits.length > 0 && [
+          <li key="pb" className="peek-loc loc-head upper">
+            Pillbox
+          </li>,
+          ...pillboxUnits.map((e) => [...[...e.held].reverse().map((h) => row(h, true)), row(e.piece, false)]),
+          <li key="pb-ground" className="peek-loc loc-head ground">
+            Outside the pillbox
+          </li>,
+        ]}
         {levels.length < 2
-          ? stack.map((e) => [...[...e.held].reverse().map((h) => row(h, true)), row(e.piece, false)])
+          ? stack.filter((e) => !inPillbox(e.piece)).map((e) => [...[...e.held].reverse().map((h) => row(h, true)), row(e.piece, false)])
           : levels.map((lv) => [
               <li key={`lv${lv}`} className={`peek-loc loc-head ${lv ? 'upper' : 'ground'}`}>
                 {lv ? <img src={markerImage(`Lev${lv}`) ?? ''} alt="" width={18} height={18} draggable={false} /> : null}
                 {lv ? `Level ${lv}` : 'Ground level'}
               </li>,
-              ...stack.filter((e) => levelOfPiece(e.piece) === lv).map((e) => [...[...e.held].reverse().map((h) => row(h, true)), row(e.piece, false)]),
+              ...stack.filter((e) => levelOfPiece(e.piece) === lv && !inPillbox(e.piece)).map((e) => [...[...e.held].reverse().map((h) => row(h, true)), row(e.piece, false)]),
             ])}
       </ul>
       {interactive && stack.some((e) => interactive.selectable(e.piece)) && (

@@ -122,6 +122,8 @@ import {
   ordnanceDirectorIllegal,
   swDirectorIllegal,
   ordnanceOf,
+  mgAsOrdnance,
+  shotWeaponOf,
   pfCap,
   pfCheckDrm,
   pfCheckNeedText,
@@ -152,19 +154,21 @@ import {
 import { caChangeFor, gunHexOf, shotOptions, spineLabel, spineToward, thPreview } from './game/ordnance';
 import { DirectorPicker, GunComposer } from './panels/GunComposer';
 import type { SmokeThrow } from '@asl/rules';
-import { CONCEAL_RTPH_DECISION, LEADER_PTC_DECISION, ONCE_DR_DECISION, UNKNOWN_DEF_ID, actionIllegal, onceDrRules, ordnanceWeaponIllegal, banzaiSteps, banzaiState, banzaiWindowsPending, concealRtphUnits, concealmentActive, declareIllegal as banzaiIllegal, dcChargeOptions, isJapanese, obConcealment, redactState } from '@asl/rules';
-import { BoardView, type BoardOverlay, type FireHex, type FortifiedHex, type HexBadge, type HexControl, type Placement, type RubbleHex } from './board/BoardView';
+import { CONCEAL_RTPH_DECISION, backblastFrom, mmc, squadEquivalents, dmChoiceIllegal, LEADER_PTC_DECISION, ONCE_DR_DECISION, UNKNOWN_DEF_ID, actionIllegal, onceDrRules, ordnanceWeaponIllegal, banzaiSteps, banzaiState, banzaiWindowsPending, concealRtphUnits, concealmentActive, declareIllegal as banzaiIllegal, dcChargeOptions, isJapanese, obConcealment, redactState } from '@asl/rules';
+import { counterTerrainIllegal, defaultFortPlacement, fortArea, fortCounters, fortKindName, fortPlaceIllegal, fortPools, fortSetupIllegal, fortificationView, fortificationsParams, hipIllegal, isPillboxLoc, roadblockExtension, type FortPlacement } from '@asl/rules';
+import { BoardView, type BoardOverlay, type FireHex, type FortHex, type FortifiedHex, type HexBadge, type HexControl, type Placement, type RubbleHex } from './board/BoardView';
 import { ActionWheel, action, group, type WheelItem } from './board/ActionWheel';
 import { StackPeek, stackIn } from './board/StackPeek';
 import { NATION, PHASE_NAME, defLabel, describeEvents, hexLabel, humanize, phaseSections, pieceLabel } from './game/describe';
 import { LogText } from './game/LogText';
 import { RofChoice, type RofChoiceItem } from './panels/RofChoice';
-import { fireLeaders, fireSelectable } from './game/fireSelection';
+import { blindFireOffered, fireLeaders, fireSelectable } from './game/fireSelection';
 import { endPhaseWarning, type EndPhaseWarning } from './game/endPhaseGuard';
 import { Modal } from './ui/Modal';
 import { ErrorBoundary } from './ui/ErrorBoundary';
 import type { MapPoint, Session } from './game/session';
 import { SetupTray, type TrayGroup } from './panels/SetupTray';
+import { FortTray, fortMarker, type FortSpec } from './panels/FortTray';
 import { useScatterPlanner } from './panels/ScatterPlanner';
 import { useEntryGroupsPicker } from './panels/EntryGroupsPicker';
 import { useEntryTurnsPicker } from './panels/EntryTurnsPicker';
@@ -278,6 +282,21 @@ const MOVE_GOES_ON = new Set(['move.step', 'move.manhandle', 'move.smoke', 'move
 const PING_COLORS = [0xff2fd6, 0x19e8ff, 0xfff23a];
 
 /** The game screen; a render error anywhere in it shows a notice to try again or reload, not a blank page. */
+/** What a side forfeits by confirming its setup with counters unplaced (the `fortifications` special rule): one line per pool. */
+function fortLeftovers(left: ReturnType<typeof fortPools>): string[] {
+  const out: string[] = [];
+  if (left.foxholes > 0) out.push(`${left.foxholes} squad${left.foxholes === 1 ? '' : 's'} of foxhole capacity`);
+  if (left.trenches > 0) out.push(`${left.trenches} trench counter${left.trenches === 1 ? '' : 's'}`);
+  if (left.ditch > 0) out.push(`${left.ditch} A-T Ditch counter${left.ditch === 1 ? '' : 's'}`);
+  if (left.wire > 0) out.push(`${left.wire} Wire counter${left.wire === 1 ? '' : 's'}`);
+  if (left.roadblocks > 0) out.push(`${left.roadblocks} roadblock${left.roadblocks === 1 ? '' : 's'}`);
+  if (left.pillboxes.length > 0) out.push(`${left.pillboxes.length} pillbox${left.pillboxes.length === 1 ? '' : 'es'}`);
+  if (left.factors > 0) out.push(`${left.factors} A-P minefield factor${left.factors === 1 ? '' : 's'}${left.factors < 6 ? (left.at && left.factors >= 3 ? ' (enough for A-T mines only)' : ' (too few for a minefield)') : ''}`);
+  if (left.known > 0) out.push(`${left.known} Known minefield factor${left.known === 1 ? '' : 's'}${left.known < 6 ? ' (too few for a minefield)' : ''}`);
+  if (left.dummies > 0) out.push(`${left.dummies} Dummy Minefield counter${left.dummies === 1 ? '' : 's'}`);
+  return out;
+}
+
 export function GameScreen(props: Props) {
   return (
     <ErrorBoundary what="the game screen">
@@ -582,12 +601,13 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
    * Placing a DC into `hex` (SK4 4.3, ASLRB A23.3): the action, or null when the moving stack carries none. An enemy AFV
    * there is the target (a PAATC first); right-click the hex to place it in the hex instead.
    */
-  const dcPlacement = (hex: HexId): (Omit<Action, 'side' | 'decisionId'> & { vehicle?: PieceId }) | null => {
+  const dcPlacement = (target: string): (Omit<Action, 'side' | 'decisionId'> & { vehicle?: PieceId }) | null => {
     if (!ms) return null;
     const dc = ms.units.flatMap((u) => swHeldBy(state, u)).find((s) => (defOf(env, s) as { type?: string }).type === 'DC');
     if (!dc) return null;
+    const hex = hexOfLoc(target);
     const afv = Object.values(state.pieces).find((p) => p.side !== owner && p.loc.kind === 'hex' && p.loc.hex === hex && vehicleDef(env, p) && !p.tags['wreck']);
-    return { type: 'move.placeDc', dc: dc.id, target: hex, ...(afv ? { vehicle: afv.id } : {}) };
+    return { type: 'move.placeDc', dc: dc.id, target, ...(afv ? { vehicle: afv.id } : {}) };
   };
   const throwSmoke = (plan: SmokeThrow[]) => {
     setMode('normal');
@@ -705,8 +725,24 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
   const [pendingConcealed, setPendingConcealed] = useState<Set<PieceId>>(new Set());
   // Vehicles dug in at setup where a special rule allows it (S28 SSR 3, `dig-in`).
   const [pendingDugIn, setPendingDugIn] = useState<Set<PieceId>>(new Set());
+  // Fortification counters (full ASL A12.33, B26–B30; the `fortifications` special rule): the counters put down in this
+  // draft, the tray tile in hand, the placed counter (by index) whose hexside or Covered Arc ring is open on the map,
+  // the units to set up beneath their hex's foxhole/trench/Wire, and the forfeit question before the counters are sent.
+  const [pendingForts, setPendingForts] = useState<FortPlacement[]>([]);
+  const [pickedFort, setPickedFort] = useState<FortSpec | null>(null);
+  const [fortRingFor, setFortRingFor] = useState<number | null>(null);
+  const [pendingBeneath, setPendingBeneath] = useState<Set<PieceId>>(new Set());
+  const [fortConfirm, setFortConfirm] = useState<string[] | null>(null);
+  /** The unit setup to send once the counters have been accepted (one Confirm sends both). */
+  const afterFort = useRef<Omit<Action, 'side' | 'decisionId'> | null>(null);
   useEffect(() => {
     setPending({});
+    setPendingForts([]);
+    setPickedFort(null);
+    setFortRingFor(null);
+    setPendingBeneath(new Set());
+    setFortConfirm(null);
+    afterFort.current = null;
     setPicked(null);
     setSwAssign({});
     setPendingCa({});
@@ -717,6 +753,10 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
     setPendingDugIn(new Set());
     setCaFor(null);
   }, [placing?.id]);
+  /** The fortification counters this setup places (the `fortifications` special rule), and whether they are already with the engine. */
+  const fortRule = placing?.kind === 'setup' ? fortificationsParams(env, placing.owner) : null;
+  const fortLocked = !!placing && !!fortRule && fortCounters(env).some((c) => c.side === placing.owner);
+  const fortDraft = useMemo(() => (fortRule && !fortLocked ? pendingForts : []), [fortRule, fortLocked, pendingForts]);
   // A placement of a counter that is no longer there (a squad deployment undone) is dropped.
   useEffect(() => {
     if (Object.keys(pending).some((id) => !state.pieces[id])) setPending(Object.fromEntries(Object.entries(pending).filter(([id]) => !!state.pieces[id])));
@@ -967,10 +1007,45 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
           loc: swAssign[s.id] ? { kind: 'held', by: swAssign[s.id]! } : { kind: 'offboard', edge: 'setup' },
           ...(pendingCa[s.id] !== undefined ? { tags: { ...s.tags, ca: pendingCa[s.id]! } } : {}),
         };
-    return { ...base, pieces };
-  }, [placing, pending, swAssign, swTodo, vehicleTodo, pendingCe, pendingConcealed, theirDraft, state, statics, pendingCa, env, viewer]);
+    // Fortification counters put down in this draft stand on the board as placed ones would, and the units chosen to
+    // set up beneath their hex's counter take that position (full ASL B27.1, B26.4).
+    let ext = base.ext;
+    if (placing && fortDraft.length) {
+      const prev = (base.ext['asl.fortifications'] as { counters: unknown[] } | undefined) ?? { counters: [] };
+      ext = { ...base.ext, 'asl.fortifications': { ...prev, counters: [...prev.counters, ...fortDraft.map((c, i) => ({ ...c, id: `${placing.owner}.draft${i + 1}`, side: placing.owner }))] } };
+    }
+    if (placing && pendingBeneath.size) {
+      const ent = new Set(['foxhole', 'trench', 'ditch']);
+      const drafts = (ext['asl.fortifications'] as { counters: { hex: string; kind: string; side: string }[] } | undefined)?.counters ?? [];
+      for (const id of pendingBeneath) {
+        const p = pieces[id];
+        if (!p || p.loc.kind !== 'hex' || p.loc.sub) continue;
+        const here = drafts.filter((c) => c.hex === (p.loc as { hex: string }).hex && c.side === placing.owner);
+        const e = here.find((c) => ent.has(c.kind));
+        const w = here.find((c) => c.kind === 'wire');
+        if (!e && !w) continue;
+        pieces[id] = { ...p, loc: { ...p.loc, pos: { ...(e ? { ent: e.kind as 'foxhole' } : {}), ...(w ? { wire: 'beneath' as const } : {}) } } };
+      }
+    }
+    return { ...base, pieces, ext };
+  }, [placing, pending, swAssign, swTodo, vehicleTodo, pendingCe, pendingConcealed, theirDraft, state, statics, pendingCa, env, viewer, fortDraft, pendingBeneath]);
   /** The visible state as a query environment, for everything that lists or inspects what is on the board. */
   const shownEnv: QueryEnv = useMemo(() => engine.env(shown), [engine, shown]);
+  /** The fortification counters this viewer may see, draft ones included, for the board and the wheel (full ASL A12.33). */
+  const fortHexes = useMemo((): FortHex[] => {
+    if (statics.scenario.ruleset !== 'full-asl') return [];
+    return fortificationView(shownEnv, viewer).map((c) => ({
+      hex: c.hex,
+      kind: c.kind,
+      marker: fortMarker(c),
+      ...(c.hidden && !c.revealed ? { hidden: true } : {}),
+      ...(c.hexside !== undefined ? { hexside: c.hexside, extension: roadblockExtension(shownEnv, c) } : {}),
+      ...(c.ca !== undefined ? { ca: c.ca } : {}),
+      label: fortKindName(c),
+    }));
+  }, [shownEnv, viewer, statics]);
+  /** The counters of this player's own side in a hex, the draft's included (the wheel's entries while setting up). */
+  const fortificationsHereOf = (hex: HexId) => (placing ? fortificationView(shownEnv, placing.owner).filter((c) => c.hex === hex && c.side === placing.owner) : []);
   /** S70's Connection Location (SSR 2): a hidden hex, never drawn; its owner works it from the side panel. */
   const caves = cavesParams(env);
   const connection = caves?.connection ?? null;
@@ -981,7 +1056,7 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
       return;
     }
     const next = { ...pending, [id]: hex };
-    const err = placementIllegal(env, placing.owner, todo, next, true);
+    const err = placementIllegal(shownEnv, placing.owner, todo, next, true);
     setError(plain(err));
     if (!err) {
       setPending(next);
@@ -1015,6 +1090,45 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
       setSelected((s) => new Set([...s].filter((x) => x !== id)));
     }
   };
+  /** Put the fortification counter in hand down in `hex` (full ASL A12.33, B26–B30): hidden where the rule allows, a roadblock on the first road hexside, a pillbox facing the middle of the map, both then offered their ring. */
+  const placeFort = (spec: FortSpec, hex: HexId) => {
+    if (!placing || !fortRule || fortLocked) return;
+    const side = placing.owner;
+    const c: FortPlacement = { ...spec, hex, hidden: !(spec.kind === 'mines' && spec.mines?.known) };
+    if (c.kind === 'roadblock') {
+      const k = [0, 1, 2, 3, 4, 5].find((side) => !counterTerrainIllegal(env, { ...c, hexside: side }));
+      if (k === undefined) {
+        setError(plain(counterTerrainIllegal(env, { ...c, hexside: 0 })));
+        return;
+      }
+      c.hexside = k;
+    }
+    if (c.kind === 'pillbox') {
+      const hexes = [...statics.map.hexes()];
+      const mid = hexes[Math.floor(hexes.length / 2)]?.id;
+      c.ca = (mid && spineToward(env, hex, mid)) || 0;
+    }
+    // A-T mines on a paved road are placed in full view (B28.53).
+    if (c.kind === 'mines' && hipIllegal(env, c)) c.hidden = !c.hidden;
+    const err = fortPlaceIllegal(env, side, [...pendingForts, c]);
+    setError(plain(err));
+    if (err) return;
+    setPendingForts([...pendingForts, c]);
+    setPickedFort(null);
+    setFortRingFor(c.kind === 'roadblock' || c.kind === 'pillbox' ? pendingForts.length : null);
+    setSelectedHex(hex);
+  };
+  const unplaceFort = (i: number) => {
+    setPendingForts(pendingForts.filter((_, k) => k !== i));
+    if (fortRingFor === i) setFortRingFor(null);
+    setError(null);
+  };
+  const changeFort = (i: number, patch: Partial<FortPlacement>) => {
+    const next = pendingForts.map((c, k) => (k === i ? { ...c, ...patch } : c));
+    const err = placing ? fortPlaceIllegal(env, placing.owner, next) : null;
+    setError(plain(err));
+    if (!err) setPendingForts(next);
+  };
   /** Top placed counter in a hex (the one a drag or click picks up). */
   const placedAt = (hex: HexId) => {
     const here = todo.filter((p) => hexOfLoc(pending[p.id] ?? '') === hex);
@@ -1027,6 +1141,7 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
   };
   const autoPlace = () => {
     if (!placing) return;
+    if (fortRule && !fortLocked && pendingForts.length === 0) setPendingForts(defaultFortPlacement(env, placing.owner));
     const next = defaultPlacement(env, placing.owner, todo, pending);
     if (!next) {
       setError('Cannot fit the remaining units around the ones already placed');
@@ -1051,7 +1166,7 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
   };
   // Weapons in the tray, not yet given to a unit, stand nowhere (not with the carrier the card gave them).
   const swWhere = useMemo(() => ({ ...Object.fromEntries(swTodo.map((w) => [w.id, '-'])), ...swAssign }), [swTodo, swAssign]);
-  const setupError = placing ? plain(placementIllegal(env, placing.owner, todo, pending, false, swWhere) ?? swAssignmentIllegal(env, placing.owner, todo, swAssign) ?? reserveIllegal(env, placing.owner, todo, pending, swAssign)) : null;
+  const setupError = placing ? plain(placementIllegal(shownEnv, placing.owner, todo, pending, false, swWhere) ?? swAssignmentIllegal(env, placing.owner, todo, swAssign) ?? reserveIllegal(env, placing.owner, todo, pending, swAssign)) : null;
   // A card's deployment hexes with minimums by each (LMA9 SSR 1): how far the placements so far go.
   const anchors = useMemo(() => (placing ? setupAnchorProgress(env, placing.owner, pending, swWhere) : []), [placing, env, pending, swWhere]);
   // A reserve rule (SSR tactical reserve) lets this setup leave units behind to enter later.
@@ -1365,30 +1480,59 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
   const hiddenByRule = hiddenRule?.forces?.length && placing?.owner === hiddenRule.side ? compulsoryHidden(env, todo.map((p) => p.id), pending) : [];
   const hideable = (id: PieceId) => !!hiddenRule && !hiddenRule.forces?.length && placing?.owner === hiddenRule.side && !!pending[id] && !hideIllegal(env, id, hexOfLoc(pending[id]!), swAssign);
   const hiddenField = [...pendingHidden].filter(hideable).sort();
+  /** Squad equivalents of MMC hidden so far, against a hidden-units quota (SK4 8.1.8.5). */
+  const hiddenSe = squadEquivalents(env, hiddenField.map((id) => state.pieces[id]!).filter((p) => p && mmc(env, p)));
   // Concealment (SK4 8.3): OB counters, one per stack in Concealment Terrain; the engine conceals unseen units itself.
   const concealmentOn = concealmentActive(env) && !!placing && placing.kind === 'setup';
   const obConceal = concealmentOn ? obConcealment(env, placing!.owner) : { total: 0, used: 0 };
   const concealable = (id: PieceId) => concealmentOn && !!pending[id] && !!statics.map.hex(pending[id]!) && env.query('hex.concealmentTerrain', { hex: pending[id]! }, false) && !isSw(id) && !vehicleTodo.some((v) => v.id === id);
   const concealedField = [...pendingConcealed].filter(concealable).sort();
   const concealedStacks = new Set(concealedField.map((id) => pending[id]!)).size;
+  // Units beneath their hex's foxhole, trench or Wire (full ASL B27.1, B26.4): only those still placed where a counter of theirs is.
+  const beneathField = [...pendingBeneath].filter((id) => pending[id] && !isPillboxLoc(pending[id]!) && fortificationsHereOf(hexOfLoc(pending[id]!)).some((c) => c.kind !== 'mines' && c.kind !== 'roadblock' && c.kind !== 'pillbox')).sort();
+  const fortLeftOver = fortRule && !fortLocked ? fortLeftovers(fortPools(env, placing!.owner, pendingForts)) : [];
+  const fortBlocked = fortRule && !fortLocked ? plain(fortPlaceIllegal(env, placing!.owner, pendingForts)) : null;
+  const setupAction = placing
+    ? {
+        type: placing.kind === 'setup' ? 'setup.place' : 'setup.offboard',
+        placements: pending,
+        ...(Object.keys(swAssign).length ? { sw: swAssign } : {}),
+        ...(Object.keys(gunsField).length ? { guns: gunsField } : {}),
+        ...(Object.keys(vehiclesField).length ? { vehicles: vehiclesField } : {}),
+        ...(hiddenField.length ? { hidden: hiddenField } : {}),
+        ...(concealedField.length ? { concealed: concealedField } : {}),
+        ...(beneathField.length ? { beneath: beneathField } : {}),
+      }
+    : null;
+  /** One Confirm: the counters go first (`fort.place`), the units follow once they are accepted. */
+  const sendSetup = () => {
+    if (!placing || !setupAction) return;
+    if (fortRule && !fortLocked) {
+      afterFort.current = setupAction;
+      const err = run({ type: 'fort.place', counters: pendingForts }, true);
+      if (err) afterFort.current = null;
+      return;
+    }
+    run(setupAction);
+  };
+  useEffect(() => {
+    if (fortLocked && afterFort.current) {
+      const a = afterFort.current;
+      afterFort.current = null;
+      run(a);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fortLocked]);
   const confirmSetup = placing
     ? {
         label: 'Confirm setup',
         icon: '✔',
         blocked:
           setupError ??
+          fortBlocked ??
           (reserve ? null : setupLeft > 0 ? `${setupLeft} unit(s) still to place` : swLeft > 0 ? `${swLeft} weapon(s) still to place` : caLeft > 0 ? `${caLeft} Gun(s) still need a Covered Arc: click a segment of the ring around each (face…)` : null),
         ...(reserve && setupLeft > 0 ? { hint: `${setupLeft} unit(s) stay in reserve and enter on Turn ${reserve.turn}` } : {}),
-        onClick: () =>
-          run({
-            type: placing.kind === 'setup' ? 'setup.place' : 'setup.offboard',
-            placements: pending,
-            ...(Object.keys(swAssign).length ? { sw: swAssign } : {}),
-            ...(Object.keys(gunsField).length ? { guns: gunsField } : {}),
-            ...(Object.keys(vehiclesField).length ? { vehicles: vehiclesField } : {}),
-            ...(hiddenField.length ? { hidden: hiddenField } : {}),
-            ...(concealedField.length ? { concealed: concealedField } : {}),
-          }),
+        onClick: () => (fortLeftOver.length ? setFortConfirm(fortLeftOver) : sendSetup()),
       }
     : null;
 
@@ -1609,9 +1753,17 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
    * placed): in Defensive First Fire an unmarked unit takes First Fire, one already marked First Fire
    * (Subsequent First Fire) or Final Fire (FPF) ends Final Fire (SK1 3.3.1).
    */
+  // A leader marked First Fire directing only weapons not yet marked (a MG's Multiple ROF shot) stays First Fire: he
+  // "can direct the fire of a MG as many times as the MG can fire" (ASLRB A7.53).
+  const directsRofOnly = (id: PieceId) =>
+    directors.includes(id) &&
+    [...selected].filter((x) => x !== id && !directors.includes(x)).every((x) => {
+      const p = state.pieces[x];
+      return !!p && !p.tags['fire'] && defOf(env, p).kind === 'sw';
+    });
   const declMarkerOf = (id: PieceId): string | null =>
     decision?.kind === 'firstFire'
-      ? state.pieces[id]?.tags['fire'] ? 'Final' : 'First'
+      ? state.pieces[id]?.tags['fire'] && !(state.pieces[id]?.tags['fire'] === 'first' && directsRofOnly(id)) ? 'Final' : 'First'
       : phase === 'PFPh' ? 'FirePrep' : phase === 'AFPh' ? 'FireAdv' : phase === 'DFPh' ? 'Final' : null;
   // eslint-disable-next-line react-hooks/exhaustive-deps
   /** The hexside a Snap Shot at the moving stack in `loc` may be traced to now (full ASL, ASLRB A8.15), or null. */
@@ -1753,7 +1905,7 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
   /** The ammunition a lined-up Gun shot announces (its default when none is), for the panel. */
   const gunAmmoInfo = (gs: { gun: PieceId; targetType: TargetType; ammo?: AmmoKind }): { ammo: string | null; depletion?: number } => {
     const g = state.pieces[gs.gun];
-    const d = g ? ordnanceOf(env, g) : null;
+    const d = g ? shotWeaponOf(env, g) : null;
     if (!g || !d || gs.targetType === 'IFE') return { ammo: null };
     const kind = gs.ammo ?? defaultAmmo(env, g, d);
     const dep = ammoStatus(env, g, d, kind).depletion;
@@ -1801,13 +1953,17 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
   /** A vehicle's MGs that could still fire: its fixed-mount MG pieces without a fire marker or malfunction. */
   const vehicleMgsReady = (v: Piece): Piece[] => swHeldBy(state, v.id).filter((w) => (defOf(env, w) as { kind: string; fixed?: boolean }).fixed && !w.tags['fire'] && !w.tags['malf'] && !w.tags['mgDisabled']);
   const mgLabel = (mgs: Piece[]) => mgs.map((w) => `${(defOf(env, w) as { type: string }).type} ${(defOf(env, w) as { fp: number }).fp}`).join(' + ');
-  /** Guns of the acting side in a hex, manned and able to fire now (the wheel offers each its target types). */
+  /** An enemy AFV the acting side can see: only then is an Infantry MG offered as ordnance (SK4 4.1). */
+  const enemyAfvInSight =
+    !!owner &&
+    Object.values(state.pieces).some((p) => p.side !== owner && p.loc.kind === 'hex' && vehicleDef(env, p) && !p.tags['wreck'] && env.query('piece.visibleTo', { piece: p.id, viewer: owner }, true));
+  /** Guns of the acting side in a hex, manned and able to fire now (the wheel offers each its target types); MGs too while an AFV is in sight. */
   const gunsFireable = (hex: HexId): Piece[] =>
     owner
       ? [
           ...personnelInHex(env, hex, owner)
             .flatMap((u) => swHeldBy(state, u.id))
-            .filter((w) => ordnanceOf(env, w) && !w.tags['malf']),
+            .filter((w) => (ordnanceOf(env, w) || (mgAsOrdnance(env, w) && enemyAfvInSight)) && !w.tags['malf']),
           // A vehicle's Main Armament fires like a Gun (SK3).
           ...Object.values(state.pieces).filter((p) => p.side === owner && p.loc.kind === 'hex' && p.loc.hex === hex && vehicleDef(env, p) && !p.tags['wreck'] && !p.tags['malf'] && !p.tags['maDisabled'] && ordnanceOf(env, p)),
         ]
@@ -1891,6 +2047,11 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
     // Choosing a DC target the question is the placement, not a step: a DC goes into an enemy-occupied hex the stack
     // may not enter (SK4 4.3, ASLRB A23.3), for the MF entering it would cost.
     if (mode === 'dc') {
+      // Several Locations there (a Cave and its hill): the click asks which.
+      const locs = adjacentLocs(env, moveLoc(ms)!).filter((l) => hexOfLoc(l) === hoverHex);
+      // (locName is declared further down the component: this memo runs before it.)
+      const where = (l: string) => (isCaveLoc(l) ? `the Cave in ${hexLabel(hexOfLoc(l))}` : locs.some(isCaveLoc) ? 'the hill' : levelOfLoc(l) ? `level ${levelOfLoc(l)}` : 'the ground');
+      if (locs.length > 1 && dcPlacement(hoverHex) && !dcPlacement(hoverHex)!.vehicle) return { text: `Place the DC: click to choose ${locs.map(where).join(' or ')}`, barred: false };
       const place = dcPlacement(hoverHex);
       if (!place) return null;
       const err = session.check(place);
@@ -2079,6 +2240,31 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
         }));
         return { controls, selectedHex: facingHex, highlights, selectedPieces: new Set([caFor]), los: null };
       }
+      // A placed roadblock's hexside or pillbox's Covered Arc (full ASL B29.1, B30.1): handles on the map.
+      const ringed = fortRingFor !== null ? pendingForts[fortRingFor] : undefined;
+      if (ringed && (ringed.kind === 'roadblock' || ringed.kind === 'pillbox')) {
+        const idx = fortRingFor!;
+        const controls: HexControl[] = [0, 1, 2, 3, 4, 5].map((k) => {
+          if (ringed.kind === 'roadblock') {
+            const err = counterTerrainIllegal(env, { ...ringed, hexside: k });
+            return { id: `rb-${k}`, hex: ringed.hex, angle: hexsideScreenAngle(k, rotation), dist: 0.5, glyph: '▬', tag: 'ROAD', tone: 'turret' as const, active: ringed.hexside === k, disabled: !!err, hint: err ? plain(err)! : `Roadblock across this hexside (ASLRB B29.1)`, onClick: () => { if (!err) { changeFort(idx, { hexside: k }); setFortRingFor(null); } } };
+          }
+          return { id: `pb-${k}`, hex: ringed.hex, spine: k, glyph: '▲', tone: 'hull' as const, active: ringed.ca === k, arc: statics.scenario.sides.find((x) => x.side === placing.owner)?.nationality, hint: `Pillbox Covered Arc ${spineLabel(env, ringed.hex, k)} (ASLRB B30.1)`, onClick: () => { changeFort(idx, { ca: k }); setFortRingFor(null); } };
+        });
+        return { controls, selectedHex: ringed.hex, highlights, selectedPieces: new Set<PieceId>(), los: null };
+      }
+      if (pickedFort && fortRule) {
+        // Green = where the counter in hand may go (terrain, one per hex, the area; a roadblock needs a road hexside there).
+        const area = fortArea(env, placing.owner);
+        const probe = (hex: HexId): FortPlacement => ({ ...pickedFort, hex, hidden: !(pickedFort.kind === 'mines' && pickedFort.mines?.known), ...(pickedFort.kind === 'pillbox' ? { ca: 0 } : {}) });
+        for (const h of area) {
+          const c = probe(h);
+          if (c.kind === 'mines' && hipIllegal(env, c)) c.hidden = !c.hidden;
+          const ok = c.kind === 'roadblock' ? [0, 1, 2, 3, 4, 5].some((k) => !fortPlaceIllegal(env, placing.owner, [...pendingForts, { ...c, hexside: k }])) : !fortPlaceIllegal(env, placing.owner, [...pendingForts, c]);
+          if (ok) highlights.set(h, GREEN);
+        }
+        return { selectedHex, highlights, selectedPieces: new Set<PieceId>(), los: null, badges: anchorBadges };
+      }
       if (picked && isSw(picked)) {
         // Green = hexes holding a placed unit of the weapon's group.
         for (const h of new Set(Object.values(pending))) if (swHolderAt(picked, h)) highlights.set(h, GREEN);
@@ -2090,7 +2276,7 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
       const green = new Set<HexId>();
       for (const p of candidates)
         for (const h of placementHexes(env, p))
-          if (!green.has(h) && !placementIllegal(env, placing.owner, todo, { ...pending, [p.id]: h }, true)) {
+          if (!green.has(h) && !placementIllegal(shownEnv, placing.owner, todo, { ...pending, [p.id]: h }, true)) {
             green.add(h);
             highlights.set(h, GREEN);
           }
@@ -2204,11 +2390,14 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
     if (mode === 'smoke') for (const t of smokePlan) badges.push({ hex: t.target, text: `smoke: ${pieceLabel(env, state.pieces[t.unit]).replace(/^\S+ /, '')}` });
     // Choosing a DC target: the adjacent hexes the DC may be placed in (amber), enemy-held ones included (SK4 4.3), and
     // not the steps, as for Smoke.
-    if (mode === 'dc' && ms?.hex)
+    if (mode === 'dc' && ms?.hex) {
+      // Every Location of the hex the stack is ADJACENT to counts (a Cave as well as its hill, S70 SSR 2).
+      const near = adjacentLocs(env, moveLoc(ms)!);
       for (const h of statics.map.neighbors(ms.hex)) {
-        const place = dcPlacement(h);
-        if (place && !session.check(place)) highlights.set(h, AMBER);
+        const locs = near.filter((l) => hexOfLoc(l) === h);
+        if ((locs.length ? locs : [h]).some((l) => { const place = dcPlacement(l); return !!place && !session.check(place); })) highlights.set(h, AMBER);
       }
+    }
     for (const a of legal) {
       // Full ASL: the stairs of the stack's own hex are a wheel entry, not a green hex (ASLRB B23.4).
       // A Bypass is a corner handle, not a green hex; the obstacle a stack in Bypass may enter is green (full ASL).
@@ -2303,6 +2492,16 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
         setCaFor(null);
         if (hex === facingHexOf(caFor)) return;
       }
+      if (fortRingFor !== null) {
+        const at = pendingForts[fortRingFor]?.hex;
+        setFortRingFor(null);
+        if (hex === at) return;
+      }
+      // A fortification counter in hand goes down here (full ASL).
+      if (pickedFort) {
+        placeFort(pickedFort, hex);
+        return;
+      }
       if (picked) {
         if (trayPending[picked] === hex) setPicked(null);
         else place(picked, hex);
@@ -2384,6 +2583,26 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
         setMode('normal');
       }
       if (mode === 'dc') {
+        // A hex with more than one Location the stack is ADJACENT to (S70's hill and its Cave, a building's levels): the
+        // wheel asks which one the DC goes into; a click alone would place it on the ground/hill (S70 SSR 2: the Cave is
+        // "a different hex" for all but Area Fire).
+        const here = ms.hex ? adjacentLocs(env, moveLoc(ms)!).filter((l) => hexOfLoc(l) === hex) : [];
+        if (e.screen && here.length > 1 && !dcPlacement(hex)?.vehicle) {
+          setMode('normal');
+          setPeek(null);
+          setSelectedHex(hex);
+          setWheel({
+            hex,
+            at: e.screen,
+            title: `DC on ${hexLabel(hex)}`,
+            items: here.map((l) => {
+              const p = dcPlacement(l)!;
+              const why = plain(session.check(p));
+              return action(isCaveLoc(l) ? `DC into ${locName(l)}` : `DC on ${hexLabel(hex)} (${here.some(isCaveLoc) ? 'the hill' : locName(l)})`, () => run(p, true), { icon: '✸', disabled: !!why, hint: why ?? 'Place the DC in that Location: it attacks everything there in the Advancing Fire Phase' });
+            }),
+          });
+          return;
+        }
         const placement = dcPlacement(hex);
         const dc = ms.units.flatMap((u) => swHeldBy(state, u)).find((s) => (defOf(env, s) as { type?: string }).type === 'DC');
         const afv = !!placement?.vehicle;
@@ -2725,21 +2944,28 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
    * What the Connection's owner may do from the side panel (the Connection is on no board to click): start a move of
    * the units there (the selected ones, else all), step a stack that is there into a cave, advance or rout into one.
    */
-  function connectionActions(): { label: string; run: () => void; hint?: string }[] {
+  function connectionActions(): { label: string; run: () => void; hint?: string; disabled?: boolean }[] {
     if (!connection || !owner || decision?.kind !== 'phase') return [];
     const inside = Object.values(state.pieces).filter((p) => p.side === owner && p.loc.kind === 'hex' && p.loc.hex === connection && !isWeaponDef(defOf(env, p))).map((p) => p.id);
     const ticked = inside.filter((id) => selected.has(id));
     const units = ticked.length ? ticked : inside;
-    const out: { label: string; run: () => void; hint?: string }[] = [];
-    if (phase === 'MPh' && !ms && units.length && session.check({ type: 'move.start', units }) === null)
-      out.push({ label: `Move ${units.length > 1 ? `these ${units.length}` : pieceLabel(env, state.pieces[units[0]!])} out…`, run: () => run({ type: 'move.start', units }, true) });
+    const out: { label: string; run: () => void; hint?: string; disabled?: boolean }[] = [];
+    // Refused moves and advances are still listed, greyed with the reason (a full Cave: G11.4 stacking), so the player
+    // is not left wondering why nothing is offered.
+    if (phase === 'MPh' && !ms && units.length) {
+      const why = plain(session.check({ type: 'move.start', units }));
+      out.push({ label: `Move ${units.length > 1 ? `these ${units.length}` : pieceLabel(env, state.pieces[units[0]!])} out…`, run: () => run({ type: 'move.start', units }, true), ...(why ? { disabled: true, hint: why } : {}) });
+    }
     if (ms?.hex === connection) {
       for (const a of legal.filter((x) => x.type === 'move.step')) out.push({ label: `Into ${locName(a['to'] as string)} · all MF`, run: () => run(a, true), hint: 'They emerge concealed (S70 SSR 2)' });
       if (legal.some((a) => a.type === 'move.end')) out.push({ label: 'End move', run: () => run({ type: 'move.end' }) });
       if (session.check({ type: 'move.cancel' }) === null) out.push({ label: 'Cancel move', run: () => run({ type: 'move.cancel' }), hint: 'No MF spent yet: they may still move later this phase' });
     }
     if (phase === 'APh' && units.length)
-      for (const to of adjacentLocs(env, connection)) if (session.check({ type: 'advance', units, to }) === null) out.push({ label: `Advance into ${locName(to)}`, run: () => run({ type: 'advance', units, to }) });
+      for (const to of adjacentLocs(env, connection)) {
+        const why = plain(session.check({ type: 'advance', units, to }));
+        out.push({ label: `Advance into ${locName(to)}`, run: () => run({ type: 'advance', units, to }), ...(why ? { disabled: true, hint: why } : {}) });
+      }
     if (phase === 'RtPh')
       for (const a of legal.filter((x) => x.type === 'rout.step' && inside.includes(x['unit'] as string) && !x['lowCrawl'])) out.push({ label: `Rout ${pieceLabel(env, state.pieces[a['unit'] as string])} into ${locName(a['to'] as string)}`, run: () => run(a, true) });
     return out;
@@ -2780,11 +3006,12 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
             hint: pendingCa[g.id] === undefined ? 'The Gun needs a Covered Arc: pick a hexspine on the map' : `Covered Arc: ${spineLabel(env, hex, pendingCa[g.id]!)} · pick a hexspine on the map`,
           }),
         );
-        if (hipAllowed(g.id) && !hiddenByRule.some((id) => swAssign[g.id] === id))
+        // Where a special rule lets this stack set up hidden, its one "Set up hidden" entry covers the Gun too (below).
+        if (hipAllowed(g.id) && !hiddenByRule.some((id) => swAssign[g.id] === id) && !todo.some((p) => hexOfLoc(pending[p.id] ?? '') === hex && hideable(p.id)))
           items.push(action(pendingHip.has(g.id) ? 'Set up in the open' : 'Hidden Initial Placement', () => toggleHip(g.id), { icon: '?', active: pendingHip.has(g.id), hint: 'The Gun and its crew stay off the board until they fire, move or are found (SK4 6.4)' }));
       }
-      // Full ASL: units placed in a building hex with upper levels may set up on any of them (ASLRB A2.8, B23.42).
-      const levels = statics.map.hex(hex) ? locationsOf(env, hex) : [];
+      // Full ASL: units placed in a building hex with upper levels may set up on any of them (ASLRB A2.8, B23.42), and in a pillbox of their side (B30.1).
+      const levels = statics.map.hex(hex) ? locationsOf(shownEnv, hex).filter((l) => !isPillboxLoc(l) || fortificationsHereOf(hex).some((c) => c.kind === 'pillbox')) : [];
       if (levels.length > 1) {
         const placedHere = todo.filter((p) => hexOfLoc(pending[p.id] ?? '') === hex && !isVehiclePiece(p.id));
         const chosenHere = placedHere.filter((p) => selected.has(p.id));
@@ -2793,22 +3020,30 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
           const who = movers.filter((p) => pending[p.id] !== loc);
           if (!who.length) continue;
           const next = { ...pending, ...Object.fromEntries(who.map((p) => [p.id, loc])) };
-          const err = plain(placementIllegal(env, placing.owner, todo, next, true));
+          const pb = isPillboxLoc(loc);
+          const pbCap = pb ? (fortificationsHereOf(hex).find((c) => c.kind === 'pillbox')?.pillbox?.capacity ?? 1) : 0;
+          const err = plain(placementIllegal(shownEnv, placing.owner, todo, next, true) ?? (pb || levels.some(isPillboxLoc) ? fortSetupIllegal(shownEnv, placing.owner, { type: 'setup.place', side: placing.owner, decisionId: placing.id, placements: next, beneath: [...pendingBeneath].filter((id) => next[id] && !isPillboxLoc(next[id]!)) }) : null));
           const lv = levelOfLoc(loc);
           const cave = isCaveLoc(loc);
           items.push(
-            action(cave ? 'Set up in the Cave' : lv ? `Set up at level ${lv}` : levels.some(isCaveLoc) ? 'Set up on the hill' : 'Set up on the ground', () => { setPending(next); setError(null); }, {
-              icon: cave ? '◒' : lv ? '▲' : '▼',
+            action(cave ? 'Set up in the Cave' : pb ? `Set up in the pillbox (room for ${pbCap} squad${pbCap === 1 ? '' : 's'})` : lv ? `Set up at level ${lv}` : levels.some(isCaveLoc) ? 'Set up on the hill' : levels.some(isPillboxLoc) ? 'Set up outside the pillbox' : 'Set up on the ground', () => { setPending(next); setError(null); }, {
+              icon: cave ? '◒' : pb ? '▣' : lv ? '▲' : '▼',
               disabled: !!err,
-              hint: err ?? `${who.length === 1 ? pieceLabel(env, who[0]) : `These ${who.length} units`} ${cave ? 'in the Cave Location, under the Cave counter (+2 TEM; S70 SSR 2)' : lv ? `on level ${lv} of the building (Level counter, ASLRB B23.421)` : 'on the ground level'}; tick units in the stack card to move only some`,
+              hint: err ?? `${who.length === 1 ? pieceLabel(env, who[0]) : `These ${who.length} units`} ${cave ? 'in the Cave Location, under the Cave counter (+2 TEM; S70 SSR 2)' : pb ? `inside the pillbox, a Location of its own (ASLRB B30.1, B30.111)` : lv ? `on level ${lv} of the building (Level counter, ASLRB B23.421)` : 'on the ground level'}; tick units in the stack card to move only some`,
             }),
           );
         }
       }
-      // Units placed here that a special rule lets set up hidden (S23 SSR 1): the stack hides or shows as one.
-      const hideHere = todo.filter((p) => hexOfLoc(pending[p.id] ?? '') === hex && hideable(p.id));
-      if (hideHere.length) {
-        const all = hideHere.every((p) => pendingHidden.has(p.id));
+      // Units placed here that a special rule lets set up hidden (S23 SSR 1; the Japanese 10%, SK4 8.1.8.5): the stack hides or
+      // shows as one, with one entry. A Gun in it that may use HIP (SK4 6.4) hides by that, its crew with it, at no cost
+      // to the rule's allowance; the other units by the rule.
+      const hipGunsHere = gunTodo.filter((g) => swHexes[g.id] === hex && hipAllowed(g.id) && !hiddenByRule.some((id) => swAssign[g.id] === id));
+      const hipCrews = new Set(hipGunsHere.map((g) => swAssign[g.id]).filter(Boolean));
+      const ruleHere = todo.some((p) => hexOfLoc(pending[p.id] ?? '') === hex && hideable(p.id));
+      const hideHere = todo.filter((p) => hexOfLoc(pending[p.id] ?? '') === hex && hideable(p.id) && !hipCrews.has(p.id));
+      if (ruleHere && hideHere.length + hipGunsHere.length > 0) {
+        const all = hideHere.every((p) => pendingHidden.has(p.id)) && hipGunsHere.every((g) => pendingHip.has(g.id));
+        const quota = hiddenRule?.quota;
         items.push(
           action(all ? 'Set up in the open' : 'Set up hidden', () => {
             const next = new Set(pendingHidden);
@@ -2817,8 +3052,60 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
               else next.add(p.id);
             }
             setPendingHidden(next);
-          }, { icon: '?', active: all, hint: `${all ? 'Show' : 'Hide'} ${hideHere.length === 1 ? pieceLabel(env, hideHere[0]) : `these ${hideHere.length} units`} and their weapons: hidden units are placed on the map when they fire or move or an enemy unit enters or tries to enter the hex (${hiddenRule?.rule ?? 'SSR'})` }),
+            const hip = new Set(pendingHip);
+            for (const g of hipGunsHere) {
+              if (all) hip.delete(g.id);
+              else hip.add(g.id);
+            }
+            setPendingHip(hip);
+          }, {
+            icon: '?',
+            active: all,
+            hint: `${all ? 'Show' : 'Hide'} ${hideHere.length === 1 && !hipGunsHere.length ? pieceLabel(env, hideHere[0]) : 'this stack'} and its weapons: hidden units are placed on the map when they fire or move or an enemy unit enters or tries to enter the hex (${hiddenRule?.rule ?? 'SSR'})${hipGunsHere.length ? '; a Gun hides by HIP with its crew (SK4 6.4), free of the allowance' : ''}${quota !== undefined ? `; ${hiddenSe} of ${quota} squad equivalent${quota === 1 ? '' : 's'} hidden so far` : ''}`,
+          }),
         );
+      }
+      // Fortification counters here (full ASL): hide or show them, set a roadblock's hexside or a pillbox's arc, take one back;
+      // units placed here go beneath the foxhole, trench or Wire, or stay on top (B27.1, B27.51, B26.4).
+      if (fortRule) {
+        const here = pendingForts.map((c, i) => ({ c, i })).filter(({ c }) => c.hex === hex);
+        for (const { c, i } of here) {
+          const name = fortKindName(c);
+          const mines = c.kind === 'mines';
+          if (!fortLocked) {
+            items.push(
+              action(c.hidden ? `${name}: set up in the open` : `${name}: set up hidden`, () => changeFort(i, { hidden: !c.hidden }), {
+                icon: '?',
+                active: c.hidden,
+                disabled: mines,
+                hint: mines ? (c.mines?.known ? 'A Known or Dummy minefield is placed on the board (ASLRB B28.45, B28.47)' : 'A minefield is recorded, never on the board until it attacks (ASLRB B28.1)') : c.hidden ? 'Place it on the board for all to see' : `Hidden until a Good Order enemy unit has a LOS to it within 16 hexes (at any range outside Concealment Terrain), a unit in it loses concealment, or its TEM is claimed (ASLRB A12.33)`,
+              }),
+            );
+            if (c.kind === 'roadblock') items.push(action('Roadblock: choose the hexside…', () => setFortRingFor(i), { icon: '▬', hint: 'The road hexside it obstructs: pick one on the map (ASLRB B29.1)' }));
+            if (c.kind === 'pillbox') items.push(action('Pillbox: face toward…', () => setFortRingFor(i), { icon: '◠', hint: `Covered Arc: ${c.ca !== undefined ? spineLabel(env, hex, c.ca) : 'none yet'} · pick a hexspine on the map (ASLRB B30.1)` }));
+            items.push(action(`Take the ${name} back`, () => unplaceFort(i), { icon: '↩', hint: 'Back to the tray' }));
+          }
+        }
+        const cover = fortificationsHereOf(hex).find((c) => c.kind === 'foxhole' || c.kind === 'trench' || c.kind === 'ditch') ?? fortificationsHereOf(hex).find((c) => c.kind === 'wire');
+        const unitsHere = todo.filter((p) => pending[p.id] === hex && !isSw(p.id) && !vehicleTodo.some((v) => v.id === p.id));
+        if (cover && unitsHere.length) {
+          const chosen = unitsHere.filter((p) => selected.has(p.id));
+          const who = chosen.length ? chosen : unitsHere;
+          const all = who.every((p) => pendingBeneath.has(p.id));
+          const next = new Set(pendingBeneath);
+          for (const p of who) if (all) next.delete(p.id);
+          else next.add(p.id);
+          const err = all ? null : plain(fortSetupIllegal(shownEnv, placing.owner, { type: 'setup.place', side: placing.owner, decisionId: placing.id, placements: pending, beneath: [...next].filter((id) => pending[id] && !isPillboxLoc(pending[id]!)) }));
+          const where = cover.kind === 'wire' ? 'beneath the Wire' : cover.kind === 'foxhole' ? `in the foxhole (room for ${cover.capacity ?? 1} squad${(cover.capacity ?? 1) === 1 ? '' : 's'})` : `beneath the ${fortKindName(cover)}`;
+          items.push(
+            action(all ? (cover.kind === 'wire' ? 'Set up on top of the Wire' : `Set up on top of the ${fortKindName(cover)}`) : `Set up ${where}`, () => { setPendingBeneath(next); setError(null); }, {
+              icon: all ? '▴' : '▾',
+              active: all,
+              disabled: !!err,
+              hint: err ?? `${who.length === 1 ? pieceLabel(env, who[0]) : `These ${who.length} units`} ${all ? 'on top of the counter, outside it' : where} (ASLRB ${cover.kind === 'wire' ? 'B26.4' : cover.kind === 'foxhole' ? 'B27.1, B27.12' : 'B27.51'}); tick units in the stack card to move only some`,
+            }),
+          );
+        }
       }
       // Concealment (SK4 8.3): the OB's counters go on stacks set up in Concealment Terrain, one per stack.
       if (concealmentOn) {
@@ -3247,10 +3534,10 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
         const turn = caChangeFor(env, gunShot.gun, hex);
         items.push(action(turn !== null ? 'Turn the Gun and fire at this hex' : 'Fire at this hex', () => fireGunAt(hex), { icon: '✦', hint: turn !== null ? 'The target is outside the Covered Arc: the Gun turns first (To Hit DRM)' : 'Roll To Hit against this hex' }));
         items.push(action('Preview shot', () => setTarget(hex), { icon: '◎', active: target === hex, hint: 'Show the To Hit number and DRM in the panel first' }));
-      } else if (declared && !enemyHere && decision.kind === 'phase' && (phase === 'PFPh' || phase === 'DFPh' || phase === 'AFPh')) {
+      } else if (declared && !enemyHere && decision.kind === 'phase' && (phase === 'PFPh' || phase === 'DFPh' || phase === 'AFPh') && blindFireOffered(shownEnv, hex, owner)) {
         // Blind fire at a hex where no enemy is seen: a hidden unit there is attacked as Area Fire and revealed if
         // affected (SK4 6.4; ASLRB A12.13 "reveal the unit if affected"). Offered at every such hex alike, so it tells
-        // nothing about what may be hidden.
+        // nothing about what may be hidden. Not at a hex holding the firer's own units: nothing hidden can be there.
         items.push(action('Fire at this hex (no enemy seen)', () => fireAt(hex), { icon: '✦', hint: 'Area Fire at a hex where you see no enemy: anything hidden there is attacked at half FP and revealed if affected (SK4 6.4); otherwise the fire is spent' }));
       } else if (enemyHere && declared) {
         // Full ASL: a hex with enemy units on more than one level is fired at one Location at a time (ASLRB A2.8, A7.3).
@@ -3272,7 +3559,8 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
         for (const u of unitsHere.filter((p) => p.side === owner && !vehicleDef(env, p) && ['squad', 'hs', 'crew', 'leader'].includes(defOf(env, p).kind) && defOf(env, p).nationality === 'ge')) {
           const why = pfMode ? plain(pfUnitIllegal(env, owner, u.id, pfMode)) : 'Not a fire phase';
           const uname = pieceLabel(env, u).replace(/^\S+ /, '');
-          const inBuilding = !!statics.map.hex(hex)?.buildingId;
+          // From inside a building a PF takes the Backblast or the +2 To Hit DRM; not from a PTO hut (SK4 4.4.3, 8.2.1).
+          const inBuilding = backblastFrom(env, hex);
           const line = (targetType: 'VTT' | 'ITT', backblast?: boolean) => () => {
             setSelectedHex(hex);
             setSelected(new Set([u.id]));
@@ -3297,7 +3585,9 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
       // Guns here that can shoot: each by target type, and as Intensive Fire once it has lost ROF.
       if (!declared)
         for (const g of gunsFireable(hex)) {
-          const name = pieceLabel(env, g).replace(/^\S+ /, '');
+          // An Infantry MG fires as ordnance only at an AFV (SK4 4.1): its entry says so.
+          const mgShot = !ordnanceOf(env, g);
+          const name = pieceLabel(env, g).replace(/^\S+ /, '') + (mgShot ? ' at a vehicle' : '');
           // Every Target Type × ammunition the counter allows; the ones the Gun cannot use now say why.
           const fired = !!g.tags['fire'];
           const mode = decision.kind === 'firstFire' ? gunFirstFireMode(env, { weapon: g.id, target: ms?.hex ?? '', targetType: 'ITT' }) : FIRE_MODE[phase]!;
@@ -3307,7 +3597,8 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
           // A single way to fire (a light Mortar's HE on the Area Target Type) needs no menu of one: the entry fires it.
           const fireMenu = (label: string, choices: WheelItem[], hint: string): WheelItem => {
             const only = choices.length === 1 ? choices[0]! : null;
-            return only?.kind === 'action' ? { ...only, label: `${label} · ${only.label}`, icon: '✦', hint: only.hint ?? hint } : group(`${label}…`, choices, { icon: '✦', hint });
+            // A MG's one shot is already named by its entry ("Fire LMG at a vehicle").
+            return only?.kind === 'action' ? { ...only, label: mgShot ? label : `${label} · ${only.label}`, icon: '✦', hint: only.hint ?? hint } : group(`${label}…`, choices, { icon: '✦', hint });
           };
           // A weapon that cannot fire at all now (a Mortar or Gun that moved, in the AFPh; malfunctioned; its crew broken):
           // the entry is greyed with the reason, rather than leading through the shot to a refusal.
@@ -3316,7 +3607,7 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
           // done for the phase, and its holder's own FP is offered by the stack's Fire (SK4 4.4 LATW To Hit Example).
           const holder = g.loc.kind === 'held' ? state.pieces[g.loc.by] : undefined;
           const ownFp = holder && !fireMarker(holder) && !holder.tags['ownFpForfeit'] ? 'the unit holding it may still fire its own FP' : 'the unit holding it has fired its own FP this phase too';
-          const swDone = fired && !!ordnanceOf(env, g)?.light ? `The ${name} has fired this phase (a SW cannot use Intensive Fire); ${ownFp}` : null;
+          const swDone = fired && !!shotWeaponOf(env, g)?.light ? `The ${name.replace(/ at a vehicle$/, '')} has fired this phase (a SW cannot use Intensive Fire); ${ownFp}` : null;
           if (cannot || swDone) items.push(action(`Fire ${name}`, () => {}, { icon: '✦', disabled: true, hint: (cannot ?? swDone)! }));
           else if (fired && !g.tags['intensive'] && decision.kind !== 'firstFire' && phase !== 'AFPh')
             items.push(fireMenu(`Intensive Fire: ${name}`, opts.filter((o) => !/IFE/.test(o.label)), 'One more shot after losing ROF: +2 To Hit, B# -2 (SK4 3.2.4)'));
@@ -3686,17 +3977,34 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
         const rallies = legal.filter((a) => (a.type === 'rally.selfRally' || a.type === 'rally.rally') && a['unit'] === p.id);
         for (const a of rallies)
           items.push(action(a.type === 'rally.selfRally' ? 'Self-rally' : `Rallied by ${pieceLabel(env, state.pieces[a['leader'] as string]).replace(/^\S+ /, '')}`, () => run(a), { icon: '♥' }));
+        // DM (SK1 3.1 g): out of woods and buildings a broken unit keeps it unless its owner has it removed.
+        if (p.tags['dm'] && p.tags['broken']) {
+          const why = plain(dmChoiceIllegal(env, owner!, p.id));
+          if (p.tags['dmRemove'])
+            items.push(action('Keep DM', () => run({ type: 'rally.dmKeep', unit: p.id }), { icon: '⚑', hint: 'Its DM comes off at the end of the Rally Phase. Keep it so the unit may still rout in this turn\'s Rout Phase (its next rally is then at +4)' }));
+          else
+            items.push(
+              action('Remove DM', () => run({ type: 'rally.dmRemove', unit: p.id }), {
+                icon: '⚐',
+                disabled: !!why,
+                hint: why ?? 'It keeps its DM by default (SK1 3.1 g): it may rout in this turn\'s Rout Phase, but its next rally attempt is at +4. Remove it at the end of the Rally Phase',
+              }),
+            );
+        }
         if (isVehiclePiece(p.id)) for (const it of vehicleRepairItems(p)) items.push({ ...it, label: it.label.replace(pieceLabel(env, p), 'Repair').trim() });
       }
       if (decision?.kind === 'phase' && phase === 'RtPh' && p.tags['broken']) {
         const r = routInfo(p.id);
-        items.push(
-          action('Stays (no rout)', () => run({ type: 'rout.stay', unit: p.id }), {
-            icon: '⌂',
-            disabled: !!r?.must || !!r?.done || !!routing,
-            hint: r?.must && r.reason ? `Must rout: ${routReason(r.reason)}` : undefined,
-          }),
-        );
+        // A unit that has routed (or stayed) is done for the phase: say so rather than offer a greyed choice with no reason.
+        if (r?.done) items.push(action('Routed this phase', () => {}, { icon: '⌂', disabled: true, hint: plain(endBlocked) ?? 'Done for this Rout Phase' }));
+        else
+          items.push(
+            action('Stays (no rout)', () => run({ type: 'rout.stay', unit: p.id }), {
+              icon: '⌂',
+              disabled: !!r?.must || !!routing,
+              hint: r?.must && r.reason ? `Must rout: ${routReason(r.reason)}` : undefined,
+            }),
+          );
       }
     }
     return items;
@@ -3870,7 +4178,8 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
         : !owner
           ? `Waiting for the ${sideName(decision.owner)}.`
           : decision.kind === 'phase'
-            ? `When you are finished, ${endLabel} is in the top bar.`
+            ? // A phase that cannot end yet (units still to rout) says what holds it up, naming the units.
+              (plain(endBlocked) ?? `When you are finished, ${endLabel} is in the top bar.`)
             : 'Answer in the panel on the right.';
 
   // ------------------------------------------------------------------ render
@@ -3902,6 +4211,7 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
           fortified={fortifiedShown}
           fires={fireHexes}
           rubble={rubbleHexes}
+          fortifications={fortHexes}
           outOfPlay={outOfPlay}
           hidePieces={unitsHidden || peekTerrain}
           hideMarkers={markersHidden || peekBare}
@@ -4112,6 +4422,24 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
                 );
               })}
             </ul>
+          </Modal>
+        )}
+        {fortConfirm && (
+          <Modal title="Unused fortification counters" kicker="Setup" onClose={() => setFortConfirm(null)}>
+            <p>Confirming now forfeits what is still in the tray ({fortRule?.rule ?? 'SSR'}): counters not set up at the start of the scenario are not placed later.</p>
+            <ul className="end-ask-units">
+              {fortConfirm.map((l) => (
+                <li key={l}>{l}</li>
+              ))}
+            </ul>
+            <div className="buttons">
+              <button className="primary" onClick={() => { setFortConfirm(null); sendSetup(); }}>
+                Confirm anyway
+              </button>
+              <button className="ghost" onClick={() => setFortConfirm(null)}>
+                Back to the tray
+              </button>
+            </div>
           </Modal>
         )}
         {endAsk && (
@@ -4489,6 +4817,9 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
                     note={(id) => (swAssign[id] ? `with ${pieceLabel(env, state.pieces[swAssign[id]!]).replace(/^\S+ /, '')}` : null)}
                     onUnplace={(id) => unplace(id, false)}
                   />
+                  {fortRule && placing.kind === 'setup' && (
+                    <FortTray env={env} side={placing.owner} params={fortRule} placed={fortLocked ? fortCounters(env).filter((c) => c.side === placing.owner) : pendingForts} locked={fortLocked} picked={pickedFort} onPick={(spec) => { setPickedFort(spec); if (spec) setPicked(null); }} onUnplace={unplaceFort} onChange={changeFort} />
+                  )}
                   <SetupRules env={env} todo={todo} rulesShownInTray={!!trayGroups} anchors={anchors} />
                   {(deployRule || deployableSquads(env, placing.owner).length > 0) && (placing.kind === 'setup' || placing.kind === 'offboardSetup') && (
                     <div className="setup-deploy">
@@ -4568,12 +4899,17 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
                   )}
                   {hiddenRule && placing.owner === hiddenRule.side && !hiddenRule.forces?.length && (
                     <p className="hint">
-                      {hiddenRule.rule ?? 'SSR'}: right-click a stack{hiddenRule.notOpenGround ? ' outside Open Ground' : ''} and choose <b>Set up hidden</b> to keep it and its weapons off the map until it fires or moves or an enemy unit finds it.
+                      {hiddenRule.rule ?? 'SSR'}: {hiddenRule.quota !== undefined ? <>up to <b>{hiddenRule.quota} squad equivalent{hiddenRule.quota === 1 ? '' : 's'}</b> of MMC ({hiddenSe} used; leaders with them, Guns by HIP free) may set up hidden: </> : null}right-click a stack{hiddenRule.notOpenGround ? ' outside Open Ground' : ''} and choose <b>Set up hidden</b> to keep it and its weapons off the map until it fires or moves or an enemy unit finds it.
                       {hiddenField.length > 0 && (
                         <>
                           {' '}Hidden: <b>{hiddenField.map((id) => `${pieceLabel(env, state.pieces[id])} (${hexLabel(pending[id]!)})`).join(', ')}</b>.
                         </>
                       )}
+                    </p>
+                  )}
+                  {concealmentOn && obConceal.total > 0 && (
+                    <p className="hint">
+                      Concealment (SK4 8.3): your OB has <b>{obConceal.total} “?” counter{obConceal.total === 1 ? '' : 's'}</b> ({obConceal.used + concealedStacks} used), one per stack set up in Concealment Terrain (jungle, palm trees, kunai, bamboo, huts, buildings): right-click a stack there and choose <b>Conceal</b>.
                     </p>
                   )}
                   <p className="hint wheel-hint">
@@ -4591,6 +4927,13 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
                       ? <>Enemy units have stopped in {hexLabel(String(decision.data?.['hex'] ?? ''))} with movement left: your last chance to fire at them there before another unit moves (SK1 3.3.1). Select your firers (shift-click hexes, tick units), then right-click the stack: <b>Fire!</b> Or pass.</>
                       : <>Enemy units are moving in {hexLabel(String(decision.data?.['hex'] ?? ''))}. Select your firers (shift-click hexes, tick units), then right-click the moving stack: <b>Fire!</b> Or pass and let them move on.</>}
                   </p>
+                  {ms?.dcPending && state.pieces[ms.dcPending.placer] && (
+                    // The DC goes in only if its placer is still unbroken and unpinned once all Defensive First Fire is done (SK4 4.3).
+                    <p className="hint">
+                      <b>DC placement:</b> {pieceLabel(env, state.pieces[ms.dcPending.placer])} is placing a DC {ms.dcPending.breach ? `to Breach ${hexLabel(ms.dcPending.breach)} from ` : 'into '}{locName(ms.dcPending.target)}
+                      {ms.dcPending.vehicle && state.pieces[ms.dcPending.vehicle] ? ` against ${pieceLabel(env, state.pieces[ms.dcPending.vehicle])}` : ''}. It is placed only if the placer is still unbroken and unpinned once your Defensive First Fire is done (SK4 4.3): fire at it now to stop it.
+                    </p>
+                  )}
                   {motionAttempts.length > 0 && (
                     <p className="hint">
                       Or a vehicle may try for Motion instead of firing (SK4 3.3.2.1): dr ≤ the MP the mover has spent in its LOS puts it in Motion and lets it change its facing.
@@ -4641,7 +4984,7 @@ function GameScreenView({ scenario, session, matchId, viewKey, onQuit, onResolvi
                   targetType={gunShot.targetType}
                   {...gunAmmoInfo(gunShot)}
                   intensive={gunShot.intensive}
-                  light={!!(state.pieces[gunShot.gun] && ordnanceOf(env, state.pieces[gunShot.gun]!)?.light)}
+                  light={!!(state.pieces[gunShot.gun] && shotWeaponOf(env, state.pieces[gunShot.gun]!)?.light)}
                   chOnOriginal2={!!(state.pieces[gunShot.gun] && ordnanceOf(env, state.pieces[gunShot.gun]!)?.latw)}
                   target={target ? hexLabel(target) : null}
                   preview={gunPreview}

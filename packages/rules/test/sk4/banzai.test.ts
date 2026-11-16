@@ -95,6 +95,33 @@ describe('Banzai Charge: declaration (SK4 8.1.8.6)', () => {
   });
 });
 
+describe('Banzai Charge: a leader wounded on the way (ASLRB A17.2)', () => {
+  it('has a wounded leader\u2019s 3 MF from the next Impulse: out of the charge once he has spent them; his units go on', () => {
+    const { engine, state: s0 } = game(CHARGE.map((p) => (p.id === 'm' ? { ...p, hex: 'yT5' } : p)));
+    let s = declare(engine, s0, 'l', 'yT5', ['l', 'a', 'b']);
+    /** Every unit still charging steps one hex; then each Defensive First Fire window is passed. */
+    const impulse = (wound = false) => {
+      for (const u of [...bst(s)!.units]) s = go(engine, s, u, banzaiSteps(engine.env(s), u)[0]!);
+      // A wound from that Defensive First Fire (how it came about does not matter here).
+      if (wound) s = { ...s, pieces: { ...s.pieces, l: { ...s.pieces['l']!, tags: { ...s.pieces['l']!.tags, wounds: 1 } } } };
+      while (engine.currentDecision(s)!.kind === 'firstFire') s = step(act(engine, s, { type: 'defPass' }));
+    };
+    events = [];
+    impulse(true);
+    // Impulse 2: 1 MF spent, a wounded leader's 3 MF from now on.
+    expect(bst(s)!.allowance).toEqual({ l: 3, a: 8, b: 8 });
+    expect(bst(s)!.units).toContain('l');
+    impulse();
+    expect(bst(s)!.units).toContain('l');
+    impulse();
+    // 3 MF spent: he is out, the squads charge on.
+    expect(bst(s)!.spent['l']).toBe(3);
+    expect(bst(s)!.units).toEqual(['a', 'b']);
+    expect(events.some((e) => e.type === 'sk4.banzai.out' && (e.payload as { unit: string; why: string }).unit === 'l' && /wounded/.test((e.payload as { why: string }).why))).toBe(true);
+    expect(s.pieces['l']!.tags['moved']).toBe(true);
+  });
+});
+
 describe('Banzai Charge: Impulses (SK4 8.1.8.6)', () => {
   it('moves each unit one hex toward the target, never back, with the Impulse charged at its maximum MF', () => {
     const { engine, state: s0 } = game(CHARGE);

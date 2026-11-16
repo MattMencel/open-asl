@@ -11,6 +11,8 @@ export const T2 = {
   emplaced: 'emplaced',
   /** Hidden Initial Placement (SK4 6.4), on the Gun and its crew, until revealed. */
   hip: 'hip',
+  /** Crew that dropped this still-hidden Gun; cleared when it is recovered or revealed (SK4 6.4). */
+  hipCrew: 'hipCrew',
   /**
    * Acquired Target (SK4 6.10, 6.11), kept on the Gun but sitting on the target: `acq` is the counter
    * ('ITT' the ½" one on the target units, 'ATT' the ⅝" one on the hex), `acqHex` where it lies,
@@ -177,6 +179,44 @@ export function ordnanceOf(env: QueryEnv, p: Piece): GunDef | null {
     light: true,
   };
 }
+
+/**
+ * An Infantry MG seen as ordnance for a shot at an AFV (SK4 4.1): "a non-vehicular MG ... can attack an AFV as
+ * Ordnance (3.2.4) using the AP TK Table after securing a hit on the VTT", on the chart's "All MG" row, within
+ * its normal range. Otherwise it is an ordinary SW on the IFT, so `ordnanceOf` leaves it out and only the shot
+ * code asks for this. A .50-cal/12.7mm HMG kills on the chart's 12.7 row (ASLRB A9.61, C7.32).
+ */
+export function mgAsOrdnance(env: QueryEnv, p: Piece): GunDef | null {
+  const d = defOf(env, p);
+  if (d.kind !== 'sw' || d.fixed || (d.type !== 'LMG' && d.type !== 'MMG' && d.type !== 'HMG')) return null;
+  return {
+    id: d.id,
+    nationality: d.nationality,
+    kind: 'gun',
+    type: 'MG',
+    caliber: d.id.endsWith('HMG50') ? 12.7 : 0,
+    ...(d.rof ? { rof: d.rof } : {}),
+    m: 0,
+    targetSize: 'small',
+    mount: '360',
+    qsu: true,
+    gunshield: false,
+    ammo: { he: false, ap: true },
+    maxRange: d.range,
+    noIntensive: true,
+    light: true,
+    // No B# printed: normal breakdown on a 12 (SK4 4.1).
+    b: d.b ?? 12,
+    ...(d.repair !== undefined ? { repair: d.repair } : {}),
+    ...(d.removeOnRepair6 ? { removeOnRepair6: true } : {}),
+  };
+}
+
+/** The weapon a shot through the To Hit process fires: any ordnance, or an Infantry MG aimed at an AFV (SK4 4.1). */
+export const shotWeaponOf = (env: QueryEnv, p: Piece): GunDef | null => ordnanceOf(env, p) ?? mgAsOrdnance(env, p);
+
+/** Whether a shot's weapon is an Infantry MG firing as ordnance (SK4 4.1). */
+export const isMgOrdnance = (def: GunDef): boolean => def.type === 'MG' && !def.vehicle;
 
 /** The ordnance weapon (Gun or Light Mortar) a unit possesses, if any. */
 export const ordnanceHeldBy = (env: QueryEnv, unit: PieceId): Piece | undefined => swHeldBy(env.state, unit).find((w) => ordnanceOf(env, w));

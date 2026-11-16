@@ -106,8 +106,8 @@ function advanceIllegal(env: QueryEnv, a: { units: PieceId[]; to: LocId; side: s
   const all = [...here, ...a.units.map((u) => pieceOf(env, u))];
   const se = squadEquivalents(env, all);
   const limit = stackLimit(env, a.to, a.side);
-  if (se > limit.se) return `Stacking limit: ${limit.se} squad-equivalents`;
-  if (all.filter((p) => smc(env, p)).length > limit.smc) return `Stacking limit: ${limit.smc} SMC`;
+  if (se > limit.se) return `Stacking limit: ${limit.se} squad-equivalents${limit.note ? ` (${limit.note})` : ''}`;
+  if (all.filter((p) => smc(env, p)).length > limit.smc) return `Stacking limit: ${limit.smc} SMC${limit.note ? ` (${limit.note})` : ''}`;
   return actionIllegal(env, a.units) ?? env.query('advance.illegal', { units: a.units, to: a.to, side: a.side }, null);
 }
 

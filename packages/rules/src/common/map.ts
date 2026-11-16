@@ -152,6 +152,18 @@ export interface HexGridMapOptions {
 const key = (c: Cube) => `${c.q},${c.r}`;
 const isRoad = (h: MapHex) => h.features.some((f) => f.startsWith('road:'));
 
+/** A hex's terrain beyond its type and features: its building (id, levels, height, count) and blocked Bypass. */
+function terrainFields(spec: HexTerrainSpec): Partial<MapHex> {
+  return {
+    ...(spec.buildingId ? { buildingId: spec.buildingId } : {}),
+    ...(spec.building ? { building: spec.building } : {}),
+    ...(spec.obstacleHeight !== undefined ? { obstacleHeight: spec.obstacleHeight } : {}),
+    ...(spec.buildings !== undefined ? { buildings: spec.buildings } : {}),
+    ...(spec.partialBuilding ? { partialBuilding: true } : {}),
+    ...(spec.bypassBlocked?.length ? { bypassBlocked: spec.bypassBlocked } : {}),
+  };
+}
+
 export class HexGridMap implements GameMap {
   private byId = new Map<HexId, MapHex>();
   private byCube = new Map<string, MapHex>();
@@ -180,6 +192,10 @@ export class HexGridMap implements GameMap {
             // Overlapping half hexes of butted boards are one hex with two names.
             this.alias.set(id, existing.id);
             existing.halfHex = false;
+            // ASLRB A2.3: "an Open Ground half-hex butted together with another terrain type half-hex" makes a hex of that
+            // other terrain type (S25's boards, half a board apart, butt v's open D10 against u's woods T0).
+            const other = opts.terrain?.[id];
+            if (existing.terrain === 'open' && other && other.terrain !== 'open') Object.assign(existing, { terrain: other.terrain, features: [...existing.features, ...(other.features ?? [])], ...terrainFields(other) });
             continue;
           }
           const spec = opts.terrain?.[id];
@@ -192,12 +208,7 @@ export class HexGridMap implements GameMap {
             terrain: spec?.terrain ?? 'open',
             features: spec?.features ?? [],
             ...(spec?.elevation ? { elevation: spec.elevation } : {}),
-            ...(spec?.buildingId ? { buildingId: spec.buildingId } : {}),
-            ...(spec?.building ? { building: spec.building } : {}),
-            ...(spec?.obstacleHeight !== undefined ? { obstacleHeight: spec.obstacleHeight } : {}),
-            ...(spec?.buildings !== undefined ? { buildings: spec.buildings } : {}),
-            ...(spec?.partialBuilding ? { partialBuilding: true } : {}),
-            ...(spec?.bypassBlocked?.length ? { bypassBlocked: spec.bypassBlocked } : {}),
+            ...(spec ? terrainFields(spec) : {}),
             halfHex: c === 0 || c === GEO.columns - 1 || (!even && (n === 0 || n === GEO.rows)),
           };
           this.byId.set(id, hex);

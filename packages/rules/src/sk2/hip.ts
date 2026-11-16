@@ -1,4 +1,4 @@
-import type { Ctx, HexId, Piece, PieceId, QueryEnv, RuleModule, SideId } from '@asl/engine';
+import type { Ctx, HexId, Location, Piece, PieceId, QueryEnv, RuleModule, SideId } from '@asl/engine';
 import { byId, defOf, hexOf, isVehicleDef, otherSide, personnelAt, statics, swHeldBy, unitsAt } from '../common/pieces';
 import { FP, iftColumn, type ApplyResultFn } from '../sk1/fire';
 import { hasLos, isVisibleTo } from '../sk1/known';
@@ -61,13 +61,15 @@ export function revealUnit(ctx: Ctx, unit: PieceId, reason: string) {
   const u = ctx.state.pieces[unit];
   if (!u || !isHidden(u)) return;
   const held = swHeldBy(ctx.state, unit);
-  const g = held.find((w) => gun(ctx, w) && isHidden(w));
-  if (g) {
+  const guns = Object.values(ctx.state.pieces).filter((g) => g.side === u.side && g.loc.kind !== 'eliminated' && gun(ctx, g) && isHidden(g)
+    && ((g.loc.kind === 'held' && g.loc.by === unit) || g.tags[T2.hipCrew] === unit)).sort(byId);
+  for (const g of guns) {
     ctx.proc<(c: Ctx, gun: PieceId, reason: string) => void>(REVEAL_GUN)(ctx, g.id, reason);
-    return;
   }
-  ctx.emit('sk2.hip.unitRevealed', { unit, hex: hexOf(ctx.state, u), reason });
-  setTags(ctx, unit, { [T2.hip]: null });
+  if (isHidden(pieceOf(ctx, unit))) {
+    ctx.emit('sk2.hip.unitRevealed', { unit, hex: hexOf(ctx.state, u), reason });
+    setTags(ctx, unit, { [T2.hip]: null });
+  }
   for (const w of held) if (isHidden(w)) setTags(ctx, w.id, { [T2.hip]: null });
 }
 
@@ -111,6 +113,32 @@ export const hipModule: RuleModule = {
       next?.(ctx, gunId, reason);
     });
     const reveal = (ctx: Ctx, gunId: PieceId, reason: string) => ctx.proc<(c: Ctx, gun: PieceId, reason: string) => void>(REVEAL_GUN)(ctx, gunId, reason);
+
+    // SK4 6.4: the Gun loses HIP when its crew moves, even after dropping it. Retain that
+    // association while unmanned; do not reveal another hidden crew sharing the Location.
+    r.replace<{ id: PieceId; loc: Location }>({
+      id: 'sk2.hip.dropped-crew', event: 'piece.moved',
+      when: (env, ev) => {
+        const p = env.state.pieces[ev.payload.id];
+        return env.state.phase !== 'setup' && !!p && !!gun(env, p) && isHidden(p);
+      },
+      replace(env, ev) {
+        const p = env.state.pieces[ev.payload.id]!;
+        const crew = p.loc.kind === 'held' && ev.payload.loc.kind === 'hex' ? p.loc.by : null;
+        if (!crew && p.tags[T2.hipCrew] === undefined) return [ev];
+        return [{ type: 'piece.tagged', payload: { id: p.id, tags: { [T2.hipCrew]: crew } } }, ev];
+      },
+    });
+    // SK4 6.4; ASLRB A12.32: moving or advancing personnel cannot retain HIP. This
+    // includes a Gun crew without the hidden-units SSR installed, and a routing crew.
+    r.on<{ id: PieceId }>({
+      id: 'sk2.hip.unit-moved', event: 'piece.moved',
+      handler(ctx, ev) {
+        if (ctx.state.phase === 'setup') return;
+        const u = ctx.state.pieces[ev.payload.id];
+        if (u && isHidden(u) && hidingUnit(ctx, u)) revealUnit(ctx, u.id, 'moved');
+      },
+    });
 
     // ---------------------------------------------------------------- seen in Open Ground
     const sweep = (ctx: Ctx) => {

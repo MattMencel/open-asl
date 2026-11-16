@@ -7,13 +7,16 @@ import {
   ammoUseIllegal,
   arcNeighbours,
   defaultAmmo,
+  isMgOrdnance,
   ordnanceOf,
   coveredArc,
   gun,
   hexOf,
   inCoveredArc,
+  latwBackblast,
   nearestSpine,
   shotOutlook,
+  shotWeaponOf,
   statics,
   vehicle,
   type AmmoKind,
@@ -51,8 +54,8 @@ export function caChangeFor(env: QueryEnv, gunId: PieceId, target: HexId): numbe
   const at = gunHexOf(env, gunId);
   const g = env.state.pieces[gunId];
   if (!at || !g || !map.hex(at) || !map.hex(target)) return null;
-  // A Light Mortar has no Covered Arc to turn (SK4 4.5).
-  if (ordnanceOf(env, g)?.light) return null;
+  // A Light Mortar or other SW has no Covered Arc to turn (SK4 4.5).
+  if (shotWeaponOf(env, g)?.light) return null;
   if (inCoveredArc(map.hex(at)!.cube, coveredArc(g), map.hex(target)!.cube)) return null;
   return nearestSpine(map.hex(at)!.cube, coveredArc(g), map.hex(target)!.cube);
 }
@@ -89,7 +92,7 @@ const TYPE_NAME: Record<TargetType, string> = { ITT: 'Infantry', ATT: 'Area', IF
  */
 export function shotOptions(env: QueryEnv, gunId: PieceId, mode: FireMode): ShotOption[] {
   const g = env.state.pieces[gunId];
-  const d = g ? ordnanceOf(env, g) : null;
+  const d = g ? shotWeaponOf(env, g) : null;
   if (!g || !d) return [];
   const t = statics(env).tables;
   const dflt = defaultAmmo(env, g, d);
@@ -104,9 +107,9 @@ export function shotOptions(env: QueryEnv, gunId: PieceId, mode: FireMode): Shot
     ? null
     : 'No enemy vehicle in sight to aim at';
   if (d.latw) {
-    // A Bazooka: HEAT on its own To Hit Table, only at Infantry in a building or a Gun (SK4 4.4).
-    const at = hexOf(env.state, g);
-    const inBuilding = !!(at && statics(env).map.hex(at)?.buildingId);
+    // A Bazooka: HEAT on its own To Hit Table, only at Infantry in a building or a Gun (SK4 4.4). From inside a building it
+    // takes the Backblast or the +2 To Hit DRM; a PIAT has no Backblast, nor does a PTO hut (SK4 4.4.3, 8.2.1).
+    const inBuilding = latwBackblast(env, gunId);
     const why = ammoUseIllegal(env, g, d, 'HEAT', 'ITT', mode);
     const effect = `a hit on Infantry in a building attacks on the ${d.latw.fp} column (${d.latw.fp * 2} on a Critical Hit, an original 2); X${d.latw.x ?? 12}: removed on an original TH DR ≥ ${d.latw.x ?? 12}`;
     if (!inBuilding) out.push({ type: 'ITT', label: `HEAT · ${d.type} To Hit Table`, hint: why ?? effect, available: !why });
@@ -117,7 +120,7 @@ export function shotOptions(env: QueryEnv, gunId: PieceId, mode: FireMode): Shot
     // At a vehicle: the same To Hit Table, then HEAT To Kill against the Armor Factor struck (SK4 4.4).
     const vWhy = ammoUseIllegal(env, g, d, 'HEAT', 'VTT', mode) ?? noVehicle;
     const vEffect = `aim at one enemy vehicle: a hit rolls To Kill (HEAT TK ${t.toKill(d, 'HEAT', 1) ?? '—'}) less the Armor Factor struck; Critical Hit on an original 2`;
-    if (!inBuilding || d.type === 'PIAT') out.push({ type: 'VTT', label: `Vehicle · HEAT`, hint: vWhy ?? vEffect, available: !vWhy });
+    if (!inBuilding) out.push({ type: 'VTT', label: `Vehicle · HEAT`, hint: vWhy ?? vEffect, available: !vWhy });
     else {
       out.push({ type: 'VTT', backblast: false, label: `Vehicle · HEAT · +2 To Hit (no Backblast)`, hint: vWhy ?? `Firing from a building: +2 To Hit DRM; ${vEffect}`, available: !vWhy });
       out.push({ type: 'VTT', backblast: true, label: `Vehicle · HEAT · take the Backblast`, hint: vWhy ?? `Firing from a building: everyone in this hex takes a 1 FP attack on the colored dr, no TEM; ${vEffect}`, available: !vWhy });
@@ -127,6 +130,8 @@ export function shotOptions(env: QueryEnv, gunId: PieceId, mode: FireMode): Shot
   for (const type of ['ITT', 'ATT'] as const) {
     // An ATR fires as ordnance at vehicles only; at Infantry it is a 1 FP SW on the IFT (SK4 4.4.4).
     if (d.type === 'ATR') continue;
+    // So does an Infantry MG: at anything but an AFV it fires on the IFT with its unit (SK4 4.1).
+    if (isMgOrdnance(d)) continue;
     // The chart has no row for this Target Type (a Mortar on the ITT, an AP-only Gun on the ATT).
     if (t.gunColumn(d, type) === null && !(type === 'ATT' && d.ammo.ap && !d.ammo.he)) continue;
     if (d.type === 'MTR' && type === 'ITT') continue;
@@ -164,7 +169,11 @@ export function shotOptions(env: QueryEnv, gunId: PieceId, mode: FireMode): Shot
         type: 'VTT',
         ...(ammo !== vttDflt ? { ammo } : {}),
         label: `Vehicle · ${AMMO_NAME[ammo]}${dep}`,
-        hint: why ?? `Aim at one enemy vehicle: a hit rolls To Kill (${AMMO_NAME[ammo]} TK ${tk(1) ?? '—'} at 1 hex, ${tk(6) ?? '—'} at 6, ${tk(12) ?? '—'} at 12) less the Armor Factor struck; Critical Hit on an original 2`,
+        hint:
+          why ??
+          (isMgOrdnance(d)
+            ? `Aim at one enemy AFV on the All MG To Hit row, within the MG's normal range (${d.maxRange} hexes) and without halved FP (SK4 4.1): a hit rolls To Kill (TK ${tk(1) ?? '—'} at 1 hex, ${tk(6) ?? '—'} at 6) less the Armor Factor struck; no Critical Hit`
+            : `Aim at one enemy vehicle: a hit rolls To Kill (${AMMO_NAME[ammo]} TK ${tk(1) ?? '—'} at 1 hex, ${tk(6) ?? '—'} at 6, ${tk(12) ?? '—'} at 12) less the Armor Factor struck; Critical Hit on an original 2`),
         available: !why,
       });
     }

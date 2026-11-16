@@ -9,6 +9,7 @@ import { drawSide, otherSide, prepareScenario, requireRuleset, requireSideChoice
 import { baseMatch, forViews, matchRef } from './matches';
 import { seedNewOnlineMatch } from './lib/viewStore';
 import { readUser } from './lib/users';
+import { closedSession } from './lib/sessions';
 
 const listingRef = (id: string) => db.collection(COL.listings).doc(id);
 
@@ -122,6 +123,12 @@ export const withdrawGameListing = onCall(async (req) => {
     if (!listing) throw new HttpsError('not-found', 'No such listing.');
     if (!listing.playerIds.includes(uid)) throw new HttpsError('permission-denied', 'That is not your game listing.');
     if (listing.status !== 'open' && listing.status !== 'scheduled') return listing.status;
+    const match = listing.matchId ? ((await tx.get(matchRef(listing.matchId))).data() as MatchDoc | undefined) : undefined;
+    if (listing.status === 'scheduled' && match && closedSession(listing, match) === 'played') {
+      // A session already played is only taken off the schedules: the host's post must not go back on the board.
+      tx.update(ref, { status: 'played', updatedAt: now() });
+      return 'played' as const;
+    }
     const slots = listing.bookingSlotIds.map((slot) => db.collection(COL.bookingSlots).doc(slot));
     await Promise.all(slots.map((slot) => tx.get(slot)));
     slots.forEach((slot) => tx.delete(slot));
@@ -170,7 +177,6 @@ export const startScheduledGame = onCall(async (req) => {
   return { matchId };
 });
 
-/** Record attendance for scheduled games that did not get both players to the table. */
 /**
  * Open posts nobody can book any more leave the board: every window's last start is past or too close to book
  * (`hasBookableStart`, as the board shows it). The host is told by email to post again (user request 2026-11-06).
@@ -196,20 +202,26 @@ export const expireOpenListings = onSchedule('every 5 minutes', async () => {
   })));
 });
 
+/**
+ * Once a scheduled session's table has closed: a played session leaves the schedules; one that did not get both
+ * players to the table expires, with attendance recorded.
+ */
 export const recordScheduledNoShows = onSchedule('every 5 minutes', async () => {
   const cutoff = Timestamp.fromMillis(Date.now() - 30 * 60_000);
   const overdue = await db.collection(COL.listings).where('status', '==', 'scheduled').where('scheduledAt', '<=', cutoff).limit(100).get();
   await Promise.all(overdue.docs.map((snap) => db.runTransaction(async (tx) => {
     const listing = (await tx.get(snap.ref)).data() as GameListingDoc | undefined;
-    if (!listing || listing.status !== 'scheduled' || !listing.scheduledAt || (listing.presentUids?.length ?? 0) >= 2) return;
+    if (!listing || listing.status !== 'scheduled' || !listing.scheduledAt) return;
     const matchDocument = listing.matchId ? matchRef(listing.matchId) : null;
     const players = await Promise.all(listing.playerIds.map((uid) => readUser(tx, uid)));
     const match = matchDocument ? ((await tx.get(matchDocument)).data() as MatchDoc | undefined) : undefined;
     // Opening a table records the first visitor, but either player may make the first
     // move. Once the recording has actions, both players demonstrably attended and the
-    // lobby must not later clear their active match or issue a false no-show.
-    if (match && match.actionCount > 0) {
-      tx.update(snap.ref, { presentUids: listing.playerIds, updatedAt: now() });
+    // lobby must not later clear their active match or issue a false no-show. A played
+    // session comes off both schedules; left 'scheduled', it stayed there for good and
+    // filled this query's limit.
+    if (closedSession(listing, match) === 'played') {
+      tx.update(snap.ref, { status: 'played', presentUids: listing.playerIds, updatedAt: now() });
       return;
     }
     tx.update(snap.ref, { status: 'expired', updatedAt: now() });

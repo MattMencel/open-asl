@@ -281,7 +281,7 @@ export const japaneseModule: RuleModule = {
       id: 'sk4.ja.atr-rof',
       query: 'ordnance.rof',
       ref: 'SK4 8.1.8.2',
-      when: (sc, env) => sc.def.type === 'ATR' && jaSquadUser(env, sc.weapon, sc.firer),
+      when: (sc, env) => (sc.def.type === 'ATR' || sc.def.type === 'MG') && jaSquadUser(env, sc.weapon, sc.firer),
       apply: (v) => Math.max(0, v - 1),
     });
 
@@ -364,6 +364,13 @@ export const japaneseModule: RuleModule = {
         const m = mmc(env, pieceOf(env, unit))!;
         return v - m.fp + fullCcv(env, unit)!;
       },
+    });
+    r.contribute({
+      id: 'sk4.ja.reduced-ccv-note',
+      query: 'cc.fpNote',
+      ref: 'SK4 8.1.8.4',
+      when: ({ unit }, env) => fullCcv(env, unit) !== null,
+      apply: (v) => v ?? 'counts its full-strength CCV (SK4 8.1.8.4)',
     });
     r.contribute({
       id: 'sk4.ja.reduced-ccv-defense',

@@ -1,5 +1,5 @@
 import type { GameState, LoggedEvent, QueryEnv, SideId } from '@asl/engine';
-import { SKY_NAME, chartLabel, defOf, hexOfLoc, levelOfLoc, entryAfterFireParams, entryGroupsParams, secretLengthParams, fortifiedParams, hexOf, scatterParams, isVisibleTo, isWeaponDef, statics, weatherLabel, type CounterDef, type IftResult, type VariableReinforcementsEvent, type EntryOrderDrEvent, type EntryLossesEvent, entryOrderDrParams, entryOrderLabel, type ForceChartEvent, type ScatterState, type ScatterLanding, type EntryGroupsState, type Weather, NATION, PHASE_NAME, defLabel, hexLabel, humanize, nameIds, nationName, pieceLabel, sideNameOf, entryStretchParams, type LeaderReliefEvent, type OnceDrEvent, type OnceDrNmcEvent, type OnceDrRallyEvent, type LeaderPtcEvent, type RoutStep } from '@asl/rules';
+import { SKY_NAME, chartLabel, defOf, hexOfLoc, levelOfLoc, entryAfterFireParams, entryGroupsParams, secretLengthParams, fortifiedParams, fortKindName, hexOf, shownCounter, type FortRecord, scatterParams, isVisibleTo, isWeaponDef, statics, weatherLabel, type CounterDef, type IftResult, type VariableReinforcementsEvent, type EntryOrderDrEvent, type EntryLossesEvent, entryOrderDrParams, entryOrderLabel, type ForceChartEvent, type ScatterState, type ScatterLanding, type EntryGroupsState, type Weather, NATION, PHASE_NAME, defLabel, hexLabel, humanize, nameIds, nationName, pieceLabel, sideNameOf, entryStretchParams, type LeaderReliefEvent, type OnceDrEvent, type OnceDrNmcEvent, type OnceDrRallyEvent, type LeaderPtcEvent, type RoutStep } from '@asl/rules';
 
 // The naming helpers live in @asl/rules (labels.ts) so the server can name units too; re-exported for the many callers here.
 export { NATION, PHASE_NAME, defLabel, hexLabel, humanize, nameIds, nationName, pieceLabel, sideNameOf };
@@ -177,7 +177,11 @@ export function describeEvents(env: QueryEnv, events: LoggedEvent[], viewer: Sid
         // How the FP came about (½ Advancing Fire, +1 Assault Fire ...) and every DRM on the attack.
         const fp = noteLabels(p['fpExplain']).join(', ');
         const drm = noteLabels(p['explain']).join(', ');
-        const detail = [fp ? `FP: ${fp}` : '', drm ? `DRM: ${drm}` : ''].filter(Boolean).join(' · ');
+        // Concealed targets are attacked as Area Fire at a lower FP (SK4 8.3.2): their own figure, without naming them.
+        const area = p['area'] as { targets: string[]; fp: number; column: number | null; fpExplain?: unknown } | undefined;
+        const areaText = area ? `; vs the concealed unit${area.targets.length === 1 ? '' : 's'}, Area Fire: ${area.fp} FP → ${area.column ?? 'no'} column` : '';
+        const areaFp = area ? noteLabels(area.fpExplain).join(', ') : '';
+        const detail = [fp ? `FP: ${fp}` : '', areaFp ? `Area Fire FP: ${areaFp}` : '', drm ? `DRM: ${drm}` : ''].filter(Boolean).join(' · ');
         const a = p['attack'] as { target: string; parts: string[]; mode?: string; at?: Record<string, [string, string]>; snap?: [string, string] };
         // The hexes fired from: on the event since 2026-10-26, else where the firers (or whoever holds
         // them, for a Gun or SW) stand now.
@@ -186,7 +190,7 @@ export function describeEvents(env: QueryEnv, events: LoggedEvent[], viewer: Sid
           seq: e.seq,
           kind: 'fire',
           // A cowering attack (original doubles, no leader directing; SK1 3.2) is resolved columns lower: both shown.
-          text: `${a.parts.length ? (FIRE_MODE_NAME[a.mode ?? ''] ?? 'Fire') : 'Residual FP'}${a.snap ? ` (Snap Shot at ${a.snap.map(hexLabel).join('-')})` : ''} on ${hexLabel(a.target)}: ${p['fp']} FP → ${p['cowered'] ? `${fpColumn(p['fp'] as number)} column, cowers to the ${p['column'] ?? '—'} column` : `${p['column'] ?? '—'} column`}, DR ${drText(dr)} ${(p['drm'] as number) >= 0 ? '+' : ''}${p['drm']}`,
+          text: `${a.parts.length ? (FIRE_MODE_NAME[a.mode ?? ''] ?? 'Fire') : 'Residual FP'}${a.snap ? ` (Snap Shot at ${a.snap.map(hexLabel).join('-')})` : ''} on ${hexLabel(a.target)}: ${p['fp']} FP → ${p['cowered'] ? `${fpColumn(p['fp'] as number)} column, cowers to the ${p['column'] ?? '—'} column` : `${p['column'] ?? '—'} column`}${areaText}, DR ${drText(dr)} ${(p['drm'] as number) >= 0 ? '+' : ''}${p['drm']}`,
           ...(detail ? { detail } : {}),
           ...(from.length && from.some((h) => h !== a.target) ? { los: { from: from.filter((h) => h !== a.target), to: a.target, ...(a.at ? { at: a.at } : {}), ...(a.snap ? { snap: a.snap } : {}) } } : {}),
         });
@@ -204,7 +208,11 @@ export function describeEvents(env: QueryEnv, events: LoggedEvent[], viewer: Sid
         break;
       }
       case 'sk1.fire.result': {
-        if (hiddenFrom(p['unit'] as string)) break;
+        // A concealed unit the viewer cannot see is its "?" (what the attack did, not what it hit, SK4 8.3); a hidden one is not mentioned.
+        if (hiddenFrom(p['unit'] as string)) {
+          if (env.state.pieces[p['unit'] as string]?.tags['concealed'] === true) out.push({ seq: e.seq, kind: 'fire', text: `  ? (concealed): ${resultText(p['result'] as IftResult)} (final DR ${p['finalDr']})` });
+          break;
+        }
         // A unit's own modifier to the attack's DR (-1 vs a FT possessor) is why its final DR differs.
         const own = noteLabels(p['explain']).join(', ');
         if (p['critical']) {
@@ -694,6 +702,31 @@ export function describeEvents(env: QueryEnv, events: LoggedEvent[], viewer: Sid
         out.push({ seq: e.seq, kind: 'info', text: `  ☁ Weather now: ${weatherLabel(p['weather'] as Weather)}` });
         break;
       }
+      case 'asl.fort.placed': {
+        // The owner's log names each counter; the other side's shows what it may see (its redacted event) and the count.
+        const side = p['side'] as string;
+        const counters = p['counters'] as { hex: string; hidden: boolean; kind: string; capacity?: number; pillbox?: unknown; mines?: { known?: true; dummy?: true } }[];
+        // Anyone else reads only what the board shows them (a hotseat log sees the unredacted event): no hidden counter's
+        // hex, no Known minefield's strength, no Dummy (B28.45, B28.47: both are a blank Minefield counter to the enemy).
+        const shown = counters.map((c) => shownCounter(c as FortRecord, viewer)).filter((c): c is FortRecord => !!c);
+        const named = shown.map((c) => `${fortKindName(c)} ${hexLabel(c.hex)}${c.hidden ? (c.kind === 'mines' ? ' (recorded)' : ' (hidden)') : ''}`);
+        const secret = counters.length - shown.length;
+        out.push({ seq: e.seq, kind: 'info', text: viewer === side ? `${sideNameOf(env, side)} placed: ${named.join(', ')} (SSR)` : `${sideNameOf(env, side)} placed ${counters.length} fortification counter${counters.length === 1 ? '' : 's'} (SSR)${named.length ? `: ${named.join(', ')}` : ''}${secret ? `${named.length ? ';' : ':'} ${secret} hidden or recorded` : ''}` });
+        break;
+      }
+      case 'asl.fort.revealed': {
+        const c = shownCounter(p['counter'] as FortRecord, viewer) ?? (p['counter'] as FortRecord);
+        const how = { los: 'a Good Order enemy unit in LOS', tem: 'its TEM being claimed', concealment: 'a unit in it losing concealment', entry: 'a unit entering it', attack: 'its attack', search: 'a Search' }[p['reason'] as string] ?? String(p['reason']);
+        out.push({ seq: e.seq, kind: 'info', text: `  ▣ ${fortKindName(c)} in ${hexLabel(c.hex)} revealed by ${how} (ASLRB A12.33)` });
+        break;
+      }
+      case 'asl.fort.dummies': {
+        // A Secret dr (B28.47): its owner alone reads it.
+        if (viewer !== p['side']) break;
+        const extra = p['extra'] as number;
+        out.push({ seq: e.seq, kind: 'info', text: `${sideNameOf(env, p['side'] as string)}: Dummy Minefield Secret dr ${p['dr']} — ${extra ? `${extra} more Dummy counter${extra === 1 ? '' : 's'}` : 'none extra'} (ASLRB B28.47)` });
+        break;
+      }
       case 'sk1.fortified.revealed': {
         const loc = p['loc'] as string | undefined;
         const what = loc ? `${hexLabel(hexOfLoc(loc))}${levelOfLoc(loc) ? ` level ${levelOfLoc(loc)}` : ''} is a Fortified Building Location` : `Building ${hexLabel(p['hex'] as string)} is fortified`;
@@ -706,7 +739,9 @@ export function describeEvents(env: QueryEnv, events: LoggedEvent[], viewer: Sid
         const fp = p['fp'] as { attack: [string, number][]; defense: [string, number][] } | undefined;
         const side = (xs: [string, number][]) => {
           const total = xs.reduce((n, [, v]) => n + v, 0);
-          const each = xs.map(([id, v]) => `${hiddenFrom(id) ? '?' : name(id)} ${v}`).join(' + ');
+          // A strength that is not the printed FP says why (a Reduced Japanese unit's full CCV, SK4 8.1.8.4).
+          const why = (id: string) => (hiddenFrom(id) || !env.state.pieces[id] ? null : env.query('cc.fpNote', { unit: id }, null));
+          const each = xs.map(([id, v]) => `${hiddenFrom(id) ? '?' : name(id)} ${v}${why(id) ? ` [${why(id)}]` : ''}`).join(' + ');
           return xs.length > 1 ? `${each} = ${total}` : each;
         };
         const strength = fp ? `${side(fp.attack)} vs ${side(fp.defense)} → ` : '';

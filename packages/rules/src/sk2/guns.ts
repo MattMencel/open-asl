@@ -406,12 +406,11 @@ export const revealBase: RuleModule = {
   install(r) {
     r.procedure<(c: Ctx, gun: PieceId, reason: string) => void>(REVEAL_GUN, () => (ctx, gunId) => {
       const g = pieceOf(ctx, gunId);
-      setTags(ctx, gunId, { [T2.hip]: null });
+      const formerCrew = ctx.state.pieces[g.tags[T2.hipCrew] as PieceId];
+      setTags(ctx, gunId, { [T2.hip]: null, [T2.hipCrew]: null });
       const manner = gunManner(ctx, g);
       if (manner && isHidden(manner)) setTags(ctx, manner.id, { [T2.hip]: null });
-      // Anyone else in its Location who was hidden with it (the crew that dropped it) is revealed too.
-      const loc = locOf(ctx.state, g);
-      if (loc) for (const p of personnelAt(ctx, loc, g.side)) if (isHidden(p)) setTags(ctx, p.id, { [T2.hip]: null });
+      if (formerCrew && isHidden(formerCrew)) setTags(ctx, formerCrew.id, { [T2.hip]: null });
     });
   },
 };

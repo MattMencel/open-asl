@@ -1852,3 +1852,23 @@ button.google:hover:not(:disabled) { filter: none; background: #f2f2f2; }
 .error-boundary.inline { position: absolute; top: 8px; left: 8px; right: 8px; margin: 0; max-width: none; z-index: 20; padding: 10px 14px; }
 .error-boundary p { margin: 6px 0; overflow-wrap: anywhere; }
 .error-boundary .buttons { display: flex; gap: 8px; margin-top: 10px; }
+
+/* Fortification counters at setup (full ASL): the tray tiles, the placed list and its choosers; the peek's counter lines. */
+.fort-tray { margin-top: 10px; }
+.fort-tray .fort-tile img { width: 48px; height: 48px; }
+.fort-tray .fort-tile.spent { opacity: 0.4; }
+.fort-placed { list-style: none; margin: 4px 0 0; padding: 0; }
+.fort-row { display: flex; align-items: center; gap: 6px; padding: 3px 0; border-bottom: 1px solid var(--line, #333840); font-size: 12px; }
+.fort-row:last-child { border-bottom: 0; }
+.fort-row.hidden img { opacity: 0.65; }
+.fort-row .fort-row-what { flex: 1; }
+.fort-row .amber { color: #ffb347; }
+.fort-row .chooser { display: inline-flex; gap: 2px; }
+.fort-row .chooser button { padding: 0 5px; font-size: 11px; line-height: 18px; border-radius: 3px; border: 1px solid var(--line, #4a5057); background: transparent; color: inherit; cursor: pointer; }
+.fort-row .chooser button.on { background: var(--brass, #c9a24a); color: #14171a; font-weight: 700; }
+.fort-row .chooser button:disabled { opacity: 0.35; cursor: default; }
+.fort-row .pill { padding: 1px 7px; border-radius: 10px; background: #3a3f45; font-size: 11px; }
+.fort-row .pill.on { background: var(--brass, #c9a24a); color: #14171a; font-weight: 600; }
+.peek-fort { display: flex; align-items: center; gap: 5px; font-size: 11.5px; margin-top: 2px; }
+.peek-fort.hidden { opacity: 0.8; font-style: italic; }
+.peek-fort img { border-radius: 2px; }

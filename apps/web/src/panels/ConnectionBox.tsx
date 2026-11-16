@@ -7,8 +7,10 @@ export function ConnectionBox(props: {
   units: { id: string; label: string }[];
   selected: boolean;
   onSelect: () => void;
-  actions: { label: string; run: () => void; hint?: string }[];
+  /** `disabled`: offered but refused now; `hint` then says why, shown under the buttons. */
+  actions: { label: string; run: () => void; hint?: string; disabled?: boolean }[];
 }) {
+  const refused = props.actions.filter((a) => a.disabled && a.hint);
   return (
     <section className={`panel small connection-box${props.selected ? ' selected' : ''}`}>
       <h3>
@@ -30,11 +32,16 @@ export function ConnectionBox(props: {
           </button>
         )}
         {props.actions.map((a) => (
-          <button key={a.label} onClick={a.run} title={a.hint}>
+          <button key={a.label} onClick={a.run} title={a.hint} disabled={a.disabled}>
             {a.label}
           </button>
         ))}
       </div>
+      {refused.map((a) => (
+        <p key={a.label} className="muted small">
+          {a.label}: {a.hint}
+        </p>
+      ))}
     </section>
   );
 }

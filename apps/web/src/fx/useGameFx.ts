@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Decision, GameState, HexId, LoggedEvent, PieceId, QueryEnv, SideId } from '@asl/engine';
-import { defOf, type IftResult, type Statics, isVisibleTo, hexOfLoc } from '@asl/rules';
+import { defOf, moveState, type IftResult, type Statics, isVisibleTo, hexOfLoc } from '@asl/rules';
 import { playSfx } from '../audio/engine';
 import type { SfxName, SfxParams } from '../audio/sfx';
 import { mgSound, ordnanceSound, vehicleMoveSound } from '../audio/weapons';
+import { ccPlayOrder } from './ccOrder';
 import { counterImage } from '../game/assets';
 import { NATION, defLabel, entryRoll, hexLabel, humanize, pieceLabel, sideNameOf } from '../game/describe';
 import type { FxLevel } from './settings';
@@ -75,6 +76,8 @@ export interface DiceToast {
  * board (the dice have landed and the first result text is up); `quiet`: the slot of a beat
  * without dice (footsteps, a "no LOS" tracer), short so movement stays responsive.
  */
+/** A Close Combat roll's beat is this many beats long: its outcome stays up before the other side's roll lands. */
+const CC_BEAT = 1.75;
 const PACE: Record<FxLevel, { beat: number; hold: number; reveal: number; quiet: number }> = {
   full: { beat: 1600, hold: 7000, reveal: 450, quiet: 500 },
   fast: { beat: 800, hold: 4200, reveal: 250, quiet: 250 },
@@ -281,7 +284,10 @@ export function useGameFx(env: QueryEnv, log: LoggedEvent[], decision: Decision 
     const theirs = viewer !== decision.owner;
     // The RPh is shared: once the attacker has rallied, the defender gets their turn at it.
     const defenderRally = decision.kind === 'phase' && shownState.phase === 'RPh' && decision.owner !== shownState.attacker;
-    if (decision.kind === 'firstFire' && theirs) c = { side: decision.owner, title: name, text: decision.data?.['ending'] ? `Move over in ${at} · last First Fire chance` : `Defensive First Fire · ${at}` };
+    // A DC being placed waits on this fire (SK4 4.3): the banner says so.
+    const dc = decision.kind === 'firstFire' ? moveState({ ...env, state: shownState } as QueryEnv)?.dcPending : undefined;
+    const dcText = dc ? ` · DC placement into ${hexLabel(hexOfLoc(dc.target))}` : '';
+    if (decision.kind === 'firstFire' && theirs) c = { side: decision.owner, title: name, text: decision.data?.['ending'] ? `Move over in ${at} · last First Fire chance` : `Defensive First Fire · ${at}${dcText}` };
     else if (decision.kind === 'ccArrange') c = { side: decision.owner, title: name, text: `Arrange leaders for Close Combat · ${at}` };
     else if (decision.kind === 'ccDeclare') c = { side: decision.owner, title: name, text: `Declare Close Combat · ${at}` };
     else if (defenderRally && theirs) c = { side: decision.owner, title: name, text: 'Rally Phase · their rallies' };
@@ -357,6 +363,8 @@ export function useGameFx(env: QueryEnv, log: LoggedEvent[], decision: Decision 
       sounds: { name: SfxName; delay: number; params?: SfxParams }[];
       endSeq: number;
       splitSeq?: number;
+      /** A side's Close Combat roll: its outcome is held a while before the other side rolls. */
+      cc?: boolean;
     }
     const beats: Beat[] = [];
     let beat: Beat = { toast: null, fx: [], sounds: [], endSeq: 0 };
@@ -442,6 +450,11 @@ export function useGameFx(env: QueryEnv, log: LoggedEvent[], decision: Decision 
       const pc = state.pieces[unit];
       return !!pc && !isVisibleTo(env, pc, viewer);
     };
+    /**
+     * A unit as a dice card's result line may name it: a concealed unit the viewer cannot see is its "?" (an attack on it
+     * says what it did without saying what it is, SK4 8.3); a hidden (HIP) one is not mentioned at all (null).
+     */
+    const resultName = (unit: PieceId): string | null => (!hiddenFrom(unit) ? labelOf(unit) : state.pieces[unit]?.tags['concealed'] === true ? '? (concealed)' : null);
     /** A vehicular MG piece (SK4 7.8): the vehicle holding it and its kind (BMG, CMG, AAMG, RMG), else null. */
     const vehicleMgHolder = (id: PieceId): { vehicle: PieceId; type: string } | null => {
       const pc = state.pieces[id];
@@ -501,12 +514,17 @@ export function useGameFx(env: QueryEnv, log: LoggedEvent[], decision: Decision 
     const ordnanceFired = new Set<PieceId>();
     // An engine started in this batch: the first hex it enters is heard once it has caught.
     let engineStarted = false;
-    for (const e of fresh) {
+    // A simultaneous CC is told one side at a time: each roll, then its outcome (ccPlayOrder). A beat then reveals the
+    // board up to the latest event played so far, which may lie past a roll still to be shown (rolls change nothing).
+    let playedSeq = 0;
+    for (const e of ccPlayOrder(fresh)) {
       const p = e.payload as Record<string, unknown>;
+      const playedBefore = playedSeq;
+      playedSeq = Math.max(playedSeq, e.seq);
       if (PHASE_EVENTS.has(e.type) && beat.splitSeq === undefined) beat.splitSeq = e.seq - 1;
       switch (e.type) {
         case 'dice.rolled': {
-          closeBeat(e.seq - 1);
+          closeBeat(Math.max(e.seq - 1, playedBefore));
           delay = 300;
           desperate.clear();
           snd('dice.roll', 0);
@@ -515,7 +533,10 @@ export function useGameFx(env: QueryEnv, log: LoggedEvent[], decision: Decision 
           beat.toast = lastToast;
           // Simultaneous CC rolls every DR before any result: each result goes back to its own side's roll.
           const cc = /^CC (\S+) in /.exec(p['label'] as string);
-          if (cc) ccToasts[cc[1]!] = lastToast;
+          if (cc) {
+            ccToasts[cc[1]!] = lastToast;
+            beat.cc = true;
+          }
           // A provisional reinforcement's entry dr: say whether the force comes on this turn.
           const entry = entryRoll(p['label'] as string, dice[0]!);
           if (entry) {
@@ -542,8 +563,10 @@ export function useGameFx(env: QueryEnv, log: LoggedEvent[], decision: Decision 
             const labels = (xs: unknown) => ((xs as { label?: string }[] | undefined) ?? []).map((x) => x.label).filter(Boolean).join(', ');
             const fpx = labels(p['fpExplain']);
             const drmx = labels(p['explain']);
-            lastToast.detail = `${p['fp']} FP${fpx ? ` (${fpx})` : ''} · ${p['column'] ?? '—'} column · DRM ${drm >= 0 ? '+' : ''}${drm}${drmx ? ` (${drmx})` : ''}${p['cowered'] ? ' · cowers' : ''}`;
-            lastToast.firers = attack.parts.map(chip);
+            // Concealed targets: Area Fire at a lower FP (SK4 8.3.2), shown beside the attack's own figure.
+            const area = p['area'] as { fp: number; column: number | null } | undefined;
+            lastToast.detail = `${p['fp']} FP${fpx ? ` (${fpx})` : ''} · ${p['column'] ?? '—'} column${area ? ` · vs concealed, Area Fire: ${area.fp} FP → ${area.column ?? 'no'} column` : ''} · DRM ${drm >= 0 ? '+' : ''}${drm}${drmx ? ` (${drmx})` : ''}${p['cowered'] ? ' · cowers' : ''}`;
+            lastToast.firers = [...new Set(attack.parts)].map(chip);
             lastToast.target = hexLabel(attack.target);
           }
           break;
@@ -584,7 +607,8 @@ export function useGameFx(env: QueryEnv, log: LoggedEvent[], decision: Decision 
           unitText(p['unit'] as string, text.toUpperCase(), bad ? 0xffb347 : 0xa8b098, r.kind === 'KIA' || r.kind === 'K', r.kind === 'none' ? 'hit.none' : r.kind === 'KIA' || r.kind === 'K' ? 'hit.kia' : 'hit.mc');
           if (lastToast) {
             const own = ((p['explain'] as { label?: string }[] | undefined) ?? []).map((x) => x.label).filter(Boolean).join(', ');
-            lastToast.results.push(`${labelOf(p['unit'] as string)}: ${text}${own ? ` (final ${p['finalDr']}: ${own})` : ''}`);
+            const who = resultName(p['unit'] as string);
+            if (who) lastToast.results.push(`${who}: ${text}${own ? ` (final ${p['finalDr']}: ${own})` : ''}`);
             if (bad) lastToast.tone = 'bad';
           }
           affected(p['unit'] as string, text, bad ? 'bad' : undefined);
@@ -634,7 +658,8 @@ export function useGameFx(env: QueryEnv, log: LoggedEvent[], decision: Decision 
             const leader = p['leader'] as string | null | undefined;
             if (leader && !lastToast.firers.some((u) => u.id === leader)) lastToast.firers.push(chip(leader));
             const why = rally && outcome === 'reduced' ? 'original 12: casualty reduced' : `${fpf ? 'FPF NMC ' : ''}${o.text.toLowerCase()} (${p['final']} vs ${p['target']})`;
-            lastToast.results.push(`${labelOf(unit)}: ${why}`);
+            const who = resultName(unit);
+            if (who) lastToast.results.push(`${who}: ${why}`);
             lastToast.tone = good ? (lastToast.tone === 'bad' ? 'bad' : 'good') : 'bad';
           }
           affected(unit, o.text.toLowerCase(), good ? 'good' : 'bad');
@@ -851,10 +876,22 @@ export function useGameFx(env: QueryEnv, log: LoggedEvent[], decision: Decision 
           // Losses before entry (SSR) strike counters still offboard: the dr's toast says what they were.
           if (p['reason'] === 'ssr') break;
           faceAt(p['id'] as string).defId = p['defId'] as string;
+          // Two half-squads recombined into a squad (SK4 8.4), or a squad deployed into half-squads, is no loss: the counter
+          // turns over without the shudder of a bad result, and a recombination says so.
+          if (p['reason'] === 'recombine' || p['reason'] === 'deploy') {
+            face(p['id'] as string, 'rallied');
+            // A squad deployed at setup is part of placing the force: nothing to call out.
+            if (p['reason'] === 'recombine' || state.phase !== 'setup') {
+              const word = p['reason'] === 'recombine' ? 'recombined' : 'deployed';
+              unitText(p['id'] as string, word.toUpperCase(), 0x9fe07a, false, 'ui.flip');
+              affected(p['id'] as string, word, 'good');
+            }
+            break;
+          }
           face(p['id'] as string, 'reduced');
-          // An ELR replacement is not a Casualty Reduction: its own event (next) says what happened; nor is a squad deployed at setup,
-          // nor a Japanese Step Reduction (its check's outcome already said so, SK4 8.1.2).
-          if (p['reason'] === 'elr' || p['reason'] === 'deploy' || p['reason'] === 'step') break;
+          // An ELR replacement is not a Casualty Reduction: its own event (next) says what happened; nor is a Japanese Step
+          // Reduction (its check's outcome already said so, SK4 8.1.2).
+          if (p['reason'] === 'elr' || p['reason'] === 'step') break;
           unitText(p['id'] as string, p['reason'] === 'rally' ? 'REPLACED' : 'REDUCED', 0xff8a65, false, 'hit.break');
           affected(p['id'] as string, 'reduced', 'bad');
           break;
@@ -920,7 +957,9 @@ export function useGameFx(env: QueryEnv, log: LoggedEvent[], decision: Decision 
             const drm = p['drm'] as number;
             const notes = ((p['explain'] as { label?: string }[] | undefined) ?? []).map((x) => x.label).filter(Boolean).join(', ');
             lastToast.detail = `${p['intensive'] ? 'Intensive Fire · ' : ''}${p['targetType']}${ammo && ammo !== 'HE' ? ` · ${ammo === 'SMOKE' ? 'Smoke' : ammo}` : ''} · range ${p['range']} · TH ${p['th']}${p['red'] ? ' (red)' : ''} · DRM ${drm >= 0 ? '+' : ''}${drm}${notes ? ` (${notes})` : ''}`;
-            lastToast.firers = [chip(weapon), ...(p['firer'] ? [chip(p['firer'] as PieceId)] : [])];
+            // A Gun shows its crew beside it; a vehicle's Main Armament is the vehicle itself, shown once.
+            const firer = p['firer'] as PieceId | undefined;
+            lastToast.firers = [chip(weapon), ...(firer && firer !== weapon ? [chip(firer)] : [])];
             lastToast.target = hexLabel(target);
             lastToast.results.push(hit && (ammo === 'SMOKE' || ammo === 'WP') ? `${ammo === 'WP' ? 'WP' : 'Smoke'} placed${outcome === 'ch' ? ' (Critical Hit)' : ''}` : outcome === 'ch' ? 'CRITICAL HIT' : hit ? 'HIT' : 'miss');
             lastToast.tone = hit ? 'bad' : 'neutral';
@@ -1211,7 +1250,7 @@ export function useGameFx(env: QueryEnv, log: LoggedEvent[], decision: Decision 
       const start = time;
       // A beat with dice lasts until the next roll, and at least until its last text has shown.
       const lastDelay = Math.max(0, ...b.fx.map((f) => ('delay' in f ? f.delay : 0)), ...b.sounds.map((s) => s.delay));
-      const length = b.toast ? Math.max(pace.beat, lastDelay + 600) : Math.min(pace.beat, Math.max(pace.quiet, lastDelay + 300));
+      const length = b.toast ? Math.max(b.cc ? pace.beat * CC_BEAT : pace.beat, lastDelay + 600) : Math.min(pace.beat, Math.max(pace.quiet, lastDelay + 300));
       const resultsAt = start + (b.toast ? pace.reveal : 0);
       if (b.toast) unshown.current.push(b.toast);
       const show = () => {

@@ -17,8 +17,8 @@ import { T2, isHidden } from './status';
  * The side's setup marks units hidden (`SetupAction.hidden`); their weapons hide with them. The SK2 HIP
  * module does the rest for any hidden unit, Gun or not: the other side does not see them, an enemy
  * entering (or advancing into) the hex reveals them, Infantry trying to enter in the MPh is turned back,
- * a router may not enter, an attack that affects them reveals them. This module adds the reveals the
- * card adds for units: firing (or directing fire) and moving. As with hidden Guns, only the screen
+ * a router may not enter, and moving or an attack that affects them reveals them. This module adds
+ * firing (or directing fire) and vehicle starts or turns. As with hidden Guns, only the screen
  * hides them, and online each seat receives only its redacted view (`redactState`), so the setup never reaches the other browser.
  *
  * Vehicles may be hidden too (ASLRB A12.3: HIP records "the TCA/VCA for AFVs"; LMA4 SSR 2: "ALL German units
@@ -170,15 +170,6 @@ export const hiddenUnitsModule: RuleModule = {
           revealFirer(ctx, ev.payload.weapon);
         },
       });
-    r.on<{ id: PieceId }>({
-      id: 'ssr.hidden-units.moved',
-      event: 'piece.moved',
-      handler(ctx, ev) {
-        if (ctx.state.phase === 'setup') return;
-        const u = ctx.state.pieces[ev.payload.id];
-        if (u && isHidden(u) && hideableUnit(ctx, u)) revealUnit(ctx, u.id, 'moved');
-      },
-    });
     // Where the rule lets units hide in Open Ground too (LMA4 SSR 2 names no terrain), one standing there cannot stay
     // hidden from a Good Order enemy that sees it within 16 hexes (SK4 6.4, as for a Gun; ASLRB A12.3 has HIP only in
     // Concealment Terrain). A unit manning a hidden Gun goes with the Gun (sk2/hip.ts).

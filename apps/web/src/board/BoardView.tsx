@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react';
 import { Application, Assets, Container, Graphics, Rectangle, Sprite, Text, Texture } from 'pixi.js';
 import { cubeDistance, cubeNeighbors, type GameState, type HexId, type Piece, type QueryEnv, type SideId } from '@asl/engine';
 import { GEO, coveredArc, defOf, gun as gunDef, gunHex, hexOf as hexOfPiece, inCoveredArc, isCaptured, isWeaponDef, isWreck, spineDirections, swHeldBy, tcaOf, vcaOf, vehicle as vehicleDef, type MapHex, type ObjectiveArea, type Statics, acquisitionOf, gunIdents, ordnanceOf, SMOKE58, stackOrder, hexOfLoc, levelOfLoc, locKey } from '@asl/rules';
-import { CAVE_GONE, UNKNOWN_DEF_ID, cavesParams, caveLoc, cornerOffset, hexPixel, isCaveLoc, moveState, shownFireMarker, sideToward, smokeGrenades } from '@asl/rules';
+import { CAVE_GONE, UNKNOWN_DEF_ID, cavesParams, caveLoc, cornerOffset, hexPixel, isCaveLoc, isPillboxLoc, moveState, pillboxCaHexsides, pillboxLoc, shownFireMarker, sideToward, smokeGrenades } from '@asl/rules';
 import { playableBounds, playableRect, printedRect, type CropPlacement } from './crop';
 import { boardImage, counterImage, cxMarker, loadTurrets, markerImage, splitTurret } from '../game/assets';
 import { identColor } from './ident';
@@ -201,6 +201,8 @@ interface Props {
   fires?: FireHex[];
   /** Hexes rubbled in play (full ASL B24): a grey ring on the hex and the rubble chit. */
   rubble?: RubbleHex[];
+  /** Fortification counters the viewer may see (full ASL A12.33, B26–B30), with the draft ones while setting up. */
+  fortifications?: FortHex[];
   /** Map hexes out of play (S36: the boards a secret game length leaves out, once revealed): drawn dark. */
   outOfPlay?: HexId[];
   /** Hide every counter and marker so the terrain underneath can be seen. */
@@ -441,18 +443,6 @@ function hipFaint(s: GameState, p: Piece): boolean {
   return p.loc.kind === 'held' && s.pieces[p.loc.by]?.tags['hip'] === true;
 }
 
-/** How many counters lie under a concealed stack's "?": a dark chip at its lower right corner. */
-function countChip(n: number): Container {
-  const c = new Container();
-  const r = 8;
-  c.addChild(new Graphics().circle(1, 2, r).fill({ color: 0x000000, alpha: 0.5 }));
-  c.addChild(new Graphics().circle(0, 0, r).fill({ color: 0x1d2430, alpha: 0.95 }).stroke({ color: 0xf2e8c8, width: 1.2, alpha: 0.9 }));
-  const tx = new Text({ text: String(n), style: { fontSize: 10, fill: 0xf2e8c8, fontWeight: 'bold' } });
-  tx.anchor.set(0.5);
-  c.addChild(tx);
-  return c;
-}
-
 /** How many broken units a stack hides under other counters: a red chip at its lower left corner. */
 /** The Collapsed Hut marker (SK4 8.2.1): a brown chit, since VASL has no counter for it. */
 function collapsedHutChit(): Container {
@@ -475,6 +465,18 @@ function brokenChip(n: number): Container {
   const tx = new Text({ text: String(n), style: { fontSize: 11, fill: 0xffffff, fontWeight: 'bold' } });
   tx.anchor.set(0.5);
   tx.position.set(0, 0.5);
+  c.addChild(tx);
+  return c;
+}
+
+/** A small "HIP" tag on a counter hidden from the enemy, as its owner sees it (full ASL A12.33). */
+function hipChip(): Container {
+  const c = new Container();
+  const tx = new Text({ text: 'HIP', style: { fontFamily: 'Oswald, Impact, sans-serif', fontWeight: '700', fontSize: 9, letterSpacing: 0.5, fill: 0xffd27f } });
+  const w = tx.width + 6;
+  const h = tx.height + 2;
+  c.addChild(new Graphics().roundRect(COUNTER - w + 2, -4, w, h, 2).fill({ color: 0x14171a, alpha: 0.9 }).stroke({ color: 0xc9a24a, width: 1 }));
+  tx.position.set(COUNTER - w + 5, -3);
   c.addChild(tx);
   return c;
 }
@@ -663,7 +665,7 @@ function drawObjectives(g: Graphics, objectives: ObjectiveArea[], placements: Pl
 }
 
 /** Counter base colour of each nationality, for the control chits (sampled from the counter art). */
-const NATION_COLOR: Record<string, number> = { ge: 0x5f87a1, am: 0x727b23, ru: 0x7c510d, br: 0xb8975a, al: 0x6f9c5a, it: 0x6c7a82 };
+const NATION_COLOR: Record<string, number> = { ge: 0x5f87a1, am: 0x727b23, ru: 0x7c510d, br: 0xb8975a, al: 0x6f9c5a, it: 0x6c7a82, ja: 0xe9c22a };
 /** Stock colours for counters without art. */
 const STOCK_COLOR: Record<string, number> = { ge: 0x9ac8e8, ru: 0xc8a050, am: 0x9fbf5f, br: 0xe5cea0, al: 0xbfe3c4, it: 0xd2d6d8 };
 /** Control chit: a quarter of a counter's width, as VASL players place them. */
@@ -728,6 +730,69 @@ export interface RubbleHex {
   from: number;
   kind: 'stone' | 'wood';
   burning?: boolean;
+}
+
+/** A fortification counter as the board shows it: its marker, hidden (the owner's view: faint, tagged), a roadblock's hexside and extension, a pillbox's Covered Arc. */
+export interface FortHex {
+  hex: HexId;
+  kind: 'foxhole' | 'trench' | 'ditch' | 'wire' | 'roadblock' | 'pillbox' | 'mines';
+  marker: string;
+  hidden?: boolean;
+  hexside?: number;
+  extension?: HexId[];
+  ca?: number;
+  label: string;
+}
+
+const ROADBLOCK_COLOR = 0xf2e8c8;
+const PILLBOX_COLOR = 0xff8c00;
+/** Roadblocks as a wall bar on their hexside and its extension (ASLRB B29.2); a pillbox's Covered Arc as a wedge over its two CA hexsides (B30.1). */
+function drawFortifications(g: Graphics, forts: FortHex[], hexOf: (id: HexId) => MapHex | undefined, t: ViewTransform) {
+  for (const f of forts) {
+    const h = hexOf(f.hex);
+    if (!h) continue;
+    const c = hexCenter(h, placementsUnused);
+    if (f.kind === 'roadblock' && f.hexside !== undefined) {
+      const bar = (hex: MapHex, k: number, dashed: boolean) => {
+        const m = hexCenter(hex, placementsUnused);
+        const a0 = cornerOffset(k);
+        const b0 = cornerOffset(k + 1);
+        const a = t.toView(m.x + a0.x, m.y + a0.y);
+        const b = t.toView(m.x + b0.x, m.y + b0.y);
+        g.moveTo(a.x, a.y).lineTo(b.x, b.y).stroke({ color: 0x000000, width: 7, alpha: 0.5 });
+        g.moveTo(a.x, a.y).lineTo(b.x, b.y).stroke({ color: ROADBLOCK_COLOR, width: 5, alpha: f.hidden ? 0.55 : 0.95 });
+        if (dashed) {
+          for (let i = 0; i < 6; i += 2) {
+            const p = { x: a.x + ((b.x - a.x) * i) / 6, y: a.y + ((b.y - a.y) * i) / 6 };
+            const q = { x: a.x + ((b.x - a.x) * (i + 1)) / 6, y: a.y + ((b.y - a.y) * (i + 1)) / 6 };
+            g.moveTo(p.x, p.y).lineTo(q.x, q.y).stroke({ color: 0xc23b2e, width: 2.5, alpha: 0.95 });
+          }
+        }
+      };
+      bar(h, f.hexside, true);
+      // The extension: a line from the hexside's vertices to the centre dot of the woods/building hexes it reaches into.
+      for (const ext of f.extension ?? []) {
+        const e = hexOf(ext);
+        if (!e) continue;
+        const m = hexCenter(e, placementsUnused);
+        const a0 = cornerOffset(f.hexside);
+        const b0 = cornerOffset(f.hexside + 1);
+        const near = [a0, b0].map((o) => ({ x: c.x + o.x, y: c.y + o.y })).sort((p, q) => Math.hypot(p.x - m.x, p.y - m.y) - Math.hypot(q.x - m.x, q.y - m.y))[0]!;
+        const a = t.toView(near.x, near.y);
+        const b = t.toView(m.x, m.y);
+        g.moveTo(a.x, a.y).lineTo(b.x, b.y).stroke({ color: ROADBLOCK_COLOR, width: 4, alpha: f.hidden ? 0.4 : 0.8 });
+      }
+    }
+    if (f.kind === 'pillbox' && f.ca !== undefined) {
+      // The wedge: the hex centre to the two CA hexsides (the corners either side of the hexspine the arrow points at).
+      const [k0] = pillboxCaHexsides(f.ca);
+      const pts = [c, ...[k0, k0 + 1, k0 + 2].map((k) => ({ x: c.x + cornerOffset(k).x, y: c.y + cornerOffset(k).y }))].map((p) => t.toView(p.x, p.y));
+      g.poly(pts.flatMap((p) => [p.x, p.y])).fill({ color: PILLBOX_COLOR, alpha: f.hidden ? 0.16 : 0.26 });
+      const tip = t.toView(c.x + cornerOffset(f.ca).x, c.y + cornerOffset(f.ca).y);
+      const o = t.toView(c.x, c.y);
+      g.moveTo(o.x, o.y).lineTo(tip.x, tip.y).stroke({ color: PILLBOX_COLOR, width: 2.5, alpha: 0.9 });
+    }
+  }
 }
 
 const BLAZE_COLOR = 0xe11e14;
@@ -814,12 +879,18 @@ export function vehicleMgMarkers(env: { state: GameState; statics: Statics }, p:
   return out;
 }
 
-/** Badge markers drawn on a unit for its status tags; `moving` is the vehicle now spending MP, if any. */
-function unitMarkers(p: Piece, nationality?: string, moving?: string): string[] {
+/**
+ * Badge markers drawn on a unit for its status tags, bottom first; `moving` is the vehicle now spending MP, if any.
+ */
+export function unitMarkers(p: Piece, nationality?: string, moving?: string): string[] {
   const m: string[] = [];
   const t = p.tags;
   // A wreck is debris: the status it had as a vehicle (Immobile, Motion, a malfunctioned MA...) no longer applies.
   if (t['wreck']) return m;
+  // A hidden (HIP) unit wears no "?": that is concealment's counter. Its owner sees it drawn faint instead (`hipFaint`).
+  // SK4 8.3: the owner's concealed units wear their "?" (the enemy sees a bare "?" stand-in instead). It goes on first,
+  // directly on the unit, so its status markers (Pin, CX, TI, fire markers...) sit on top of it and stay in view.
+  if (t['concealed'] && nationality && p.defId !== UNKNOWN_DEF_ID) m.push(`qmark-${nationality}`);
   if (t['pinned']) m.push('pin');
   if (t['dm']) m.push('dm');
   if (t['cx']) m.push(cxMarker(nationality));
@@ -833,9 +904,6 @@ function unitMarkers(p: Piece, nationality?: string, moving?: string): string[] 
   // Full ASL: TI for the Player Turn and a Labor counter (ASLRB B24.7, B24.8).
   if (t['ti']) m.push('TI');
   if (typeof t['labor'] === 'string') m.push(String(t['labor']).endsWith('@-2') ? 'Labor2' : 'Labor1');
-  // A hidden (HIP) unit wears no "?": that is concealment's counter. Its owner sees it drawn faint instead (`hipFaint`).
-  // SK4 8.3: the owner's concealed units wear their "?" (the enemy sees a bare "?" stand-in instead).
-  if (t['concealed'] && nationality && p.defId !== UNKNOWN_DEF_ID) m.push(`qmark-${nationality}`);
   // SK4 8.1.8.6: the Banzai counter for the Player Turn.
   if (t['banzai'] !== undefined) m.push('Banzai');
   // SK3 vehicles (SK4 3.3.2, 7.2, 7.6, 7.7, 7.10).
@@ -889,6 +957,7 @@ export function BoardView({
   control = {},
   fortified = [],
   fires = [],
+  fortifications = [],
   rubble = [],
   outOfPlay = [],
   hidePieces = false,
@@ -1133,7 +1202,7 @@ export function BoardView({
         L.controls.addChild(g, t);
       }
       // The label, just outside the handle along its direction from the hex.
-      const label = new Text({ text: c.tone === 'hull' ? 'HULL' : 'TURRET', resolution: textRes(), style: { fontFamily: 'Oswald, Impact, sans-serif', fontWeight: '600', fontSize: 8.5 * k, letterSpacing: 0.9 * k, fill: hot ? UI.brassHi : tone } });
+      const label = new Text({ text: c.tag ?? (c.tone === 'hull' ? 'HULL' : 'TURRET'), resolution: textRes(), style: { fontFamily: 'Oswald, Impact, sans-serif', fontWeight: '600', fontSize: 8.5 * k, letterSpacing: 0.9 * k, fill: hot ? UI.brassHi : tone } });
       label.anchor.set(0.5, 0.5);
       const lw = label.width + 8 * k;
       const lh = label.height + 3 * k;
@@ -1378,7 +1447,7 @@ export function BoardView({
   useEffect(() => {
     if (ready.current) void redraw();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state, overlay, control, fortified, fires, rubble, outOfPlay]);
+  }, [state, overlay, control, fortified, fires, rubble, fortifications, outOfPlay]);
 
   const hideMarkersRef = useRef(hideMarkers);
   hideMarkersRef.current = hideMarkers;
@@ -2063,6 +2132,7 @@ export function BoardView({
     drawFortified(L.fort, L.fortLabels, fort, anyHex, xf.current);
     drawOutOfPlay(L.fort, dead, anyHex, xf.current);
     drawFires(L.fort, fires, rubble, anyHex, xf.current);
+    drawFortifications(L.fort, fortifications, anyHex, xf.current);
     drawArcs();
     const urls: (string | null)[] = [];
     await loadTurrets();
@@ -2075,6 +2145,7 @@ export function BoardView({
       for (const m of markersOf(p)) urls.push(markerImage(m));
     }
     for (const m of ['Smk2', 'Smk3', 'WP1', 'WP2', 'CC', 'Melee', 'RFP01', 'RFP02', 'RFP04', 'RFP06', 'RFP08', 'RFP12', 'acq1wh', 'acq2wh', 'Lev1', 'Lev2', 'Cave', 'CaveOG', 'Blaze', 'Flame', 'Rubble', 'TI', 'Labor1', 'Labor2']) urls.push(markerImage(m));
+    for (const f of fortifications) urls.push(markerImage(f.marker));
     if (o.declaredFire) for (const m of new Set(o.declaredFire.units.values())) urls.push(markerImage(m));
     await preload(urls);
     if (token !== redrawToken.current) return;
@@ -2153,7 +2224,14 @@ export function BoardView({
     const fireByLoc = new Map(fires.map((f) => [f.loc, f] as const));
     const rubbleByHex = new Map(rubble.map((r) => [r.hex, r] as const));
     for (const f of fires) if (f.loc.includes(':')) leveledHexes.add(hexOfLoc(f.loc));
-    const order = [...new Set([...byHex.keys(), ...markedHexes, ...acquired.keys(), ...fireByLoc.keys(), ...rubbleByHex.keys(), ...[...caveHexes].flatMap(([h, gone]) => (gone ? [h] : [caveLoc(h)]))])].sort();
+    // Fortification counters (full ASL): drawn with or without a stack; a pillbox is a Location of its own, its pile set
+    // off from the ground's as an upper level's is (B30.1).
+    const fortByHex = new Map<HexId, FortHex[]>();
+    for (const f of fortifications) fortByHex.set(f.hex, [...(fortByHex.get(f.hex) ?? []), f]);
+    const pillboxes = fortifications.filter((f) => f.kind === 'pillbox');
+    for (const f of pillboxes) leveledHexes.add(f.hex);
+    for (const k of byHex.keys()) if (isPillboxLoc(k)) leveledHexes.add(hexOfLoc(k));
+    const order = [...new Set([...byHex.keys(), ...markedHexes, ...acquired.keys(), ...fireByLoc.keys(), ...rubbleByHex.keys(), ...fortByHex.keys(), ...pillboxes.map((f) => pillboxLoc(f.hex)), ...[...caveHexes].flatMap(([h, gone]) => (gone ? [h] : [caveLoc(h)]))])].sort();
     for (const key of order) {
       const onSide = key.endsWith(SNAP_PILE);
       const onCorner = key.endsWith(BYPASS_PILE) || onSide;
@@ -2163,6 +2241,8 @@ export function BoardView({
       if (!h || statics.map.isHidden?.(h.id)) continue;
       const level = levelOfLoc(hex);
       const inCave = isCaveLoc(hex);
+      const inPillbox = isPillboxLoc(hex);
+      const pillboxHere = fortByHex.get(h.id)?.find((f) => f.kind === 'pillbox');
       const caveHex = caveHexes.get(h.id) === false;
       const k = onSide && o.snap ? sideToward(statics.map, o.snap.hex, o.snap.from) : null;
       const cornerAt =
@@ -2170,7 +2250,7 @@ export function BoardView({
           ? (() => { const m = hexCenter(h, placements); const a = cornerOffset(k); const b = cornerOffset((k + 1) % 6); return xf.current.toView(m.x + (a.x + b.x) / 2, m.y + (a.y + b.y) / 2); })()
           : onCorner && byp && !onSide ? (() => { const m = hexCenter(h, placements); const off = cornerOffset(byp.at); return xf.current.toView(m.x + off.x, m.y + off.y); })() : null;
       const c0 = cornerAt ?? center(h);
-      const shift = onCorner || !leveledHexes.has(h.id) ? 0 : caveHex ? (inCave ? -LEVEL_SHIFT : LEVEL_SHIFT) : level ? LEVEL_SHIFT * level : -LEVEL_SHIFT;
+      const shift = onCorner || !leveledHexes.has(h.id) ? 0 : caveHex ? (inCave ? -LEVEL_SHIFT : LEVEL_SHIFT) : inPillbox ? LEVEL_SHIFT : level ? LEVEL_SHIFT * level : -LEVEL_SHIFT;
       const c = { x: c0.x + shift, y: c0.y - shift };
       const list = byHex.get(key) ?? [];
       const stack: Piece[] = [];
@@ -2181,8 +2261,14 @@ export function BoardView({
       stack.push(...list.filter((p) => isWeaponDef(defOf(env, p))));
       const people = list.filter((p) => !isWeaponDef(defOf(env, p)));
       // A side's vehicle lies under its Infantry (its MGs are part of it, not counters), its "?" under its Known units.
-      const personnel = personnelStack(env as never, people, o.selectedPieces);
+      let personnel = personnelStack(env as never, people, o.selectedPieces);
+      // Units beneath a foxhole, trench or Wire counter are drawn under it, the others on top (ASLRB B27.1, B26.4).
+      const entrenchment = !onCorner && !inPillbox ? fortByHex.get(h.id)?.find((f) => f.kind === 'foxhole' || f.kind === 'trench' || f.kind === 'ditch' || f.kind === 'wire') : undefined;
+      const beneath = (p: Piece) => p.loc.kind === 'hex' && !!p.loc.pos && (!!p.loc.pos.ent || p.loc.pos.wire === 'beneath');
+      if (entrenchment) personnel = [...personnel.filter(beneath), ...personnel.filter((p) => !beneath(p))];
+      let beneathCount = stack.length;
       for (const p of personnel) {
+        if (entrenchment && beneath(p)) beneathCount += 1 + Object.values(s.pieces).filter((x) => x.loc.kind === 'held' && x.loc.by === p.id && !isFixedMg(defOf(env, x))).length;
         const held = Object.values(s.pieces).filter((x) => x.loc.kind === 'held' && x.loc.by === p.id && !isFixedMg(defOf(env, x)));
         stack.push(p);
         stack.push(...held.filter((x) => defOf(env, x).kind === 'gun'));
@@ -2214,8 +2300,12 @@ export function BoardView({
       const first = L.pieces.children.length;
       // Hex-level markers and Acquired Target counters follow the stack at the usual step; an upper level's pile
       // starts on its Level counter (full ASL).
-      const chit = level > 0 ? texture(markerImage(`Lev${level}`)) : null;
-      const offsets = stackOffsets([...(chit ? [COUNTER] : []), ...stack.map((p) => sizeOf(defOf(env, p))), ...Array<number>(8).fill(COUNTER)]);
+      const chit = level > 0 ? texture(markerImage(`Lev${level}`)) : inPillbox && pillboxHere ? texture(markerImage(pillboxHere.marker)) : null;
+      // The counters of the hex other than an entrenchment's or the pillbox's: Wire in a pillbox hex, a minefield, a roadblock.
+      const fortChits = onCorner || inPillbox ? [] : (fortByHex.get(h.id) ?? []).filter((f) => f !== entrenchment && f.kind !== 'pillbox');
+      // An enemy's "?" sits on as many blank counters as it hides (`blankUnder`): each takes its step in the pile.
+      const blankUnder = (p: Piece) => (defOf(env, p).kind === 'unknown' ? ((p.tags['counters'] as number | undefined) ?? 0) : 0);
+      const offsets = stackOffsets([...(chit ? [COUNTER] : []), ...stack.flatMap((p) => [...Array<number>(blankUnder(p)).fill(COUNTER), sizeOf(defOf(env, p))]), ...Array<number>(8).fill(COUNTER)]);
       // The Level counter shows a little more of itself than a counter in a pile does, so it reads at a glance.
       if (chit) for (const o of offsets.slice(1)) Object.assign(o, { x: o.x + LEVEL_PEEK, y: o.y - LEVEL_PEEK });
       let i = 0;
@@ -2224,12 +2314,55 @@ export function BoardView({
         box.position.set(c.x - COUNTER / 2 + offsets[0]!.x, c.y - COUNTER / 2 + offsets[0]!.y);
         box.addChild(new Graphics().roundRect(2, 3, COUNTER, COUNTER, 4).fill({ color: 0x000000, alpha: 0.45 }));
         box.addChild(counterSprite(chit, COUNTER));
+        if (inPillbox && pillboxHere?.hidden) {
+          box.alpha = 0.62;
+          box.addChild(hipChip());
+        }
         L.pieces.addChild(box);
         i++;
       }
+      /** A fortification counter in the pile (faint and tagged while hidden from the enemy; a roadblock turned to its hexside). */
+      const fortCounter = (f: FortHex) => {
+        const ft = texture(markerImage(f.marker));
+        if (!ft) return;
+        const off = offsets[Math.min(i, offsets.length - 1)]!;
+        const box = new Container();
+        box.position.set(c.x - COUNTER / 2 + off.x, c.y - COUNTER / 2 + off.y);
+        box.addChild(new Graphics().roundRect(2, 3, COUNTER, COUNTER, 4).fill({ color: 0x000000, alpha: 0.45 }));
+        const sp = counterSprite(ft, COUNTER);
+        if (f.kind === 'roadblock' && f.hexside !== undefined) {
+          // The art's arrow points down; turn it to the hexside (hexside k's outward normal is 120° + 60k, screen degrees from up).
+          sp.rotation = ((60 * f.hexside - 60) * Math.PI) / 180 + xf.current.angle;
+        }
+        box.addChild(sp);
+        if (f.hidden) {
+          box.alpha = 0.62;
+          box.addChild(hipChip());
+        }
+        L.pieces.addChild(box);
+        i++;
+      };
+      let drawnUnits = 0;
+      let entrenchmentDrawn = false;
       for (const p of stack) {
+        if (entrenchment && !entrenchmentDrawn && drawnUnits >= beneathCount) {
+          fortCounter(entrenchment);
+          entrenchmentDrawn = true;
+        }
+        drawnUnits++;
         const d = defOf(env, p);
         const size = sizeOf(d);
+        // The enemy's "?" stack (SK4 8.3): the counters under it show as a pile of blank counters, as at the table, where
+        // the stack's height shows but not what is in it.
+        for (let k = 0; k < blankUnder(p); k++) {
+          const blank = new Container();
+          blank.position.set(c.x - COUNTER / 2 + offsets[i]!.x, c.y - COUNTER / 2 + offsets[i]!.y);
+          blank.addChild(new Graphics().roundRect(2, 3, COUNTER, COUNTER, 4).fill({ color: 0x000000, alpha: 0.45 }));
+          blank.addChild(new Graphics().roundRect(0, 0, COUNTER, COUNTER, 4).fill({ color: NATION_COLOR[natOf(p)] ?? 0x9a9a8a }).stroke({ color: 0x1a1a1a, width: 1.5, alpha: 0.7 }));
+          blank.addChild(new Graphics().roundRect(3, 3, COUNTER - 6, COUNTER - 6, 3).stroke({ color: 0xffffff, width: 1, alpha: 0.18 }));
+          L.pieces.addChild(blank);
+          i++;
+        }
         const was = prev.get(p.id);
         // A face change that is about to be animated keeps the old face until its effect plays.
         const newUrl = faceOf(p, natOf(p));
@@ -2312,13 +2445,6 @@ export function BoardView({
           box.addChild(tg);
         }
         if (p.tags['broken'] === true) box.addChild(new Graphics().roundRect(1, 1, size - 2, size - 2, 4).stroke({ color: BROKEN_RED, width: 2.5 }));
-        // The enemy's "?" says how many counters are under it, as the stack's height would at the table (SK4 8.3).
-        const under = d.kind === 'unknown' ? (p.tags['counters'] as number | undefined) : undefined;
-        if (under) {
-          const chip = countChip(under);
-          chip.position.set(size - 3, size - 3);
-          box.addChild(chip);
-        }
         if (o.selectedPieces?.has(p.id)) {
           // Turned with the counter: a vehicle or Gun is drawn facing its Covered Arc.
           const sel = new Graphics().roundRect(-size / 2 - 1, -size / 2 - 1, size + 2, size + 2, 5).stroke({ color: 0xffe066, width: 3 });
@@ -2383,6 +2509,8 @@ export function BoardView({
         nextPos.set(p.id, { x, y, url });
         i++;
       }
+      if (entrenchment && !entrenchmentDrawn) fortCounter(entrenchment);
+      for (const f of fortChits) fortCounter(f);
       // The Cave counter on top of the units in the cave (S70 SSR 2).
       if (inCave) {
         const ct = texture(markerImage('Cave'));

@@ -298,6 +298,8 @@ export type SetupAction = Action & {
   hidden?: PieceId[];
   /** Personnel set up under an OB concealment counter (SK4 8.3): in Concealment Terrain, one counter per stack. */
   concealed?: PieceId[];
+  /** Personnel set up beneath a foxhole, trench or Wire counter in their hex (full ASL B27.1, B27.51, B26.4; the `fortifications` special rule). */
+  beneath?: PieceId[];
 };
 
 /** Procedure run after a setup's placements are applied: (ctx, action, decision). Other rule packs wrap it (Guns). */

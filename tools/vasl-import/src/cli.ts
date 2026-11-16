@@ -18,7 +18,7 @@ import { buildCounters, gunSlots, pieceInfos, pieceSlots } from './counters';
 import { parseVehicleSvg, vehicleSlots } from './vehicles';
 import type { MmcDef, VehicleDef } from '@asl/rules';
 import { decodeLosData, deriveBoard } from './boards';
-import { rasterizeCounter, skCaveMarker, toWebp } from './raster';
+import { layeredMarker, rasterizeCounter, skCaveMarker, toWebp } from './raster';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 const cacheDir = join(root, 'tools/vasl-import/cache');
@@ -64,6 +64,9 @@ const MARKERS = [
   // its force faces, the Gust/Change face, TI and Labor (B24.7, B24.8), grey drifting Smoke.
   'MS/Flame', 'MS/Blaze', 'ML/Rubble', 'ML/Wind1', 'ML/Wind2', 'ML/Wind3', 'ML/Wind4', 'ML/Wind5', 'ML/Wind6', 'ML/WindNo', 'ML/WindMB', 'ML/WindHW', 'ML/WindB',
   'MS/ti=TI', 'MS/Labor1', 'MS/Labor2', 'ML/Smk2gr',
+  // Full ASL minefields (ASLRB B28): the blank Known/revealed-presence counter, the A-P strengths, the A-T factors, the
+  // Dummy face and the arrowed Known Minefield counters (B28.46).
+  'MS/Mine', 'MS/MineD', 'MS/MineAP06', 'MS/MineAP08', 'MS/MineAP12', 'MS/KnownMineleft', 'MS/KnownMineright',
   // SK3 vehicles: Motion, Bog/Mired/Immobilized, Shock/UK, Stun (+1 side), STUN/Recall, Low Ammo, vehicle
   // acquisition, Bounding Fire, malfunctioned/disabled MA and MGs, and the CE/BU turret counters (one
   // orientation each; the client turns them to the Turret Covered Arc) and the non-turreted CE/BU markers.
@@ -73,8 +76,31 @@ const MARKERS = [
   'ge/geCE3=turret-ce-ge', 'ge/geBU3=turret-bu-ge', 'ru/ruCE3=turret-ce-ru', 'ru/ruBU3=turret-bu-ru', 'ge/geCEnt=ce-ge', 'ge/geBUnt=bu-ge', 'ru/ruCEnt=ce-ru', 'ru/ruBUnt=bu-ru',
 ];
 
+/**
+ * Fortification counters VASL builds from layers (ASLRB B26, B27, B29, B30): a colour square under the drawing and,
+ * for a foxhole or pillbox, the size or strength layer; composited as the module stacks them (`layeredMarker`).
+ */
+const LAYERED_MARKERS: Record<string, string[]> = {
+  Foxhole1S: ['ML/_brownd58', 'ML/Foxhole', 'ML/Fox1'],
+  Foxhole2S: ['ML/_brownd58', 'ML/Foxhole', 'ML/Fox2'],
+  Foxhole3S: ['ML/_brownd58', 'ML/Foxhole', 'ML/Fox3'],
+  Trench: ['ML/_brownd58', 'ML/Trench'],
+  ATditch: ['ML/_brownd58', 'ML/ATditch'],
+  Wire: ['ML/_white58', 'ML/Wire'],
+  Roadblock: ['ML/_white58', 'ML/Rdblk'],
+  // The A-T mine SVGs embed a picture the module no longer ships, so their GIF faces are used, on the white square.
+  ...Object.fromEntries([1, 2, 3, 4, 5].map((n) => [`MineAT${n}`, ['MS/_white12', `MS/MineAT${n}`]])),
+  ...Object.fromEntries(
+    [1, 2, 3].flatMap((cap) => [
+      [`Pillbox${cap}35`, ['ML/_brownd58', `ML/PillNCap${cap}`, 'ML/PillN35']],
+      [`Pillbox${cap}46`, ['ML/_brownd58', `ML/PillNCap${cap}`, 'ML/PillN46']],
+      [`Pillbox${cap}57`, ['ML/_gray58', `ML/PillNCap${cap}`, 'ML/PillN57']],
+    ]),
+  ),
+};
+
 function args() {
-  const out: { vmod?: string; boards: Record<string, string>; skipArt: boolean } = { boards: {}, skipArt: false };
+  const out: { vmod?: string; boards: Record<string, string>; skipArt: boolean; onlyMarkers: boolean } = { boards: {}, skipArt: false, onlyMarkers: false };
   const a = process.argv.slice(2);
   for (let i = 0; i < a.length; i++) {
     if (a[i] === '--vmod') out.vmod = a[++i];
@@ -82,6 +108,8 @@ function args() {
       const [b, p] = a[++i]!.split('=');
       out.boards[b!] = p ?? DEFAULTS.board(b!);
     } else if (a[i] === '--skip-art') out.skipArt = true;
+    // Markers only: the counters and boards of the committed manifest are kept as they are (the HD counter art is not re-rendered).
+    else if (a[i] === '--only-markers') out.onlyMarkers = true;
   }
   if (Object.keys(out.boards).length === 0) for (const b of ['y', 'z', 'x']) out.boards[b] = DEFAULTS.board(b);
   return out;
@@ -161,10 +189,12 @@ async function main() {
   } = { source: { vasl: version }, counters: {}, markers: {}, boards: {} };
 
   const src = { read: (p: string) => vmod[`images/${p}`], fontFiles };
+  // Markers only: those the committed manifest already has keep their art (the counter-art polish included).
+  const prevMarkers: Record<string, string> = opts.onlyMarkers ? (JSON.parse(readFileSync(join(genDir, 'assets.json'), 'utf8')) as { markers: Record<string, string> }).markers : {};
   const rendered = new Set<string>();
   const render = async (img: string, dir: string) => {
     const out = `counters/${img}.webp`;
-    if (rendered.has(out) || opts.skipArt) return out;
+    if (rendered.has(out) || opts.skipArt || opts.onlyMarkers) return out;
     const svg = text(`images/${dir}/${img}.svg`);
     if (svg) write(join(artDir, out), await rasterizeCounter(svg, dir, src));
     else {
@@ -190,6 +220,10 @@ async function main() {
     const svg = text(`images/${dir}/${name}.svg`);
     const gif = vmod[`images/${dir}/${name}.gif`] ?? vmod[`images/${dir}/${name}.png`];
     const out = `markers/${key ?? name}.webp`;
+    if (prevMarkers[key ?? name]) {
+      manifest.markers[key ?? name] = prevMarkers[key ?? name]!;
+      continue;
+    }
     if (!opts.skipArt) {
       if (svg) write(join(artDir, out), await rasterizeCounter(svg, dir, src));
       else if (gif) write(join(artDir, out), await toWebp(gif, { lossless: true }));
@@ -199,6 +233,20 @@ async function main() {
       }
     }
     manifest.markers[key ?? name] = out;
+  }
+  for (const [key, layers] of Object.entries(LAYERED_MARKERS)) {
+    const out = `markers/${key}.webp`;
+    if (prevMarkers[key]) {
+      manifest.markers[key] = prevMarkers[key]!;
+      continue;
+    }
+    const data = layers.map((l) => vmod[`images/${l}.gif`]);
+    if (data.some((d) => !d)) {
+      console.log(`  warn: missing layer for ${key}`);
+      continue;
+    }
+    if (!opts.skipArt) write(join(artDir, out), await layeredMarker(data as Uint8Array[]));
+    manifest.markers[key] = out;
   }
   // The Starter Kit Cave counter and its Open Ground back (S70), composed from VASL's full ASL Cave drawing.
   {
@@ -214,6 +262,16 @@ async function main() {
 
   // ------------------------------------------------------------ boards
   const boardsOut: Record<string, unknown> = {};
+  if (opts.onlyMarkers) {
+    const prev = JSON.parse(readFileSync(join(genDir, 'assets.json'), 'utf8')) as typeof manifest;
+    manifest.counters = prev.counters;
+    manifest.boards = prev.boards;
+    manifest.markers = { ...prev.markers, ...manifest.markers };
+    // The committed manifest is two-space indented.
+    write(join(genDir, 'assets.json'), JSON.stringify(manifest, null, 2) + '\n');
+    console.log(`wrote the markers to ${artDir} and ${genDir}/assets.json`);
+    return;
+  }
   for (const [b, p] of Object.entries(opts.boards)) {
     const zip = unzipSync(await load(p));
     const los = zip['LOSData'];

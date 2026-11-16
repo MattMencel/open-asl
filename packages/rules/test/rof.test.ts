@@ -313,4 +313,50 @@ describe('leader direction of ROF shots', () => {
     // Not a second attack of another kind: the squad, having fired, cannot be directed again (nor fire at all).
     expect(fire(t.state, { units: ['rsq'], sw: [], target: 'yM6', directors: ['ldr'] })).not.toBeNull();
   });
+
+  it('a leader who directed a Defensive First Fire stays First Fire when he directs the MG\u2019s ROF shot; Final only on Subsequent First Fire (ASLRB A7.53)', () => {
+    // A German 8-0 with a 2-3-7 HS and its LMG (ROF 1) in a stone building; a Russian squad comes through J3 (stone
+    // building, 2 MF) and on into K3 (open, adjacent). Every attack rolls high enough to leave the target unharmed.
+    const { engine, state } = makeEngine({
+      board: 'z',
+      terrain: { zJ3: { terrain: 'building-stone' }, zK5: { terrain: 'building-stone' } },
+      scenario: RU_VS_GE,
+      startPhase: 'MPh',
+      // LMG: 6+1 (colored 1 keeps ROF), +3 TEM -1 FFNAM = 9 on the 2 column. ROF shot: 6+4 (loses ROF; not its B11) = 12.
+      // SFF: 6+3, halved to the 1 column.
+      dice: [6, 1, 6, 4, 6, 3, 6, 6, 6, 6, 6, 6],
+      pieces: [
+        { id: 'r1', def: 'ru.447', side: 'ru', hex: 'zI4' },
+        { id: 'hs', def: 'ge.237', side: 'ge', hex: 'zK5' },
+        { id: 'lmg', def: 'ge.LMG', side: 'ge', heldBy: 'hs' },
+        { id: 'gL', def: 'ge.L80', side: 'ge', hex: 'zK5' },
+      ],
+    });
+    const marks = (s: GameState) => ({ gL: s.pieces['gL']!.tags['fire'], hs: s.pieces['hs']!.tags['fire'], lmg: s.pieces['lmg']!.tags['fire'] });
+    let s = act(engine, state, { type: 'move.start', units: ['r1'] }).state;
+    s = act(engine, s, { type: 'move.step', to: 'zJ3' }).state;
+    // The HS fires its LMG (a HS firing a SW forfeits its own FP), the leader directing: he is marked, the LMG kept ROF.
+    s = act(engine, s, { type: 'defFire', decl: { units: [], sw: ['lmg'], target: 'zJ3', directors: ['gL'] } }).state;
+    expect(marks(s)).toEqual({ gL: 'first', hs: undefined, lmg: undefined });
+    // The LMG's ROF shot, directed again: plain First Fire (not halved), and the leader is not firing again.
+    const rof = act(engine, s, { type: 'defFire', decl: { units: [], sw: ['lmg'], target: 'zJ3', directors: ['gL'] } });
+    expect((rof.events.find((e) => e.type === 'sk1.fire.attack')!.payload as { attack: { mode: string } }).attack.mode).toBe('first');
+    s = rof.state;
+    expect(marks(s)).toEqual({ gL: 'first', hs: undefined, lmg: 'first' });
+    // Subsequent First Fire by the same LMG, directed: now he goes to Final Fire, and the LMG with the HS holding it
+    // (SK1 3.3.1: a unit firing again is marked Final with its SW).
+    // Two shots for the 2 MF spent in J3: the move goes on.
+    expect(engine.currentDecision(s)?.owner).toBe('ru');
+    s = act(engine, s, { type: 'move.step', to: 'zK3' }).state;
+    s = act(engine, s, { type: 'defFire', decl: { units: [], sw: ['lmg'], target: 'zK3', directors: ['gL'] } }).state;
+    expect(marks(s)).toEqual({ gL: 'final', hs: 'final', lmg: 'final' });
+    // Into the next Player Turn: every fire marker is off.
+    for (let i = 0; i < 40 && !(s.turn > 1 || s.attacker !== state.attacker); i++) {
+      const d = engine.currentDecision(s)!;
+      const l = engine.legalActions(s, d.owner);
+      s = engine.submit(s, l.find((a) => a.type === 'endPhase') ?? l.find((a) => a.type === 'defPass') ?? l.find((a) => a.type === 'move.end') ?? l[0]!).state;
+    }
+    expect(s.attacker).not.toBe(state.attacker);
+    expect(marks(s)).toEqual({ gL: undefined, hs: undefined, lmg: undefined });
+  });
 });

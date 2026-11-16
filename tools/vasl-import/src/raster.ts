@@ -24,7 +24,7 @@ export async function rasterizeCounter(svg: string, dir: string, src: SvgSource,
   // Inline the silhouettes. VASL counter SVGs reference them by relative path
   // (`<image href="svg/ge467S.png">`), which resvg cannot resolve from an in-memory
   // string and silently skips, leaving a counter with numbers but no artwork.
-  cleaned = cleaned.replace(/(xlink:href|href)="([^"]+\.(png|gif|jpe?g))"/g, (m, attr: string, href: string, ext: string) => {
+  cleaned = cleaned.replace(/(xlink:href|href)="([^"]+\.(png|gif|jpe?g|svg))"/g, (m, attr: string, href: string, ext: string) => {
     const over = opts.imageOverride?.(href);
     if (over) return `${attr}="data:${over.mime};base64,${Buffer.from(over.data).toString('base64')}"`;
     const data = src.read(`${dir}/${href.replace(/^\.\//, "")}`) ?? src.read(href.replace(/^\.\//, ""));
@@ -32,7 +32,7 @@ export async function rasterizeCounter(svg: string, dir: string, src: SvgSource,
       console.log(`  warn: missing embedded image ${dir}/${href}`);
       return m;
     }
-    const mime = ext === 'png' ? 'image/png' : ext === 'gif' ? 'image/gif' : 'image/jpeg';
+    const mime = ext === 'png' ? 'image/png' : ext === 'gif' ? 'image/gif' : ext === 'svg' ? 'image/svg+xml' : 'image/jpeg';
     return `${attr}="data:${mime};base64,${Buffer.from(data).toString('base64')}"`;
   });
   const r = new Resvg(cleaned, {
@@ -51,6 +51,20 @@ export async function rasterizeCounter(svg: string, dir: string, src: SvgSource,
 
 export async function toWebp(data: Uint8Array, opts: { lossless?: boolean; quality?: number } = {}): Promise<Buffer> {
   return sharp(Buffer.from(data)).webp(opts.lossless ? { lossless: true } : { quality: opts.quality ?? 90 }).toBuffer();
+}
+
+/**
+ * A counter VASL builds from layers (a colour square under one or more GIF drawings, as its buildFile stacks them for
+ * foxholes, trenches, Wire, roadblocks and pillboxes): the layers composited at their native 60 px and scaled up.
+ */
+export async function layeredMarker(layers: Uint8Array[], scale = 4): Promise<Buffer> {
+  const pngs = await Promise.all(layers.map((l) => sharp(Buffer.from(l)).ensureAlpha().png().toBuffer()));
+  const meta = await sharp(pngs[0]!).metadata();
+  const w = meta.width ?? 60;
+  const h = meta.height ?? 60;
+  const base = sharp({ create: { width: w, height: h, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } } }).png();
+  const flat = await base.composite(pngs.map((input) => ({ input }))).toBuffer();
+  return sharp(flat).resize(w * scale, h * scale, { kernel: 'lanczos3' }).webp({ lossless: true }).toBuffer();
 }
 
 /**

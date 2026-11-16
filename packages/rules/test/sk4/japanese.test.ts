@@ -259,8 +259,9 @@ describe('Miscellaneous (SK4 8.1.8)', () => {
     const env = engine.env(s);
     expect(hthActive(env, 'yK5')).toBe(true);
     const pv = ccAttackPreview(env, 'yK5', 'ja', { attackers: ['a', 'r'], targets: ['m'] });
-    // A Reduced-Strength squad keeps its Full-Strength CCV: 4 + 4 = 8 vs 7: 1:1.
+    // A Reduced-Strength squad keeps its Full-Strength CCV: 4 + 4 = 8 vs 7: 1:1. The preview says why it counts 4.
     expect(pv.attackFp).toBe(8);
+    expect(pv.fpNotes).toEqual([{ unit: 'r', note: 'counts its full-strength CCV (SK4 8.1.8.4)' }]);
     expect(pv.odds).toBe('1:1');
     expect(pv.kill).toBe(7);
     expect(pv.drm).toBe(-1);

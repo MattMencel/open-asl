@@ -167,6 +167,9 @@ function MyListing({ id: _id, listing, onOpen, onWithdraw }: { id: string; listi
   const now = useNow(scheduled ? 1000 : 60_000);
   const other = listing.hostUid === user.uid ? listing.opponentNickname : listing.hostNickname;
   const [ask, setAsk] = useState(false);
+  // Both players came to the table: the session is played. It leaves the schedule once the table closes; removing it
+  // sooner cancels nothing, so no confirmation.
+  const played = !!scheduled && (listing.presentUids?.length ?? 0) >= 2;
   let table: ReactNode = null;
   if (scheduled) {
     if (now < scheduled - OPENS_BEFORE_MS) table = <button className="btn" disabled title="The table opens 15 minutes before the start">Opens in {formatLeft(scheduled - OPENS_BEFORE_MS - now)}</button>;
@@ -176,7 +179,7 @@ function MyListing({ id: _id, listing, onOpen, onWithdraw }: { id: string; listi
   return <article className="my-listing">
     <b><ScenarioLink scenarioId={listing.scenarioId} balance={listing.balance}>{listing.scenarioTitle}</ScenarioLink></b>
     <small>{scheduled ? `${new Date(scheduled).toLocaleString([], { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })} · with ${other}` : 'Posted · waiting for an opponent to pick a time'}</small>
-    <div>{table}<button className="btn" onClick={() => (scheduled ? setAsk(true) : onWithdraw())}>{scheduled ? 'Cancel' : 'Withdraw'}</button></div>
+    <div>{table}<button className="btn" onClick={() => (scheduled && !played ? setAsk(true) : onWithdraw())}>{played ? 'Remove' : scheduled ? 'Cancel' : 'Withdraw'}</button></div>
     {ask && scheduled && <Modal kicker={listing.scenarioTitle} title="Cancel this session?" onClose={() => setAsk(false)}>
       <p>{other} is expecting you {new Date(scheduled).toLocaleString([], { weekday: 'long', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}. {listing.hostUid === user.uid ? 'Cancelling takes the game off both your schedules and your post comes down.' : `Cancelling takes it off both your schedules; ${other}'s post goes back on the board for someone else.`}</p>
       <div className="buttons">

@@ -94,7 +94,7 @@ describe('BPV (A./G. National Capabilities Chart)', () => {
 
 describe('Dev fixtures', () => {
   it('lists the test bed fixtures', () => {
-    expect(fixturesFor('asl-testbed').map((f) => f.id)).toEqual(['kindling', 'start', 'melee', 'building-assault', 'two-story-house', 'los-heights', 'orchard-road', 'bypass', 'fortified-breach', 'fortified-hidden', 'snap-shot']);
+    expect(fixturesFor('asl-testbed').map((f) => f.id)).toEqual(['kindling', 'start', 'melee', 'building-assault', 'two-story-house', 'los-heights', 'orchard-road', 'bypass', 'fortified-breach', 'fortified-hidden', 'fort-setup', 'fort-owner', 'fort-placed', 'snap-shot']);
     expect(fixturesFor('asl-testbed-fire').map((f) => f.id)).toEqual(['blaze-spread', 'flame-clearance']);
     expect(DEV_FIXTURES.every((f) => f.title && f.description)).toBe(true);
   });
@@ -243,6 +243,16 @@ describe('dev fixtures on other scenarios', () => {
   };
   it('builds every fixture of a scenario other than the test bed', () => {
     for (const fx of DEV_FIXTURES.filter((f) => f.scenarioId !== ASL_TESTBED_SCENARIO.id)) expect(() => loadOn(fx.id), fx.id).not.toThrow();
+  });
+  it('mg-vs-afv: the German MMG may fire at the Sherman as ordnance, on the Vehicle Target Type only (SK4 4.1)', () => {
+    const { engine, state } = loadOn('mg-vs-afv');
+    expect([state.phase, state.attacker]).toEqual(['PFPh', 'ge']);
+    const tank = Object.values(state.pieces).find((p) => p.defId === 'am.M4A3')!;
+    expect(tank.loc).toEqual({ kind: 'hex', hex: 'vE6' });
+    const mmg = Object.values(state.pieces).find((p) => p.defId === 'ge.MMG')!;
+    const env = engine.env(state);
+    expect(env.query('ordnance.illegal', { shot: { weapon: mmg.id, target: 'vE6', targetType: 'VTT' }, mode: 'prep', side: 'ge' }, null)).toBeNull();
+    expect(env.query('ordnance.illegal', { shot: { weapon: mmg.id, target: 'vE6', targetType: 'ITT' }, mode: 'prep', side: 'ge' }, null)).toMatch(/only at an AFV/);
   });
   it('s19-hs-mg-group: the two half-squads fire their LMGs as one Fire Group, not with their own FP too (SK1 4.0)', () => {
     const { engine, state } = loadOn('s19-hs-mg-group');

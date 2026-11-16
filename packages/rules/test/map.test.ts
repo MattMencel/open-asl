@@ -47,6 +47,30 @@ describe('geomorphic board geometry', () => {
     expect(two.hex('yGG1')?.halfHex).toBe(false);
   });
 
+  it('makes butted half hexes the non-Open Ground terrain of either half (ASLRB A2.3)', () => {
+    const two = new HexGridMap({
+      boards: [
+        { board: 'y', x: 0, y: 0 },
+        { board: 'z', x: 1, y: 0 },
+      ],
+      terrain: {
+        // Open against woods (either way round), woods against woods, open against a building, open against open.
+        zA1: { terrain: 'woods' },
+        yGG2: { terrain: 'woods' },
+        yGG3: { terrain: 'brush' },
+        zA3: { terrain: 'woods' },
+        zA4: { terrain: 'building-stone', buildingId: 'zB1' },
+      },
+      losEffect: () => 'none',
+    });
+    expect(two.hex('yGG1')?.terrain).toBe('woods');
+    expect(two.hex('yGG2')?.terrain).toBe('woods');
+    // Neither half is Open Ground: the rule says nothing, and the hex keeps its named board's half.
+    expect(two.hex('yGG3')?.terrain).toBe('brush');
+    expect(two.hex('yGG4')).toMatchObject({ terrain: 'building-stone', buildingId: 'zB1' });
+    expect(two.hex('yGG5')?.terrain).toBe('open');
+  });
+
   it('continues a road offboard only through the hexside the road leaves by', () => {
     const road = { terrain: 'open', features: ['road:dirt'] };
     // Board y cut at hexrow V: the road U4-V4 goes on to W5 (not W4) in the full board.

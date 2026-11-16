@@ -53,7 +53,7 @@ describe('rulesets', () => {
     expect(r.id).toBe('asl-full');
     // Every SK module comes along, in order, then the ASL modules, which only add to or override them, then the
     // test bed's special rules (fortified Locations, a hidden squad).
-    const ids = [...[piecesModule, turnModule, ...sk1CoreModules, ...sk2CoreModules, ...sk3CoreModules, ...aslCoreModules].map((m) => m.id), 'ssr.fortified-buildings', 'ssr.hidden-units'];
+    const ids = [...[piecesModule, turnModule, ...sk1CoreModules, ...sk2CoreModules, ...sk3CoreModules, ...aslCoreModules].map((m) => m.id), 'ssr.fortified-buildings', 'ssr.hidden-units', 'ssr.fortifications'];
     expect(r.modules.map((m) => m.id)).toEqual(ids);
     expect(Object.values(SK_RULESETS).map(([, h]) => h)).not.toContain(r.versionHash);
   });

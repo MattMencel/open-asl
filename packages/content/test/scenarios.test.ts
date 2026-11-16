@@ -96,6 +96,35 @@ describe('catalogued scenarios', () => {
     expect(counts['asl.wind.changeDr'] ?? 0).toBeGreaterThan(0);
   }, 120_000);
 
+  it('asl-testbed: weighted random play places the fortification counters, and every Player Turn boundary is clean', () => {
+    const scenario = scenarioById('asl-testbed')!;
+    const counts: Record<string, number> = {};
+    const bump = (k: string) => (counts[k] = (counts[k] ?? 0) + 1);
+    // Place the counters whenever the setup offers it, otherwise play as usual.
+    const weigh = weightedPicker((a) => (a.type === 'fort.place' ? 400 : a.type === 'endPhase' ? 4 : 1));
+    for (const seed of [1, 2]) {
+      const check = turnBoundaryCheck(`asl-testbed forts seed ${seed}`);
+      let placed = false;
+      const { state, steps } = playRandom(scenario, `forts-${seed}`, {
+        rand: mulberry(seed),
+        maxSteps: 8000,
+        pick: weigh,
+        onStep: (st, events, a) => {
+          bump(a.type);
+          for (const ev of events) if (ev.type.startsWith('asl.fort')) bump(ev.type);
+          check(st, events);
+          // Once this game's counters are placed they stay where they were put, whatever the turn.
+          if (a.type === 'fort.place') placed = true;
+          const forts = (st.ext['asl.fortifications'] as { counters: unknown[] } | undefined)?.counters ?? [];
+          if (placed) expect(forts.length).toBeGreaterThan(0);
+        },
+      });
+      expect(state.result, `seed ${seed} reached no result in ${steps} steps`).not.toBeNull();
+    }
+    expect(counts['fort.place'] ?? 0).toBe(2);
+    expect(counts['asl.fort.placed'] ?? 0).toBe(2);
+  }, 120_000);
+
   for (const s of PLAYABLE_SCENARIOS) {
     it(`${s.id}: builds, applies every balance option, and plays through at random`, () => {
       expect(() => sk1Ruleset(s)).not.toThrow();

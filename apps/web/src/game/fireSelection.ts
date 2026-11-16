@@ -1,5 +1,5 @@
-import type { Piece, PieceId, QueryEnv } from '@asl/engine';
-import { defOf, fireMarker, isGoodOrder, isRofShot, ordnanceOf, swHeldBy, vehicle } from '@asl/rules';
+import type { HexId, Piece, PieceId, QueryEnv, SideId } from '@asl/engine';
+import { defOf, fireMarker, isGoodOrder, isRofShot, ordnanceOf, swHeldBy, unitsInHex, vehicle } from '@asl/rules';
 
 /**
  * What a click on an own stack picks up in a fire phase, so the stack is ready to shoot as
@@ -40,4 +40,14 @@ export function fireLeaders(env: QueryEnv, leaders: Piece[], units: PieceId[], o
   const sws = units.filter((id) => env.state.pieces[id] && defOf(env, env.state.pieces[id]!).kind === 'sw');
   const rofShot = sws.length === units.length && isRofShot(env, { units: [], sw: sws });
   return leaders.filter((l) => rofShot || units.includes(l.id) || own.includes(l.id));
+}
+
+/**
+ * Whether blind fire (Area Fire at a hex where no enemy is seen) is offered at `hex` for `side`. Not where the side has
+ * a unit of its own: no hidden enemy can be there, since a unit entering a hidden unit's hex reveals it (SK4 6.4; ASLRB
+ * A12.15) and a hidden unit may not move and stay hidden (A12.32). The shot could only attack the side's own units.
+ * Unpossessed weapons and wrecks do not count: they are not attacked.
+ */
+export function blindFireOffered(env: QueryEnv, hex: HexId, side: SideId): boolean {
+  return unitsInHex(env, hex, side).length === 0;
 }
