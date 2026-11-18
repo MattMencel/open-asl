@@ -9,6 +9,7 @@ import {
   moveState,
   parseLabor,
   piecesModule,
+  redactState,
   routRequirement,
   turnModule,
   type FortPlacement,
@@ -144,6 +145,20 @@ describe('Entrenching (B27.11, B27.12, A25.21, B24.8, A4.8)', () => {
     expect(r.events.find((e) => e.type === 'asl.entrench.attempt')?.payload).toMatchObject({ dr: [1, 2], drm: -1, success: true });
     // The Task achieved: the Labor counter comes off.
     expect(r.state.pieces['h']!.tags['labor']).toBeUndefined();
+  });
+
+  it('a squad joining a later attempt adds the Labor DRM too, and a failure puts it beneath the flipped -2 counter (B24.8 "even if joined by new units")', () => {
+    const { engine, state } = game([ge('h', 'uN5', 'ge.247'), ge('n', 'uN6'), ...far], { dice: [3, 3, 4, 4, 4, 4] });
+    let s = act(engine, state, { type: 'entrench.attempt', loc: 'uN5', attempts: [{ unit: 'h' }] }).state;
+    s = act(engine, s, { type: 'test.tag', id: 'h', tags: { ti: null } }).state;
+    s = tele(engine, s, 'n', 'uN5');
+    // On its own the newcomer has no Labor; attempting with the HS it takes the HS's -1.
+    expect(entrenchDrm(engine.env(s), 'uN5', 'n')).toEqual({ drm: 0, explain: [] });
+    expect(entrenchDrm(engine.env(s), 'uN5', 'n', undefined, ['h', 'n'])).toEqual({ drm: -1, explain: ['-1 Labor'] });
+    const r = act(engine, s, { type: 'entrench.attempt', loc: 'uN5', attempts: [{ unit: 'h' }, { unit: 'n' }] });
+    const attempts = r.events.filter((e) => e.type === 'asl.entrench.attempt').map((e) => e.payload);
+    expect(attempts).toMatchObject([{ unit: 'h', drm: 0, success: false, labor: -2 }, { unit: 'n', drm: -1, success: false, labor: -2 }]);
+    expect(parseLabor(r.state.pieces['n']!.tags['labor'])).toEqual({ task: 'entrench:uN5', drm: -2 });
   });
 
   it('a leader directs every attempt in his Location with his leadership, is TI and goes beneath with the diggers; a leader alone cannot entrench', () => {
@@ -312,6 +327,49 @@ describe('Into and out of a foxhole during the MPh (B27.1 EX, B27.4, B27.42, A8.
     expect(unitLabels(r.events, 'in')).toEqual([expect.stringMatching(/\+2 TEM \(foxhole 2S\)/)]);
   });
 
+  it('no vehicle may enter an A-T Ditch hex (B27.56); the same hex without it is open to the tank', () => {
+    const tank = (): PieceSpec => ({ id: 't34', def: 'ru.T34M43', side: 'ru', hex: 'uN6', tags: { vca: 0, ca: 0 } });
+    const run = (ditch: boolean) => {
+      const { engine, state } = game([tank(), ...far], { first: 'ru', phase: 'MPh' });
+      let s = ditch ? place(engine, state, 'ru', [{ kind: 'ditch', hex: 'uN5', hidden: false }]) : state;
+      s = pass(engine, act(engine, s, { type: 'vmove.start', vehicle: 't34' }).state, 'ge');
+      return { engine, s };
+    };
+    const blocked = run(true);
+    expect(legal(blocked.engine, blocked.s, 'move.step').map((a) => a['to'])).not.toContain('uN5');
+    expect(check(blocked.engine, blocked.s, { type: 'move.step', to: 'uN5' })).toMatch(/No vehicle may enter an A-T Ditch \(uN5; ASLRB B27.56\)/);
+    const open = run(false);
+    expect(legal(open.engine, open.s, 'move.step').map((a) => a['to'])).toContain('uN5');
+  });
+
+  it('a FT attack or a Snap Shot claims no TEM, so neither reveals a hidden foxhole as a TEM claim (A12.33, B27.3 EXC, A8.15)', () => {
+    // A German FT next door burns the Russian beneath the hidden foxhole: no TEM against a FT. The flamer's own LOS
+    // reveals it (A12.33), but not as a TEM claim.
+    const { engine, state } = game([ru('in', 'uN5'), ge('g', 'uN6'), { id: 'ft', def: 'ge.FT', side: 'ge', heldBy: 'g' }, ...far], { dice: [6, 6, 6, 6] });
+    let s = tele(engine, state, 'in', 'uN5', 'foxhole');
+    s = place(engine, s, 'ru', [fox('uN5', 2, true)]);
+    const r = act(engine, s, { type: 'fire', decl: { units: [], sw: ['ft'], target: 'uN5' } });
+    expect(r.events.some((e) => e.type === 'sk1.fire.attack')).toBe(true);
+    expect(r.events.filter((e) => e.type === 'asl.fort.revealed').map((e) => (e.payload as { reason: string }).reason)).not.toContain('tem');
+    // ... and the unit beneath takes no foxhole TEM against the FT (B27.3 EXC).
+    expect(r.events.some((e) => e.type === 'sk1.fire.result' && (e.payload as { unit: string }).unit === 'in')).toBe(true);
+    expect(unitLabels(r.events, 'in').some((l) => /foxhole/.test(l))).toBe(false);
+    // A long-range MMG Snap Shot from 17 hexes at a Russian squad stepping into the woods of L4: beyond the 16 hexes of
+    // the LOS reveal in Concealment Terrain, and no TEM claimed, so the foxhole stays hidden.
+    const g2 = game([ru('in', 'uL4'), ru('m', 'uM4'), ge('g', 'uCC4'), { id: 'mg', def: 'ge.MMG', side: 'ge', heldBy: 'g' }, ge('gfar', 'uGG10'), ru('rfar', 'uA1')], { first: 'ru', phase: 'MPh', dice: [6, 6, 6, 6] });
+    let t = tele(g2.engine, g2.state, 'in', 'uL4', 'foxhole');
+    t = place(g2.engine, t, 'ru', [fox('uL4', 2, true)]);
+    t = act(g2.engine, t, { type: 'move.start', units: ['m'] }).state;
+    t = act(g2.engine, t, { type: 'move.step', to: 'uL4' }).state;
+    expect(fortCounters(g2.engine.env(t))[0]!.revealed).toBeUndefined();
+    const snap = act(g2.engine, t, { type: 'defFire', decl: { units: [], sw: ['mg'], target: 'uL4', snap: ['uL4', 'uM4'] } });
+    expect(snap.events.some((e) => e.type === 'sk1.fire.attack')).toBe(true);
+    expect(snap.events.some((e) => e.type === 'asl.fort.revealed')).toBe(false);
+    // The same MMG firing at the hex centre: the foxhole's TEM is claimed, and the counter revealed.
+    const centre = act(g2.engine, t, { type: 'defFire', decl: { units: [], sw: ['mg'], target: 'uL4' } });
+    expect(centre.events.find((e) => e.type === 'asl.fort.revealed')?.payload).toMatchObject({ reason: 'tem' });
+  });
+
   it('under Assault Movement the entry and the foxhole MF are one expenditure, the stack arriving beneath (B27.4); a step out of a foxhole costs its MF too', () => {
     const { engine, state } = game([ge('g', 'uM5'), ru('r', 'uN8'), ...far], { phase: 'MPh' });
     let s = place(engine, state, 'ge', [fox('uN5', 1)]);
@@ -440,6 +498,64 @@ describe('Rout, rally and advance with entrenchments (B27.41, A10.5, A10.531, A1
     expect(loc(rr.state, 'b')).toEqual({ kind: 'hex', hex: 'uM6' });
   });
 
+  it('ordnance on the Infantry Target Type: the foxhole +2 is a To Hit DRM, not an IFT DRM (B27.3, C3.33)', () => {
+    const gunAt = (hex: string): PieceSpec[] => [{ id: 'c', def: 'ge.228c', side: 'ge', hex }, { id: 'g88', def: 'ge.AA88L', side: 'ge', heldBy: 'c' }];
+    const { engine, state } = game([...gunAt('uN8'), ru('r', 'uN5'), ...far], { dice: [2, 3, 6, 5] });
+    let s = place(engine, state, 'ru', [fox('uN5', 1)]);
+    s = tele(engine, s, 'r', 'uN5', 'foxhole');
+    const t = act(engine, s, { type: 'fire.ordnance', shot: { weapon: 'g88', target: 'uN5', targetType: 'ITT' } });
+    const shot = t.events.find((e) => e.type === 'sk2.ordnance.shot')!.payload as { drm: number; outcome: string };
+    expect(labels(t.events, 'sk2.ordnance.shot')).toContain('+2 TEM (entrenchment, in place of the hex TEM)');
+    expect(shot.outcome).toBe('hit');
+    expect(t.events.some((e) => e.type === 'sk1.fire.result' && (e.payload as { unit: string }).unit === 'r')).toBe(true);
+    expect(unitLabels(t.events, 'r').some((l) => /\+2 TEM/.test(l))).toBe(false);
+  });
+
+  it('a Critical Hit reverses the foxhole +2: -2 on the Effects DR, as it was +2 on the To Hit DR (B27.3, C3.7)', () => {
+    const gunAt = (hex: string): PieceSpec[] => [{ id: 'c', def: 'ge.228c', side: 'ge', hex }, { id: 'g88', def: 'ge.AA88L', side: 'ge', heldBy: 'c' }];
+    // At one hex the 88's CH number is 5: an Original 2 +2 TEM is a Critical Hit.
+    const { engine, state } = game([...gunAt('uN6'), ru('r', 'uN5'), ...far], { dice: [1, 1, 4, 4, 6] });
+    let s = place(engine, state, 'ru', [fox('uN5', 1)]);
+    s = tele(engine, s, 'r', 'uN5', 'foxhole');
+    const t = act(engine, s, { type: 'fire.ordnance', shot: { weapon: 'g88', target: 'uN5', targetType: 'ITT' } });
+    const shot = t.events.find((e) => e.type === 'sk2.ordnance.shot')!.payload as { th: number; ch: number; drm: number; dr: [number, number]; outcome: string };
+    // Original 2 +2 TEM (and the shot's other DRM) is at most the 88's CH number here.
+    expect(labels(t.events, 'sk2.ordnance.shot')).toContain('+2 TEM (entrenchment, in place of the hex TEM)');
+    expect(2 + shot.drm).toBeLessThanOrEqual(shot.ch);
+    expect(shot.outcome).toBe('ch');
+    const hit = t.events.find((e) => e.type === 'sk2.ordnance.hit')!.payload as { ch: boolean; drm: number };
+    expect(hit.ch).toBe(true);
+    expect(labels(t.events, 'sk1.fire.attack').concat(labels(t.events, 'sk2.ordnance.hit'))).toContain('-2 Critical Hit: entrenchment TEM reversed');
+  });
+
+  it('a mixed Location: one To Hit DR against each unit\'s own To Hit number; those hit share one Effects DR (C3.32 and its EX, B27.3)', () => {
+    // Russian squads in Open Ground N5: r on top (TEM 0), b beneath the foxhole (+2). The 88's To Hit DR, read against
+    // the hex TEM, decides the shot; b is hit only if that DR +2 still is.
+    const gunAt = (hex: string): PieceSpec[] => [{ id: 'c', def: 'ge.228c', side: 'ge', hex }, { id: 'g88', def: 'ge.AA88L', side: 'ge', heldBy: 'c' }];
+    const run = (dice: number[]) => {
+      const { engine, state } = game([...gunAt('uN8'), ru('r', 'uN5'), ru('b', 'uN5'), ...far], { dice });
+      let s = place(engine, state, 'ru', [fox('uN5', 1)]);
+      s = tele(engine, s, 'b', 'uN5', 'foxhole');
+      return act(engine, s, { type: 'fire.ordnance', shot: { weapon: 'g88', target: 'uN5', targetType: 'ITT' } });
+    };
+    const shotOf = (t: ReturnType<typeof run>) => t.events.find((e) => e.type === 'sk2.ordnance.shot')!.payload as { th: number; drm: number; dr: [number, number]; outcome: string };
+    const hitUnits = (t: ReturnType<typeof run>) => (t.events.find((e) => e.type === 'sk2.ordnance.hit')?.payload as { units: string[] } | undefined)?.units ?? [];
+    // A low DR hits both; one Effects DR, and no +2 on the IFT for b (its TEM went on the To Hit DR).
+    const both = run([2, 3, 6, 5]);
+    const th = shotOf(both).th;
+    expect(shotOf(both).outcome).toBe('hit');
+    expect(labels(both.events, 'sk2.ordnance.shot')).not.toContain('+2 TEM (entrenchment, in place of the hex TEM)');
+    expect(hitUnits(both).sort()).toEqual(['b', 'r']);
+    expect(unitLabels(both.events, 'b').some((l) => /\+2 TEM/.test(l))).toBe(false);
+    // A DR that hits by one or two: r is hit, b is not.
+    const hi = th - shotOf(both).drm;
+    const dice = [Math.min(6, hi - 1), hi - Math.min(6, hi - 1)];
+    const edge = run([...dice, 6, 5]);
+    expect(shotOf(edge).outcome).toMatch(/hit|ch/);
+    expect(hitUnits(edge)).toEqual(['r']);
+    expect(edge.events.find((e) => e.type === 'asl.entrench.thMissed')?.payload).toMatchObject({ units: ['b'], extra: 2 });
+  });
+
   it('beneath a trench a unit rallies at -1 and may not keep its DM; beneath a foxhole neither (A10.61, A10.62)', () => {
     const { engine, state } = game([ge('t', 'uN5'), ge('f', 'uO5'), ...far], { phase: 'RPh' });
     let s = place(engine, state, 'ge', [trench('uN5'), fox('uO5', 1)]);
@@ -450,6 +566,16 @@ describe('Rout, rally and advance with entrenchments (B27.41, A10.5, A10.531, A1
     expect(env.explain('rally.drm', { unit: 't', leader: null, self: true }, 0).value).toBe(env.explain('rally.drm', { unit: 'f', leader: null, self: true }, 0).value - 1);
     expect(check(engine, s, { type: 'rally.dmKeep', unit: 't' })).toMatch(/trench/);
     expect(env.query('rally.dmKeepIllegal', { unit: 'f' }, null)).toBeNull();
+  });
+
+  it('beneath a trench in woods a unit rallies at -1, not -2: one -1 for building, pillbox, trench or woods (A10.61)', () => {
+    const { engine, state } = game([ge('t', 'uN5'), ge('w', 'uL4'), ...far], { phase: 'RPh' });
+    let s = place(engine, state, 'ge', [trench('uN5'), trench('uL4')]);
+    s = tele(engine, s, 't', 'uN5', 'trench');
+    s = tele(engine, s, 'w', 'uL4', 'trench');
+    for (const id of ['t', 'w']) s = act(engine, s, { type: 'test.tag', id, tags: { broken: true } }).state;
+    const env = engine.env(s);
+    expect(env.query('rally.drm', { unit: 'w', leader: null, self: true }, 0)).toBe(env.query('rally.drm', { unit: 't', leader: null, self: true }, 0));
   });
 
   it('an advance may go beneath the foxhole of the next hex, an enemy-held one included (CC follows), or change position within its own hex (A4.7, B27.44)', () => {
@@ -478,5 +604,132 @@ describe('Rout, rally and advance with entrenchments (B27.41, A10.5, A10.531, A1
     t = tele(e.engine, t, 'in', 'uN5', 'foxhole');
     t = act(e.engine, t, { type: 'test.eliminate', id: 'in' }).state;
     expect(loc(t, 'mmg')).toEqual({ kind: 'hex', hex: 'uN5', pos: { ent: 'foxhole' } });
+  });
+});
+
+describe('A hidden own foxhole and the other seat (A12.33, B27.12, B27.41)', () => {
+  // The foxhole is hidden in the M6 woods (Concealment Terrain): no enemy within 16 hexes, so no LOS reveals it.
+  const stream = (engine: Eng, viewer: string, before: GameState, t: { events: unknown[] }) => engine.redactTransition(viewer, (x) => redactState(engine, x, viewer), before, t.events as never);
+  const folds = (engine: Eng, viewer: string, before: GameState, t: { state: GameState; events: unknown[] }) => {
+    const folded = engine.applyEvents(redactState(engine, before, viewer), stream(engine, viewer, before, t));
+    expect(JSON.stringify(folded.ext['asl.fortifications'])).toBe(JSON.stringify(redactState(engine, t.state, viewer).ext['asl.fortifications']));
+  };
+
+  it('Entrenching on top of it: a failure tells the other side nothing; a success replaces the counter by a 2S placed openly, revealing it (B27.12)', () => {
+    const fail = game([ge('a', 'uM6'), ru('r', 'uGG1')], { dice: [6, 6] });
+    const s0 = place(fail.engine, fail.state, 'ge', [fox('uM6', 1, true)]);
+    const f = act(fail.engine, s0, { type: 'entrench.attempt', loc: 'uM6', attempts: [{ unit: 'a' }] });
+    expect(f.events.find((e) => e.type === 'asl.entrench.attempt')?.payload).toMatchObject({ success: false });
+    expect(fortificationView(fail.engine.env(f.state), 'ru')).toEqual([]);
+    expect(JSON.stringify(stream(fail.engine, 'ru', s0, f))).not.toMatch(/ge\.fort1|foxhole|capacity/);
+    folds(fail.engine, 'ru', s0, f);
+
+    const win = game([ge('a', 'uM6'), ru('r', 'uGG1')], { dice: [1, 1] });
+    const w0 = place(win.engine, win.state, 'ge', [fox('uM6', 1, true)]);
+    const w = act(win.engine, w0, { type: 'entrench.attempt', loc: 'uM6', attempts: [{ unit: 'a' }] });
+    const types = w.events.map((e) => e.type);
+    expect(w.events.find((e) => e.type === 'asl.fort.revealed')?.payload).toMatchObject({ reason: 'grown', counter: { hex: 'uM6', kind: 'foxhole' } });
+    expect(types.indexOf('asl.fort.revealed')).toBeLessThan(types.indexOf('asl.entrench.attempt'));
+    expect(fortificationView(win.engine.env(w.state), 'ru')).toMatchObject([{ hex: 'uM6', kind: 'foxhole', capacity: 2 }]);
+    // Nothing of it reaches the Russian before the reveal: the attempt's "2S" is told after it.
+    const ru1 = stream(win.engine, 'ru', w0, w);
+    const shownAt = ru1.findIndex((e) => e.type === 'asl.fort.revealed');
+    expect(shownAt).toBeGreaterThanOrEqual(0);
+    expect(JSON.stringify(ru1.slice(0, shownAt))).not.toMatch(/ge\.fort1|capacity/);
+    expect(ru1.find((e) => e.type === 'asl.entrench.attempt')?.payload).toMatchObject({ success: true, capacity: 2 });
+    folds(win.engine, 'ru', w0, w);
+  });
+
+  it('routing beneath it claims its protection from Interdiction (B27.41): it is revealed, and the step is told only then', () => {
+    const { engine, state } = game([{ ...ru('b', 'uN6'), tags: { broken: true, dm: true } }, ge('g', 'uGG1')], { phase: 'RtPh', first: 'ru' });
+    const s = place(engine, state, 'ru', [fox('uM6', 1, true)]);
+    expect(fortificationView(engine.env(s), 'ge')).toEqual([]);
+    const step = legal(engine, s, 'rout.step').find((a) => a['to'] === 'uM6' && a['beneath']);
+    expect(step).toBeDefined();
+    const r = act(engine, s, { type: 'rout.step', unit: 'b', to: 'uM6', beneath: true });
+    const types = r.events.map((e) => e.type);
+    expect(r.events.find((e) => e.type === 'asl.fort.revealed')?.payload).toMatchObject({ reason: 'rout', counter: { hex: 'uM6', kind: 'foxhole' } });
+    expect(types.indexOf('asl.fort.revealed')).toBeLessThan(types.indexOf('asl.entrench.move'));
+    expect(fortificationView(engine.env(r.state), 'ge')).toMatchObject([{ hex: 'uM6', kind: 'foxhole' }]);
+    expect(loc(redactState(engine, r.state, 'ge'), 'b')).toEqual({ kind: 'hex', hex: 'uM6', pos: { ent: 'foxhole' } });
+    const ge1 = stream(engine, 'ge', s, r);
+    expect(ge1.find((e) => e.type === 'asl.entrench.move')?.payload).toMatchObject({ hex: 'uM6', beneath: true, phase: 'RtPh' });
+    folds(engine, 'ge', s, r);
+  });
+});
+
+describe('More foxhole cases (B27.1, B27.13, B27.3, B27.4, A12.33)', () => {
+  it('a hidden unit beneath a hidden foxhole that fires loses its concealment, and the foxhole is revealed with it (A12.33)', () => {
+    // The Russian squad hides beneath a hidden foxhole in the L4 woods; the only German near is broken (no Good Order
+    // enemy sees it), the rest beyond 16 hexes. It fires at the broken German next door and is revealed: so is the foxhole.
+    const { engine, state } = game([ru('in', 'uL4'), { id: 'b', def: 'ge.467', side: 'ge', hex: 'uL5', tags: { broken: true } }, ge('gfar', 'uGG10'), ru('rfar', 'uA1')], { first: 'ru', dice: [6, 6, 6, 6] });
+    let s = tele(engine, state, 'in', 'uL4', 'foxhole');
+    s = place(engine, s, 'ru', [fox('uL4', 1, true)]);
+    s = act(engine, s, { type: 'test.tag', id: 'in', tags: { hip: true } }).state;
+    expect(fortCounters(engine.env(s))[0]!.revealed).toBeUndefined();
+    expect(s.pieces['in']!.tags['hip']).toBe(true);
+    const r = act(engine, s, { type: 'fire', decl: { units: ['in'], sw: [], target: 'uL5' } });
+    expect(r.state.pieces['in']!.tags['hip']).toBeUndefined();
+    expect(r.events.find((e) => e.type === 'asl.fort.revealed')?.payload).toMatchObject({ reason: 'concealment', counter: { hex: 'uL4', kind: 'foxhole' } });
+    expect(fortificationView(engine.env(r.state), 'ge')).toMatchObject([{ hex: 'uL4', kind: 'foxhole' }]);
+  });
+
+  it('a mortar beneath a foxhole fires from it (B27.1)', () => {
+    const { engine, state } = game([ge('g', 'uN5'), { id: 'm', def: 'ge.MTR', side: 'ge', heldBy: 'g' }, ru('r', 'uN8'), ...far], { dice: [2, 2, 6, 6, 6, 6] });
+    let s = place(engine, state, 'ge', [fox('uN5', 1)]);
+    s = tele(engine, s, 'g', 'uN5', 'foxhole');
+    const shot = { type: 'fire.ordnance', shot: { weapon: 'm', target: 'uN8', targetType: 'ATT' } };
+    expect(check(engine, s, shot)).toBeNull();
+    const r = act(engine, s, shot);
+    expect(r.events.some((e) => e.type === 'sk2.ordnance.shot')).toBe(true);
+    expect(loc(r.state, 'g')).toEqual({ kind: 'hex', hex: 'uN5', pos: { ent: 'foxhole' } });
+  });
+
+  it('the foxhole +2 adds to a mortar Air Burst -1 in woods: +1 for the unit beneath, -1 for the unit on top (B27.3, B13.3)', () => {
+    const { engine, state } = game([ru('in', 'uL4'), ru('top', 'uL4'), ge('g', 'uL7'), { id: 'm', def: 'ge.MTR', side: 'ge', heldBy: 'g' }, ...far], { dice: [2, 2, 6, 6, 6, 6, 6, 6] });
+    let s = place(engine, state, 'ru', [fox('uL4', 1)]);
+    s = tele(engine, s, 'in', 'uL4', 'foxhole');
+    const r = act(engine, s, { type: 'fire.ordnance', shot: { weapon: 'm', target: 'uL4', targetType: 'ATT' } });
+    expect(labels(r.events)).toContain('-1 Air Burst (woods)');
+    expect(unitLabels(r.events, 'in')).toEqual([expect.stringMatching(/\+2 TEM \(foxhole 1S\)/)]);
+    const results = r.events.filter((e) => e.type === 'sk1.fire.result').map((e) => e.payload as { unit: string; drm?: number });
+    // Per unit: the +2 on top of the attack's -1 (no woods TEM to replace); nothing more for the unit on top.
+    expect(results.find((x) => x.unit === 'in')?.drm).toBe(2);
+    expect(results.find((x) => x.unit === 'top')?.drm).toBeUndefined();
+  });
+
+  it('a leader beneath a foxhole still directs the fire of, and rallies, a half-squad on top (B27.13, A2.8)', () => {
+    const { engine, state } = game([ge('l', 'uN5', 'ge.L91'), ge('h', 'uN5', 'ge.247'), ru('r', 'uN7'), ...far], { dice: [6, 6, 6, 6] });
+    let s = place(engine, state, 'ge', [fox('uN5', 1)]);
+    s = tele(engine, s, 'l', 'uN5', 'foxhole');
+    const r = act(engine, s, { type: 'fire', decl: { units: ['h'], sw: [], target: 'uN7', directors: ['l'] } });
+    expect(labels(r.events)).toContain('-1 leadership');
+    const rp = game([ge('l', 'uN5', 'ge.L91'), { id: 'h', def: 'ge.247', side: 'ge', hex: 'uN5', tags: { broken: true } }, ...far], { phase: 'RPh' });
+    let t = place(rp.engine, rp.state, 'ge', [fox('uN5', 1)]);
+    t = tele(rp.engine, t, 'l', 'uN5', 'foxhole');
+    expect(rp.engine.legalActions(t, 'ge').some((a) => a.type === 'rally.rally' && a['leader'] === 'l' && a['unit'] === 'h')).toBe(true);
+  });
+
+  it('a unit pinned by Residual FP or a Snap Shot as it Assault Moves in and beneath stays on top; the others go beneath (B27.4 EXC)', () => {
+    const run = (dice: number[], residual: boolean) => {
+      const { engine, state } = game([ge('g', 'uM5'), ge('g2', 'uM5'), ru('r', 'uP5'), ...far], { phase: 'MPh', dice, ...(residual ? { hexMarkers: { uN5: { residualFp: 2 } } } : {}) });
+      let s = place(engine, state, 'ge', [fox('uN5', 2)]);
+      s = act(engine, s, { type: 'move.start', units: ['g', 'g2'], assault: true }).state;
+      const r = act(engine, s, { type: 'move.step', to: 'uN5', beneath: true });
+      return { engine, r };
+    };
+    // Residual 2 FP, -1 FFMO on top: DR 7 - 1 = 6 is a PTC; g fails it (12), g2 passes (2).
+    const res = run([3, 4, 6, 6, 1, 1, ...Array(20).fill(6)], true);
+    const pinnedR = ['g', 'g2'].filter((u) => res.r.state.pieces[u]!.tags['pinned']);
+    expect(pinnedR).toHaveLength(1);
+    for (const u of ['g', 'g2']) expect(loc(res.r.state, u).pos?.ent).toBe(res.r.state.pieces[u]!.tags['pinned'] ? undefined : 'foxhole');
+    // A Snap Shot, 4 FP halved, no FFMO: DR 6 is a PTC; again g fails and g2 passes.
+    const snap = run([3, 3, 6, 6, 1, 1, ...Array(20).fill(6)], false);
+    const t = act(snap.engine, snap.r.state, { type: 'defFire', decl: { units: ['r'], sw: [], target: 'uN5', snap: ['uN5', 'uM5'] } });
+    // The Snap Shot claims no foxhole TEM for either (B27.3 EXC, A8.15).
+    for (const u of ['g', 'g2']) expect(unitLabels(t.events, u).some((l) => /foxhole/.test(l))).toBe(false);
+    const pinnedS = ['g', 'g2'].filter((u) => t.state.pieces[u]!.tags['pinned']);
+    expect(pinnedS).toHaveLength(1);
+    for (const u of ['g', 'g2']) expect(loc(t.state, u).pos?.ent).toBe(t.state.pieces[u]!.tags['pinned'] ? undefined : 'foxhole');
   });
 });

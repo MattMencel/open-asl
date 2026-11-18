@@ -524,6 +524,8 @@ export function useGameFx(env: QueryEnv, log: LoggedEvent[], decision: Decision 
       if (PHASE_EVENTS.has(e.type) && beat.splitSeq === undefined) beat.splitSeq = e.seq - 1;
       switch (e.type) {
         case 'dice.rolled': {
+          // A secret roll (ASLRB B28.47's Secret dr) is shown only to its side: no dice, no sound for the other.
+          if (p['secret'] !== undefined && p['secret'] !== viewer) break;
           closeBeat(Math.max(e.seq - 1, playedBefore));
           delay = 300;
           desperate.clear();

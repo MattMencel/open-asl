@@ -270,6 +270,16 @@ export function hipIllegal(env: QueryEnv, c: FortPlacement): string | null {
   return null;
 }
 
+/**
+ * The Dummy Minefield counters a side may set up (B28.47): those the scenario allots or, when it allots none, one for
+ * every 24 Known minefield factors set up (at no cost).
+ */
+function dummyAllotment(allotted: number, placed: FortPlacement[]): number {
+  if (allotted > 0) return allotted;
+  const known = placed.reduce((n, c) => n + (c.kind === 'mines' && c.mines?.known && !c.mines.dummy ? (c.mines.ap ?? 0) : 0), 0);
+  return Math.floor(known / 24);
+}
+
 /** What a side has left to place, given the counters placed so far. */
 export function fortPools(env: QueryEnv, side: SideId, placed: FortPlacement[]) {
   const p = fortificationsParams(env, side);
@@ -292,7 +302,7 @@ export function fortPools(env: QueryEnv, side: SideId, placed: FortPlacement[]) 
     /** Hidden A-P factors left; A-T mines cost three each (B28.5). */
     factors: (p?.mines?.factors ?? 0) - sum((c) => (c.kind === 'mines' && c.mines && !c.mines.known && !c.mines.dummy ? (c.mines.ap ?? 0) + 3 * (c.mines.at ?? 0) : 0)),
     known: (p?.mines?.known ?? 0) - sum((c) => (c.kind === 'mines' && c.mines?.known && !c.mines.dummy ? (c.mines.ap ?? 0) : 0)),
-    dummies: (p?.mines?.dummies ?? 0) + extra - sum((c) => (c.kind === 'mines' && c.mines?.dummy ? 1 : 0)),
+    dummies: dummyAllotment(p?.mines?.dummies ?? 0, placed) + extra - sum((c) => (c.kind === 'mines' && c.mines?.dummy ? 1 : 0)),
     at: !!p?.mines?.at,
   };
 }
@@ -314,7 +324,13 @@ export function fortPlaceIllegal(env: QueryEnv, side: SideId, counters: FortPlac
     if ((c.kind === 'trench' || c.kind === 'ditch') && here.some((x) => x.kind === 'trench' || x.kind === 'ditch')) return `One trench counter per hex (${c.hex}; ASLRB B27.51)`;
     if (ent(c.kind) && here.some((x) => ent(x.kind) && x.kind !== c.kind && (c.kind === 'foxhole' || x.kind === 'foxhole'))) return `A trench may not share a Location with a foxhole (${c.hex}; ASLRB B27.51)`;
     if (c.kind === 'mines' && here.some((x) => x.kind === 'mines')) return `One minefield per hex (${c.hex}; ASLRB B28.46)`;
-    if (c.kind === 'roadblock' && here.some((x) => x.kind === 'roadblock' && x.hexside === c.hexside)) return `One roadblock per hexside (${c.hex})`;
+    // One roadblock per hexside (B29.2: a wall across it), whichever of its two hexes it is set up in, and whichever side placed it.
+    if (c.kind === 'roadblock' && c.hexside !== undefined) {
+      const across = acrossSide(statics(env).map, c.hex, c.hexside);
+      const same = (x: Pick<FortPlacement, 'kind' | 'hex' | 'hexside'>) =>
+        x.kind === 'roadblock' && x.hexside !== undefined && ((x.hex === c.hex && x.hexside === c.hexside) || (x.hex === across && mod6(x.hexside + 3) === c.hexside));
+      if (counters.some((x) => x !== c && same(x)) || fortCounters(env).some(same)) return `One roadblock per hexside (${c.hex}${across ? `-${across}` : ''}; ASLRB B29.1, B29.2)`;
+    }
     if (c.kind === 'pillbox' && here.some((x) => x.kind === 'pillbox')) return `A pillbox may not be placed in the same hex as another pillbox (${c.hex}; ASLRB B30.1)`;
     if ((c.kind === 'pillbox' && here.some((x) => ent(x.kind))) || (ent(c.kind) && here.some((x) => x.kind === 'pillbox'))) return `A pillbox hex takes no foxhole or trench (${c.hex}; ASLRB B30.1)`;
   }
@@ -333,7 +349,10 @@ export function fortPlaceIllegal(env: QueryEnv, side: SideId, counters: FortPlac
   if (left.factors < 0) return `Only ${p.mines?.factors ?? 0} minefield factors${p.mines?.at ? ' (an A-T factor costs three, ASLRB B28.5)' : ''}`;
   if (!left.at && counters.some((c) => c.kind === 'mines' && c.mines?.at)) return `No A-T mines in the order of battle (ASLRB B28.5)`;
   if (left.known < 0) return `Only ${p.mines?.known ?? 0} Known minefield factors (ASLRB B28.45)`;
-  if (left.dummies < 0) return `Only ${(p.mines?.dummies ?? 0) + (fortState(env)?.extraDummies?.[side] ?? 0)} Dummy Minefield counter${(p.mines?.dummies ?? 0) === 1 ? '' : 's'} (ASLRB B28.47)`;
+  if (left.dummies < 0) {
+    const n = dummyAllotment(p.mines?.dummies ?? 0, counters) + (fortState(env)?.extraDummies?.[side] ?? 0);
+    return `Only ${n} Dummy Minefield counter${n === 1 ? '' : 's'}${p.mines?.dummies ? '' : ': one for every 24 Known minefield factors set up'} (ASLRB B28.47)`;
+  }
   return null;
 }
 
@@ -388,7 +407,7 @@ export function defaultFortPlacement(env: QueryEnv, side: SideId): FortPlacement
     if (!put((hex) => ({ kind: 'mines', hex, hidden: false, mines: { ap, known: true } }))) break;
     n -= ap;
   }
-  const dummies = (p.mines?.dummies ?? 0) + (fortState(env)?.extraDummies?.[side] ?? 0);
+  const dummies = dummyAllotment(p.mines?.dummies ?? 0, out) + (fortState(env)?.extraDummies?.[side] ?? 0);
   for (let i = 0; i < dummies; i++) if (!put((hex) => ({ kind: 'mines', hex, hidden: false, mines: { known: true, dummy: true } }))) break;
   void map;
   return out;
@@ -418,6 +437,7 @@ export function fortSetupIllegal(env: QueryEnv, side: SideId, action: SetupActio
     if (!target) return `No foxhole, trench or Wire of yours in ${hexOfLoc(loc)} to set up beneath`;
     if (isVehicleDef(defOf(env, u))) return `A vehicle cannot set up beneath a ${fortKindName(target)}`;
     // Only Infantry and SW beneath a foxhole; a mortar is the one 5/8" counter allowed (B27.1). Any counter may start beneath a trench (B27.51).
+    if (target.kind === 'foxhole' && gun(env, u) && gun(env, u)!.type !== 'MTR') return `${id} cannot be placed beneath a foxhole: only Infantry, SW and a mortar may (ASLRB B27.1)`;
     if (target.kind === 'foxhole') for (const w of heldBy(id)) if (gun(env, w) && gun(env, w)!.type !== 'MTR') return `${w.id} cannot be placed beneath a foxhole: only Infantry, SW and a mortar may (ASLRB B27.1)`;
     byCounter.set(target.id, [...(byCounter.get(target.id) ?? []), u]);
   }
@@ -461,7 +481,8 @@ export function seenByEnemy(env: QueryEnv, c: FortRecord): boolean {
   const map = statics(env).map;
   const enemy = otherSide(env.state, c.side);
   const concealing = concealmentTerrainAt(env, c.hex);
-  if (unitsAt(env, c.hex, enemy).length) return true;
+  // A Good Order enemy ground unit in the counter's own hex sees its Location; a broken one (or a wreck) does not.
+  if (unitsAt(env, c.hex, enemy).some((u) => revealer(env, u, enemy))) return true;
   return Object.values(env.state.pieces)
     .sort(byId)
     .some((e) => {
@@ -471,7 +492,7 @@ export function seenByEnemy(env: QueryEnv, c: FortRecord): boolean {
     });
 }
 
-export function revealFortification(ctx: Ctx, id: string, reason: 'los' | 'tem' | 'concealment' | 'entry' | 'attack' | 'search') {
+export function revealFortification(ctx: Ctx, id: string, reason: 'los' | 'tem' | 'concealment' | 'entry' | 'attack' | 'search' | 'grown' | 'rout') {
   const c = fortCounters(ctx).find((x) => x.id === id);
   if (!c || !c.hidden || c.revealed) return;
   ctx.emit('asl.fort.revealed', { counter: { ...c, revealed: true }, reason });
@@ -481,13 +502,22 @@ export function revealFortification(ctx: Ctx, id: string, reason: 'los' | 'tem' 
 export function removeFortification(ctx: Ctx, id: string, reason: string) {
   const c = fortCounters(ctx).find((x) => x.id === id);
   if (!c) return;
-  ctx.emit('asl.fort.removed', { id, hex: c.hex, kind: c.kind, reason });
+  // A counter still hidden from the other side goes without telling it (A12.33): `hidden` lets the redactor drop the event.
+  ctx.emit('asl.fort.removed', { id, hex: c.hex, kind: c.kind, reason, ...(c.hidden && !c.revealed ? { hidden: true } : {}) });
 }
 
-/** The reveal sweep: every hidden counter (minefields excepted, B28.1) a Good Order enemy ground unit can now see. */
+/**
+ * The reveal sweep: every hidden counter (minefields excepted, B28.1) a Good Order enemy ground unit can now see; and
+ * the factors of A-T mines set up in full view on a paved road, "revealed per A12.33" (B28.53).
+ */
 function sweep(ctx: Ctx) {
   if (ctx.state.phase === 'setup') return;
   for (const c of fortCounters(ctx)) {
+    const m = c.mines;
+    if (c.kind === 'mines' && !c.hidden && m?.at && !m.known && !m.dummy && !m.strengthRevealed) {
+      if (seenByEnemy(ctx, c)) ctx.emit('asl.fort.revealed', { counter: { ...c, mines: { ...m, strengthRevealed: true } }, reason: 'strength' });
+      continue;
+    }
     if (!c.hidden || c.revealed || c.kind === 'mines') continue;
     if (seenByEnemy(ctx, c)) revealFortification(ctx, c.id, 'los');
   }
@@ -563,8 +593,12 @@ export const aslFortificationsModule: RuleModule = {
       id: 'asl.fort.redact',
       ext: FORT_EXT,
       redactExt: (slice, viewer) => shownState(slice as FortState, viewer),
-      events: ['asl.fort.placed', 'asl.fort.revealed', 'asl.fort.dummies', 'asl.fort.grown'],
+      events: ['asl.fort.placed', 'asl.fort.revealed', 'asl.fort.dummies', 'asl.fort.grown', 'asl.fort.removed'],
       redactEvent(ev, viewer, env) {
+        if (ev.type === 'asl.fort.removed') {
+          const p = ev.payload as { id: string; hidden?: true };
+          return !p.hidden || viewer === p.id.split('.')[0] ? ev : null;
+        }
         if (ev.type === 'asl.fort.grown') {
           const c = fortCounters(env).find((x) => x.id === (ev.payload as { id: string }).id);
           return c && shownCounter(c, viewer) ? ev : null;
@@ -580,6 +614,18 @@ export const aslFortificationsModule: RuleModule = {
         }
         const p = ev.payload as { side: SideId };
         return viewer === p.side ? ev : null;
+      },
+    });
+
+    // B24.121: falling rubble "eliminates any ... Fortification/TB in that hex": Wire, mines, roadblocks and pillboxes here,
+    // the entrenchments with the units' positions in `asl.entrenchments`.
+    r.on<{ hex: HexId; falls: boolean; to?: HexId }>({
+      id: 'asl.fort.fallingRubble',
+      event: 'asl.rubble.falling',
+      handler(ctx, ev) {
+        const to = ev.payload.to;
+        if (!ev.payload.falls || !to) return;
+        for (const c of fortificationsAt(ctx, to)) if (!ENTRENCHMENTS.includes(c.kind)) removeFortification(ctx, c.id, 'falling rubble (ASLRB B24.121)');
       },
     });
 
@@ -679,7 +725,8 @@ export const fortificationsModule: RuleModule = {
           if (s.module !== FORTIFICATIONS_MODULE) continue;
           const p = s.params as unknown as FortificationsParams;
           if (!(p.mines?.dummies ?? 0)) continue;
-          const dr = ctx.roll(`${p.side}: Dummy Minefield Secret dr (ASLRB B28.47)`, 1).total;
+          // Secret: only its owner sees the die (B28.47 "Secret dr").
+          const dr = ctx.roll(`${p.side}: Dummy Minefield Secret dr (ASLRB B28.47)`, 1, { secret: p.side }).total;
           ctx.emit('asl.fort.dummies', { side: p.side, dr, extra: Math.floor(dr / 2) });
         }
       },

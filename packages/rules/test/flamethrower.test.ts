@@ -66,3 +66,33 @@ describe('a Flamethrower fires alone (SK1 4.2)', () => {
     expect(illegal(engine, s, { units: [], sw: ['ft'] })).toBeNull();
   });
 });
+
+describe('a FT possessor\'s -1 splits the results of one attack (SK1 4.2, 3.2.1)', () => {
+  // American 7-4-7 in yN4 fires 7 FP at range 2 (6 column) into yN6: a German 9-1 with a 4-6-7 holding a FT.
+  // DR 5+3 = 8: a PTC for the leader; 7 for the FT squad (-1 vs its possessor), a worse result.
+  const game = () =>
+    makeEngine({
+      startPhase: 'PFPh',
+      dice: [5, 3, 2, 2, 2, 2],
+      pieces: [
+        { id: 'a1', def: 'am.747', side: 'am', hex: 'yN4' },
+        { id: 'gL', def: 'ge.L91', side: 'ge', hex: 'yN6' },
+        { id: 'g1', def: 'ge.467', side: 'ge', hex: 'yN6' },
+        { id: 'ft', def: 'ge.FT', side: 'ge', heldBy: 'g1' },
+      ],
+    });
+
+  it("the leader checks first, whatever his result, and if he passes lends his DRM to the squad's check", () => {
+    const { engine, state } = game();
+    const t = act(engine, state, { type: 'fire', decl: { units: ['a1'], sw: [], target: 'yN6' } });
+    const results = t.events.filter((e) => e.type === 'sk1.fire.result').map((e) => e.payload as { unit: string; result: { kind: string }; finalDr: number });
+    expect(results.find((r) => r.unit === 'gL')).toMatchObject({ result: { kind: 'PTC' }, finalDr: 8 });
+    expect(results.find((r) => r.unit === 'g1')!.finalDr).toBe(7);
+    expect(results.find((r) => r.unit === 'g1')!.result.kind).not.toBe('PTC');
+    const checks = t.events.filter((e) => e.type === 'sk1.check').map((e) => e.payload as { unit: string; drm: number });
+    expect(checks.map((c) => c.unit)).toEqual(['gL', 'g1']);
+    // The 9-1 passed his PTC (DR 4): his -1 modifies the squad's check.
+    expect(checks.find((c) => c.unit === 'g1')!.drm).toBe(-1);
+    expect(t.state.pieces['gL']!.tags['pinned']).toBeUndefined();
+  });
+});

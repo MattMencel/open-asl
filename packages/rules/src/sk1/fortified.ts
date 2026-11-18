@@ -8,6 +8,11 @@ declare module '@asl/engine' {
   interface QueryCatalog {
     /** Whether a hex is part of a fortified building (designated, revealed or not). */
     'hex.fortified': { ctx: { hex: HexId }; value: boolean };
+    /**
+     * Whether a piece just moved into `hex` has entered it for the reveal on entry. Full ASL: a unit going round the
+     * obstacle in Bypass has not (ASLRB A4.3, A12.151). The Starter Kit has no Bypass: always.
+     */
+    'fortified.entered': { ctx: { piece: PieceId; hex: HexId }; value: boolean };
   }
 }
 
@@ -379,6 +384,7 @@ export const fortifiedModule: RuleModule = {
         const p = ctx.state.pieces[ev.payload.id];
         const st = fortifiedState(ctx);
         if (!p || !st || p.side === st.side) return;
+        if (!ctx.query('fortified.entered', { piece: p.id, hex: loc.hex }, true)) return;
         if (st.locations) {
           if (!(mmc(ctx, p) || smc(ctx, p) || isVehicleDef(defOf(ctx, p)))) return;
           const at = loc.sub ? `${loc.hex}:${loc.sub}` : locId(loc.hex, loc.level ?? 0);

@@ -4,8 +4,9 @@ import { boardHexes, buildMap } from '../src';
 
 /*
  * Bypass on the real board: the hexsides of board u's woods and building hexes open to Bypass (ASLRB A4.3, A4.31), measured on the
- * VASL LOS raster (`bypassMask`), and a pixel LOS to a corner (A4.34). Read here as: any open ground
- * depicted between the obstacle and the hexside (or a neighbour's obstacle) leaves the hexside open.
+ * VASL LOS raster (`bypassMask`), and a pixel LOS to a corner (A4.34). Open ground clearly depicted between the obstacle and
+ * the hexside (or a neighbour's obstacle) leaves the hexside open; a gap within `BYPASS_TOLERANCE_PX` is "in question" and
+ * blocks it (A4.31).
  */
 
 const u = buildMap([{ board: 'u', x: 0, y: 0 }]);
@@ -25,7 +26,9 @@ describe('Board u Bypass hexsides', () => {
     expect(sides('uR3')).toEqual([0, 1, 2, 3, 4, 5]);
     expect(sides('uP2')).not.toContain(sideToward(u, 'uP2', 'uP3'));
     expect(sides('uP3')).not.toContain(sideToward(u, 'uP3', 'uP2'));
-    expect(sides('uP2').length).toBe(5);
+    // P2 and P3 come within a millimetre of their hexsides with Q3: in question, so blocked (A4.31).
+    expect(sides('uP2')).not.toContain(sideToward(u, 'uP2', 'uQ3'));
+    expect(sides('uP2').length).toBe(4);
   });
 
   it('open ground and orchards are never bypassed (no mask)', () => {

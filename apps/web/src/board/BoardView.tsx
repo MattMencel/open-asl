@@ -2149,7 +2149,7 @@ export function BoardView({
       if (split) urls.push(split.hull, split.turret);
       for (const m of markersOf(p)) urls.push(markerImage(m));
     }
-    for (const m of ['Smk2', 'Smk3', 'WP1', 'WP2', 'CC', 'Melee', 'RFP01', 'RFP02', 'RFP04', 'RFP06', 'RFP08', 'RFP12', 'acq1wh', 'acq2wh', 'Lev1', 'Lev2', 'Cave', 'CaveOG', 'Blaze', 'Flame', 'Rubble', 'TI', 'Labor1', 'Labor2']) urls.push(markerImage(m));
+    for (const m of ['Smk12', 'Smk2', 'Smk3', 'WP1', 'WP2', 'CC', 'Melee', 'RFP01', 'RFP02', 'RFP04', 'RFP06', 'RFP08', 'RFP12', 'acq1wh', 'acq2wh', 'Lev1', 'Lev2', 'Cave', 'CaveOG', 'Blaze', 'Flame', 'Rubble', 'TI', 'Labor1', 'Labor2']) urls.push(markerImage(m));
     for (const f of fortifications) urls.push(markerImage(f.marker));
     if (o.declaredFire) for (const m of new Set(o.declaredFire.units.values())) urls.push(markerImage(m));
     await preload(urls);
@@ -2547,8 +2547,8 @@ export function BoardView({
       }
       // Location markers.
       const locMarkers: string[] = [];
-      // One chit per Smoke grenade counter placed in the hex (ASLRB A24.2).
-      for (let i = 0; i < smokeGrenades(markers); i++) locMarkers.push('Smk2');
+      // One ½" Smoke grenade counter per grenade placed in the hex (SK4 3.3.1; ASLRB A24.2), not the ⅝" Dispersed Smoke.
+      for (let i = 0; i < smokeGrenades(markers); i++) locMarkers.push('Smk12');
       for (const c of smoke58Chits(markers)) locMarkers.push(c.marker);
       if (markers['cc']) locMarkers.push('CC');
       if (markers['melee']) locMarkers.push('Melee');

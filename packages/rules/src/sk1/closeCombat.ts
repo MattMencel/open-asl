@@ -15,6 +15,12 @@ declare module '@asl/engine' {
      * default is the SK reading, the highest Morale (the first listed on a tie). Full ASL takes the highest BPV (A18.2).
      */
     'cc.promotionBase': { ctx: { units: PieceId[] }; value: PieceId | null };
+    /**
+     * DRM added to the CC attack that created `leader` on its Original 2, on top of the attack's own leadership DRM (which,
+     * the SK reading, takes only a negative one). 0 by default; full ASL adds a positive leadership (A18.12 "even if the
+     * modifier is a +1").
+     */
+    'cc.createdLeaderDrm': { ctx: { leader: PieceId; mmc: PieceId }; value: number };
     /** CC attack strength of one attacking unit. */
     'cc.attackFp': { ctx: { unit: PieceId }; value: number };
     /** CC defense strength of one target unit (`attackers`: who is attacking it; a vehicle's CC attack faces the unit's CCV, SK3). */
@@ -23,6 +29,11 @@ declare module '@asl/engine' {
     'cc.fpNote': { ctx: { unit: PieceId }; value: string | null };
     /** DRM for one CC attack. */
     'cc.drm': { ctx: { hex: HexId; attackers: PieceId[]; targets: PieceId[]; side: SideId }; value: number };
+    /**
+     * A DRM of one CC attack that applies to one of its targets only (full ASL A4.8: "the -1 DRM for TI status applies
+     * only to the TI units"); each target is then resolved with its own Final DR. None in the Starter Kit.
+     */
+    'cc.targetDrm': { ctx: { hex: HexId; attackers: PieceId[]; targets: PieceId[]; side: SideId; target: PieceId }; value: number };
     /** Ambush drm for a side's force in a CC hex. */
     'cc.ambushDrm': { ctx: { hex: HexId; side: SideId; units: PieceId[] }; value: number };
     /** The units a side has in a hex for Close Combat purposes (personnel; the vehicle rules add non-wreck vehicles). */
@@ -64,6 +75,17 @@ export interface CcAttackPlan {
   drm: number;
   /** Each unit's CC FP behind the totals (a pinned unit's halved), for the log. */
   fp?: { attack: [PieceId, number][]; defense: [PieceId, number][] };
+  /** Targets with a DRM of their own on top of `drm` (`cc.targetDrm`); absent when there is none. */
+  targetDrm?: Record<PieceId, number>;
+}
+
+/** The `cc.targetDrm` of each target of an attack that has one. */
+function targetDrms(env: QueryEnv, hex: HexId, side: SideId, attackers: PieceId[], targets: PieceId[]): Record<PieceId, number> | undefined {
+  const out = targets.flatMap((target) => {
+    const v = env.query('cc.targetDrm', { hex, attackers, targets, side, target }, 0);
+    return v ? [[target, v] as [PieceId, number]] : [];
+  });
+  return out.length ? Object.fromEntries(out) : undefined;
 }
 
 export const CC_HEX = 'ccHex';
@@ -279,7 +301,7 @@ export const closeCombatModule: RuleModule = {
       },
     });
     // `fp`: each attacker's and target's CC FP as the odds were worked out (a pinned unit's halved, SK4 Pin), for the log.
-    r.event<{ hex: HexId; side: SideId; attack: CcAttack; odds: string; drm: number; dr: number; kill: number; result: string; fp?: { attack: [PieceId, number][]; defense: [PieceId, number][] } }>({
+    r.event<{ hex: HexId; side: SideId; attack: CcAttack; odds: string; drm: number; dr: number; kill: number; result: string; fp?: { attack: [PieceId, number][]; defense: [PieceId, number][] }; targetDrm?: Record<PieceId, number> }>({
       type: 'sk1.cc.attack',
       apply() {},
     });
@@ -623,7 +645,8 @@ export function planAttack(env: QueryEnv, side: SideId, at: CcAttack): CcAttackP
   const defenseFp = fp.defense.reduce((x, [, n]) => x + n, 0);
   const odds = ccOdds(env, attackFp, defenseFp);
   if (!odds) return null;
-  return { attackers, targets, attackFp, defenseFp, odds, drm: env.query('cc.drm', { hex, attackers, targets, side }, 0), fp };
+  const targetDrm = targetDrms(env, hex, side, attackers, targets);
+  return { attackers, targets, attackFp, defenseFp, odds, drm: env.query('cc.drm', { hex, attackers, targets, side }, 0), fp, ...(targetDrm ? { targetDrm } : {}) };
 }
 
 /** One declared CC attack, planned and rolled, waiting for its result to be applied. */
@@ -677,6 +700,8 @@ export function resolveAttackBatch(ctx: Ctx, items: { side: SideId; at: CcAttack
     setTags(ctx, leader, { [T.stackedOn]: withMmc! });
     r.at = { attackers: [...r.at.attackers, leader], targets: r.at.targets };
     r.plan = planAttack(ctx, r.side, r.at) ?? r.plan;
+    const created = ctx.query('cc.createdLeaderDrm', { leader, mmc: best.id }, 0);
+    if (created) r.plan = { ...r.plan, drm: r.plan.drm + created };
     for (const o of rolled) {
       if (o === r || !o.plan.targets.includes(withMmc!)) continue;
       o.at = { attackers: o.at.attackers, targets: [...o.at.targets, leader] };
@@ -694,6 +719,7 @@ function applyAttack(ctx: Ctx, { side, plan, roll }: CcAttackRoll) {
   if (targets.length === 0) return;
   const kill = ctx.query('cc.kill', { hex, side, attackers, targets, odds }, statics(ctx).tables.ccKill(odds));
   const final = roll.total + drm;
+  if (plan.targetDrm) return applyPerTarget(ctx, plan, roll.total, kill, targets, side);
   let result = 'no effect';
   if (final < kill) {
     result = 'eliminated';
@@ -706,6 +732,25 @@ function applyAttack(ctx: Ctx, { side, plan, roll }: CcAttackRoll) {
     }
   }
   ctx.emit('sk1.cc.attack', { hex, side, attack: { attackers, targets }, odds, drm, dr: roll.total, kill, result, ...(plan.fp ? { fp: plan.fp } : {}) });
+}
+
+/**
+ * A CC attack whose targets do not all share its DRM (A4.8 EX: two TI units and a non-TI unit attacked together, the -1
+ * "applies only to the TI units"): each target's Final DR is the DR + the attack's DRM + its own. Those below the kill
+ * number are eliminated; Casualty Reduction (A11.11) falls by Random Selection on one of those whose Final DR equals it.
+ */
+function applyPerTarget(ctx: Ctx, plan: CcAttackPlan, dr: number, kill: number, targets: PieceId[], side: SideId) {
+  const hex = ccState(ctx)!.hex!;
+  const finalOf = (t: PieceId) => dr + plan.drm + (plan.targetDrm?.[t] ?? 0);
+  const killed = targets.filter((t) => finalOf(t) < kill);
+  const reduced = targets.filter((t) => finalOf(t) === kill);
+  for (const t of killed) eliminate(ctx, t, 'Close Combat');
+  if (reduced.length) {
+    for (const victim of ctx.proc<RandomSelectFn>(MP.randomSelect)(ctx, reduced, 1, 'CC casualty', { ties: true })) ctx.proc<CasualtyFn>(MP.casualtyReduce)(ctx, victim, 'Close Combat');
+  }
+  const result = killed.length === targets.length ? 'eliminated' : [...(killed.length ? [`${killed.length} of ${targets.length} eliminated`] : []), ...(reduced.length ? ['casualty reduction'] : [])].join('; ') || 'no effect';
+  const { attackers, odds, drm } = plan;
+  ctx.emit('sk1.cc.attack', { hex, side, attack: { attackers, targets }, odds, drm, dr, kill, result, targetDrm: plan.targetDrm, ...(plan.fp ? { fp: plan.fp } : {}) });
 }
 
 /** CC strength: SMC = 1; MMC = FP (halved if pinned, via query). */
@@ -765,13 +810,25 @@ export function ccAttackPreview(env: QueryEnv, hex: HexId, side: SideId, attack:
     odds,
     kill: odds ? env.query('cc.kill', { hex, side, attackers, targets, odds }, statics(env).tables.ccKill(odds)) : 0,
     drm: res?.value ?? 0,
-    drmNotes: res ? drmNotes(res) : [],
+    drmNotes: res ? [...drmNotes(res), ...targetDrmNotes(env, hex, side, attackers, targets)] : [],
     illegal: declarationIllegal(env, side, hex, [attack]),
     fpNotes: [...attackers, ...targets].flatMap((unit) => {
       const note = env.query('cc.fpNote', { unit }, null);
       return note ? [{ unit, note }] : [];
     }),
   };
+}
+
+/** A note for each target DRM of a prospective attack (`cc.targetDrm`): what it is and whom it applies to. */
+function targetDrmNotes(env: QueryEnv, hex: HexId, side: SideId, attackers: PieceId[], targets: PieceId[]): DrmNote[] {
+  const per = targetDrms(env, hex, side, attackers, targets);
+  if (!per) return [];
+  const byValue = new Map<number, PieceId[]>();
+  for (const [t, v] of Object.entries(per)) byValue.set(v, [...(byValue.get(v) ?? []), t]);
+  return [...byValue].flatMap(([, ids]) => {
+    const notes = drmNotes(env.explain('cc.targetDrm', { hex, attackers, targets, side, target: ids[0]! }, 0));
+    return notes.map((n) => (ids.length < targets.length ? { ...n, label: `${n.label ?? n.id} (${ids.length} of the ${targets.length} targets)` } : n));
+  });
 }
 
 export const _cc = { declarationIllegal, defensiveGroup, ccOdds };

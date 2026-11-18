@@ -675,6 +675,21 @@ export const DEV_FIXTURES: DevFixture[] = [
     },
   },
   {
+    id: 'foxhole-hidden',
+    scenarioId: 'asl-testbed',
+    title: 'Foxholes: a hidden one out of sight',
+    description:
+      'Russian Turn 1 Prep Fire Phase. A 4-4-7 sits beneath a hidden 1S foxhole in the C2 woods, more than 16 hexes from every German, so no LOS reveals it (ASLRB A12.33). In the MPh it may climb out and go back beneath for no MF, unseen: the German screen shows the squad in C2, no foxhole and no move in or out of one.',
+    build(f) {
+      const ru = (def: string, n = 1) => f.unit('ru', def, n);
+      f.fortify(TESTBED_FORTIFIED);
+      f.fortPlace([{ kind: 'foxhole', hex: 'uC2', hidden: true, capacity: 1 }]);
+      f.setup('ru', { [ru('ru.447', 3)]: 'uC2' }, {}, { beneath: [ru('ru.447', 3)] });
+      f.setup('ge', {});
+      f.until('PFPh', { turn: 1, attacker: 'ru' });
+    },
+  },
+  {
     id: 'snap-shot',
     scenarioId: 'asl-testbed',
     title: 'Snap Shot',

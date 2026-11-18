@@ -1,5 +1,15 @@
-import type { QueryEnv, RuleModule } from '@asl/engine';
+import type { PieceId, QueryEnv, RuleModule } from '@asl/engine';
+import { defOf } from '../common/pieces';
 import { T, mmc } from '../sk1/status';
+
+/**
+ * The Leader Creation Table is "NA to Finns or Japanese" (ASLRB A18.2 table note; SK4 8.1.7 says the same of Japanese
+ * MMC): no Field Promotion for their MMC, by rally or in CC.
+ */
+export const createsNoLeader = (env: QueryEnv, id: PieceId): boolean => {
+  const p = env.state.pieces[id];
+  return !!p && ['ja', 'fi'].includes(defOf(env, p).nationality ?? '');
+};
 
 /** Whether the ATTACKER has yet made a MMC Rally attempt this RPh, by self-rally or with a leader (`rallyTried`). */
 const attackerMmcRallied = (env: QueryEnv): boolean =>
@@ -27,7 +37,7 @@ export const aslFieldPromotionModule: RuleModule = {
       id: 'asl.fieldPromotion.first',
       query: 'rally.promotes',
       ref: 'ASLRB A18.11',
-      apply: (_v, { unit }, env) => env.state.pieces[unit]?.side === env.state.attacker && !attackerMmcRallied(env),
+      apply: (_v, { unit }, env) => env.state.pieces[unit]?.side === env.state.attacker && !attackerMmcRallied(env) && !createsNoLeader(env, unit),
     });
     r.contribute({
       id: 'asl.fieldPromotion.freeSelfRally',

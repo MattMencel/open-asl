@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { HEARTBEAT_MS, STALE_MS, connectionPresent, presentUids } from '../src/lobby-v2/presenceRules';
+import { HEARTBEAT_MS, STALE_MS, areaOf, connectionPresent, presentUids } from '../src/lobby-v2/presenceRules';
 
 describe('lobby presence', () => {
   const now = 1_800_000_000_000;
@@ -31,5 +31,13 @@ describe('lobby presence', () => {
     };
     expect(presentUids(tree, now)).toEqual(['bob', 'zed']);
     expect(presentUids(null, now)).toEqual([]);
+  });
+
+  it('places a tab by its page: the lobby pages, a match, or a page outside the app, which is not the lobby', () => {
+    expect(areaOf('/app/starter-kit/home')).toBe('lobby');
+    expect(areaOf('/app/match/abc')).toBe('match');
+    expect(areaOf('/profile/able')).toBe('away');
+    expect(areaOf('/match/abc/replay')).toBe('away');
+    expect(connectionPresent({ at: now - 1000, area: 'away', active: true }, now)).toBe(false);
   });
 });

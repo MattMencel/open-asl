@@ -250,7 +250,7 @@ function locationMarkers(env: QueryEnv, hex: HexId): { marker: string; label: st
     out.push({ marker: a.level === 2 ? 'acq2wh' : 'acq1wh', label: `Acquired -${a.level} by Gun ${letter} (${pieceLabel(env, a.gun)})${a.type === 'ATT' ? ', Area' : ''}`, ...(letter ? { tint: identCss(letter) } : {}) });
   }
   const grenades = smokeGrenades(m);
-  for (let i = 0; i < grenades; i++) out.push({ marker: 'Smk2', label: grenades > 1 ? `Smoke grenades ${i + 1} of ${grenades}: +${smokeDrm(env, hex)} in all, at most +3` : 'Smoke grenades (+2)' });
+  for (let i = 0; i < grenades; i++) out.push({ marker: 'Smk12', label: grenades > 1 ? `Smoke grenades ${i + 1} of ${grenades}: +${smokeDrm(env, hex)} in all, at most +3` : 'Smoke grenades (+2)' });
   const s58 = smoke58Chits(m);
   const several = grenades + s58.length > 1;
   for (const c of s58) out.push(several ? { ...c, label: `${c.label}: +${smokeDrm(env, hex)} in all, at most +3` } : c);

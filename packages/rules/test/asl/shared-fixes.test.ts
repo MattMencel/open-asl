@@ -283,6 +283,37 @@ describe('SW repair: one attempt per unit by SK1/SK4 3.1, as many SW as it could
   });
 });
 
+describe('Gun repair: only a crew (not a Temporary Crew) in full ASL (A9.72); any possessor in the Starter Kit (SK4 3.1c)', () => {
+  const setup = (holder: string, extra: typeof aslCoreModules = []) =>
+    makeEngine({
+      startPhase: 'RPh',
+      scenario: { firstSide: 'ge' },
+      extra,
+      pieces: [
+        { id: 'h', def: holder, side: 'ge', hex: 'yN5' },
+        { id: 'gun', def: 'ge.AT75L', side: 'ge', heldBy: 'h', tags: { malf: true } },
+        { id: 'a1', def: 'am.747', side: 'am', hex: 'yP9' },
+      ],
+      dice: extra.length ? [3, 4, 1] : [1],
+    });
+  const repair = (holder: string, extra: typeof aslCoreModules = []) => {
+    const { engine, state } = setup(holder, extra);
+    const side = engine.currentDecision(state)!.owner;
+    return { engine, state, why: engine.validate(state, { side, decisionId: engine.currentDecision(state)!.id, type: 'rally.repair', unit: 'h', sw: 'gun' } as never) };
+  };
+
+  it('ASL: a squad manning the Gun may not repair it; its crew may', () => {
+    expect(repair('ge.467', aslCoreModules).why).toMatch(/Only a crew \(not a Temporary Crew\) can attempt to repair a Gun \(ASLRB A9.72\)/);
+    const { engine, state, why } = repair('ge.228c', aslCoreModules);
+    expect(why).toBeNull();
+    expect(act(engine, state, { type: 'rally.repair', unit: 'h', sw: 'gun' }).state.pieces['gun']!.tags['malf']).toBeUndefined();
+  });
+
+  it('SK: any Good Order possessor may try', () => {
+    expect(repair('ge.467').why).toBeNull();
+  });
+});
+
 describe('A9.71 Multiple SW malfunction, full ASL: a tie affects every tied MG', () => {
   const setup = (modules: typeof aslCoreModules) =>
     makeEngine({

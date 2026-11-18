@@ -1,15 +1,16 @@
 import type { Action, Ctx, HexId, Piece, PieceId, QueryEnv, RuleModule, SideId } from '@asl/engine';
-import { byId, defOf, isVehicleDef, personnelAt, statics, swHeldBy, unpossessedWeaponsAt } from '../common/pieces';
+import { byId, defOf, isVehicleDef, otherSide, personnelAt, statics, swHeldBy, unpossessedWeaponsAt } from '../common/pieces';
 import { adjacentLocs, hexOfLoc, isGroundLoc, locOf, locationAt, type LocId } from '../common/location';
 import { PHASE_DECISION } from '../common/turn';
 import { AP, type AdvanceAction, type AdvanceEnterFn } from '../sk1/advance';
 import { ffmoApplies, type FireAttackCtx } from '../sk1/fire';
-import { MOVE_ENTER, afterMfExpenditure, assaultAllMf, remaining, spendInPlace, type MoveEnterFn, type MoveState } from '../sk1/movement';
+import { MOVE_ENTER, afterMfExpenditure, inPlaceIllegal, remaining, spendInPlace, type MoveEnterFn, type MoveState } from '../sk1/movement';
 import { expenditureKey, moveLoc, moveState } from '../sk1/moveState';
 import { ROUT_ENTERED, type RoutEnteredFn } from '../sk1/rout';
 import { T, fireMarker, gun, gunHeldBy, isBroken, isGoodOrder, isPinned, mmc, pieceOf, setTags, smc, squadEquivalents } from '../sk1/status';
 import { smokeIn, terrainOf } from '../sk1/terrain';
 import { heightAdvantage, heightOf, levelOf } from '../sk2/elevation';
+import { OP, toHitNumber, type ResolveHitFn, type ShotCtx } from '../sk2/ordnance';
 import { counterTerrainIllegal, entrenchmentAt, fortCounters, fortHiddenAt, pillboxAt, removeFortification, revealFortification, shownCounter, type FortRecord } from './fortifications';
 import { isTi, laborTag, parseLabor, tiIllegal } from './labor';
 
@@ -193,8 +194,22 @@ export function entrenchers(env: QueryEnv, loc: LocId, side: SideId): { mmcs: Pi
   return { mmcs: here.filter((p) => entrenchUnitIllegal(env, p) === null), leaders: here.filter((p) => entrenchDirectorIllegal(env, p) === null) };
 }
 
-/** The DRM of one Entrenching DR (B27.11, B24.8, A25.21): +1 for a lone HS or crew, the director's leadership, Labor, -1 Russian. */
-export function entrenchDrm(env: QueryEnv, loc: LocId, unit: PieceId, director?: PieceId): { drm: number; explain: string[] } {
+/**
+ * The Labor DRM of an Entrenching attempt at `loc` (B24.8): the best Labor counter for that Task among the units making
+ * the attempt together, since a unit that earned one "may add the -1 ... even if joined by new units".
+ */
+export function entrenchLabor(env: QueryEnv, loc: LocId, units: PieceId[]): number {
+  return Math.min(0, ...units.map((u) => {
+    const l = parseLabor(env.state.pieces[u]?.tags['labor']);
+    return l && l.task === `entrench:${loc}` ? l.drm : 0;
+  }));
+}
+
+/**
+ * The DRM of one Entrenching DR (B27.11, B24.8, A25.21): +1 for a lone HS or crew, the director's leadership, Labor, -1
+ * Russian. `joint` lists the other MMC attempting at the same time (their Labor counter applies to the newcomers too).
+ */
+export function entrenchDrm(env: QueryEnv, loc: LocId, unit: PieceId, director?: PieceId, joint: PieceId[] = []): { drm: number; explain: string[] } {
   const explain: string[] = [];
   let drm = 0;
   const p = pieceOf(env, unit);
@@ -210,10 +225,10 @@ export function entrenchDrm(env: QueryEnv, loc: LocId, unit: PieceId, director?:
       explain.push(`${l > 0 ? '+' : ''}${l} leadership`);
     }
   }
-  const labor = parseLabor(p.tags['labor']);
-  if (labor && labor.task === `entrench:${loc}` && labor.drm) {
-    drm += labor.drm;
-    explain.push(`${labor.drm} Labor`);
+  const labor = entrenchLabor(env, loc, [unit, ...joint]);
+  if (labor) {
+    drm += labor;
+    explain.push(`${labor} Labor`);
   }
   if (defOf(env, p).nationality === 'ru') {
     drm -= 1;
@@ -289,8 +304,8 @@ export function entrenchmentMoveIllegal(env: QueryEnv, beneath: boolean): string
   }
   const mf = entrenchmentMf(env, ms.hex, side);
   for (const u of ms.units) if (remaining(env, ms, u) < mf) return `${u} lacks the MF (${mf}) to ${beneath ? 'enter' : 'leave'} the ${entName(c)} (ASLRB B27.4)`;
-  // A4.61: a MF spent within the Location does not void Assault Movement unless it is the unit's last.
-  return assaultAllMf(ms, mf);
+  // A4.61 EXC: a MF spent within the Location does not void Assault Movement unless it is the unit's last (which may be spent).
+  return inPlaceIllegal(env, ms, mf);
 }
 
 // ---------------------------------------------------------------- the module
@@ -303,6 +318,8 @@ export const aslEntrenchmentsModule: RuleModule = {
   install(r) {
     r.event<{ loc: LocId; unit: PieceId; director?: PieceId; dr: [number, number]; drm: number; explain: string[]; success: boolean; capacity?: 1 | 2 | 3; labor?: number }>({ type: 'asl.entrench.attempt', apply() {} });
     r.event<{ units: PieceId[]; hex: HexId; beneath: boolean; mf: number; phase: string }>({ type: 'asl.entrench.move', apply() {} });
+    /** C3.32: units beneath an entrenchment the To Hit DR missed, though it hit the units on top (`extra`: their +2 over the hex TEM). */
+    r.event<{ units: PieceId[]; final: number; extra: number; th: number }>({ type: 'asl.entrench.thMissed', apply() {} });
     r.event<{ snapEntry: string | null }>({
       type: 'asl.entrench.snap',
       apply(d, p) {
@@ -362,10 +379,15 @@ export const aslEntrenchmentsModule: RuleModule = {
         const side = a.side;
         const hex = hexOfLoc(a.loc);
         const participants = new Set<PieceId>();
+        const joint = a.attempts.map((x) => x.unit);
+        // The Labor counter of the attempt (B24.8): a failure flips it one step further for every unit beneath it,
+        // newcomers included. Failures are marked once all the DRs are made, so one unit's failure does not change
+        // the DRM of another's DR made at the same time.
+        const failed: { unit: PieceId; labor: number }[] = [];
         for (const at of [...a.attempts].sort((x, y) => (x.unit < y.unit ? -1 : 1))) {
           participants.add(at.unit);
           if (at.director) participants.add(at.director);
-          const { drm, explain } = entrenchDrm(ctx, a.loc, at.unit, at.director);
+          const { drm, explain } = entrenchDrm(ctx, a.loc, at.unit, at.director, joint);
           const roll = ctx.roll(`Entrenching Attempt by ${at.unit}`);
           const success = roll.total + drm <= 5;
           let capacity: 1 | 2 | 3 | undefined;
@@ -373,22 +395,26 @@ export const aslEntrenchmentsModule: RuleModule = {
           if (success) {
             const c = entrenchmentAt(ctx, hex);
             if (c) {
+              // The new foxhole replaces the 1S counter by a 2S or 3S one (B27.12): a counter created in play is placed
+              // openly (only setup may be hidden, A12.33), so a hidden foxhole grown this way is revealed.
+              revealFortification(ctx, c.id, 'grown');
               capacity = Math.min(3, (c.capacity ?? 1) + 1) as 1 | 2 | 3;
               ctx.emit('asl.fort.grown', { id: c.id, capacity });
             } else {
               capacity = 1;
               ctx.emit('asl.fort.placed', { side, counters: [{ id: nextFortId(ctx, side), side, kind: 'foxhole', hex, hidden: false, capacity: 1 }] });
             }
-            // The Task is achieved: the Labor counters for it come off (B24.8).
+            // The Task is achieved: the Labor counters for it come off (B24.8), failures earlier in this attempt included.
             for (const p of personnelAt(ctx, a.loc, side)) if (parseLabor(p.tags['labor'])?.task === `entrench:${a.loc}`) setTags(ctx, p.id, { labor: null });
+            failed.length = 0;
             placeBeneath(ctx, [at.unit, ...(at.director ? [at.director] : [])], hex, true);
           } else {
-            const cur = parseLabor(ctx.state.pieces[at.unit]?.tags['labor']);
-            labor = Math.max(-2, (cur?.task === `entrench:${a.loc}` ? cur.drm : 0) - 1);
-            setTags(ctx, at.unit, { labor: laborTag(`entrench:${a.loc}`, labor) });
+            labor = Math.max(-2, entrenchLabor(ctx, a.loc, joint) - 1);
+            failed.push({ unit: at.unit, labor });
           }
           ctx.emit('asl.entrench.attempt', { loc: a.loc, unit: at.unit, ...(at.director ? { director: at.director } : {}), dr: roll.dice as [number, number], drm, explain, success, ...(capacity ? { capacity } : {}), ...(labor !== undefined ? { labor } : {}) });
         }
+        for (const f of failed) setTags(ctx, f.unit, { labor: laborTag(`entrench:${a.loc}`, f.labor) });
         // Regardless of the outcome, all participating units are TI (B27.11, A4.8).
         for (const id of [...participants].sort()) setTags(ctx, id, { ti: true });
       },
@@ -457,6 +483,19 @@ export const aslEntrenchmentsModule: RuleModule = {
         if (ms.vehicle || !ms.hex || !isGroundLoc(to) || !entrenchmentKnownTo(env, hexOfLoc(to), env.state.attacker)) return v;
         if (!ms.assault && !(ms.ent && trenchToTrench(env, ms.hex, to))) return v;
         return [...v, { type: 'move.step' as const, to, beneath: true as const }];
+      },
+    });
+    // B27.56: "no vehicle may enter an unbridged A-T Ditch" (there are no bridges yet). A hidden ditch is revealed by the
+    // vehicle's own LOS from the adjacent hex before it can try (A12.33: a Good Order enemy ground unit, vehicles included),
+    // so the refusal never depends on a counter the moving side cannot see.
+    r.contribute({
+      id: 'asl.ent.ditchVehicle',
+      query: 'vehicle.stepIllegal',
+      ref: 'ASLRB B27.56',
+      apply(v, { to }, env) {
+        if (v) return v;
+        const c = entrenchmentKnownTo(env, to, env.state.attacker);
+        return c?.kind === 'ditch' ? `No vehicle may enter an A-T Ditch (${to}; ASLRB B27.56)` : null;
       },
     });
     r.contribute({
@@ -549,6 +588,79 @@ export const aslEntrenchmentsModule: RuleModule = {
       });
       return reductions.length ? Math.min(...reductions) : 0;
     };
+    // Ordnance on the Infantry Target Type: TEM is a To Hit DRM (case 17; C3.33), not an IFT DRM, and a Critical Hit
+    // reverses it (C3.7). When every unit the shot can hit is beneath the entrenchment, its +2 is that TEM (not
+    // cumulative with a positive hex TEM, B27.3): on the To Hit DR, reversed on a CH, never on the IFT DR. With units on
+    // top as well (C3.32 and its EX), the one To Hit DR is compared with each target's own To Hit number: those on top
+    // with the hex TEM, those beneath with the +2; every unit hit takes the one Effects DR (`OP.resolveHit` below).
+    const entTemOf = (env: QueryEnv, hex: HexId, from: LocId | null): number => {
+      if (!from) return 2;
+      const red = Math.max(0, Math.floor(heightOf(env, from) - heightOf(env, hex)) - statics(env).map.distance(hexOfLoc(from), hex));
+      return 2 - red;
+    };
+    const ittAllBeneath = (env: QueryEnv, target: LocId, side: SideId, moving?: PieceId[]): boolean => {
+      const units = moving?.length ? moving.map((u) => env.state.pieces[u]).filter((p): p is Piece => !!p && p.loc.kind === 'hex') : personnelAt(env, target, otherSide(env.state, side));
+      return units.length > 0 && units.every(isEntrenched);
+    };
+    const thExtra = (env: QueryEnv, sc: ShotCtx): number => {
+      const tem = Math.max(0, env.query('hex.tem', { hex: sc.target }, 0));
+      return Math.max(0, entTemOf(env, hexOfLoc(sc.target), sc.loc ?? sc.hex) - tem);
+    };
+    r.contribute({
+      id: 'asl.ent.th',
+      query: 'ordnance.thDrm',
+      ref: 'ASLRB B27.3, C3.33',
+      label: (sc, env) => `+${thExtra(env, sc)} TEM (entrenchment, in place of the hex TEM)`,
+      when: (sc, env) => sc.shot.targetType === 'ITT' && isGroundLoc(sc.target) && ittAllBeneath(env, sc.target, sc.side, sc.moving) && thExtra(env, sc) > 0,
+      apply: (v, sc, env) => v + thExtra(env, sc),
+    });
+    /** An ordnance attack on the Infantry Target Type at a ground Location: its TEM went on the To Hit DR. */
+    const ittAttack = (attack: FireAttackCtx): boolean => attack.ordnance?.targetType === 'ITT' && isGroundLoc(attack.target);
+    const ittOnTh = (env: QueryEnv, attack: FireAttackCtx): boolean => {
+      if (attack.ordnance?.targetType !== 'ITT' || !isGroundLoc(attack.target)) return false;
+      const firer = attack.parts[0] ? locOf(env.state, pieceOf(env, attack.parts[0].firer)) : null;
+      const side = attack.parts[0] ? pieceOf(env, attack.parts[0].firer).side : env.state.attacker;
+      return ittAllBeneath(env, attack.target, side, attack.moving ? moveState(env)?.units : undefined) && !!firer;
+    };
+    r.contribute({
+      id: 'asl.ent.ch-reversed',
+      query: 'fire.drm',
+      ref: 'ASLRB B27.3, C3.7',
+      label: '-2 Critical Hit: entrenchment TEM reversed',
+      when: ({ attack }, env) => !!attack.ordnance?.ch && !attack.ordnance.airBurst && ittOnTh(env, attack),
+      apply(v, { attack }, env) {
+        const tem = Math.max(0, env.query('hex.tem', { hex: attack.target }, 0));
+        const from = locOf(env.state, pieceOf(env, attack.parts[0]!.firer));
+        return v - Math.max(0, entTemOf(env, hexOfLoc(attack.target), from) - tem);
+      },
+    });
+    // ... and in a mixed Location each unit beneath has its own TEM reversed on a Critical Hit: the +2 in place of the hex's.
+    r.contribute({
+      id: 'asl.ent.ch-reversed.unit',
+      query: 'fire.unitDrm',
+      ref: 'ASLRB B27.3, C3.7, C3.32',
+      label: ({ attack }, env) => `-${Math.max(0, entTemOf(env, hexOfLoc(attack.target), locOf(env.state, pieceOf(env, attack.parts[0]!.firer))) - Math.max(0, env.query('hex.tem', { hex: attack.target }, 0)))} Critical Hit: entrenchment TEM reversed`,
+      when: ({ attack, unit }, env) => !!attack.ordnance?.ch && !attack.ordnance.airBurst && ittAttack(attack) && !ittOnTh(env, attack) && isEntrenched(pieceOf(env, unit)) && attack.parts.length > 0,
+      apply(v, { attack }, env) {
+        const tem = Math.max(0, env.query('hex.tem', { hex: attack.target }, 0));
+        return v - Math.max(0, entTemOf(env, hexOfLoc(attack.target), locOf(env.state, pieceOf(env, attack.parts[0]!.firer))) - tem);
+      },
+    });
+    // C3.32: in a Location with units both on top and beneath, a unit beneath is hit only if the To Hit DR also beats
+    // the To Hit number its own +2 gives it; the units hit share the one Effects DR. Claiming that +2 reveals a hidden
+    // entrenchment (A12.33).
+    r.procedure<ResolveHitFn>(OP.resolveHit, (next) => (ctx, sc, h, targets, results) => {
+      if (!h.hit || sc.shot.targetType !== 'ITT' || !isGroundLoc(sc.shot.target)) return next!(ctx, sc, h, targets, results);
+      const beneath = targets.filter((u) => isEntrenched(pieceOf(ctx, u)));
+      if (beneath.length === 0 || beneath.length === targets.length) return next!(ctx, sc, h, targets, results);
+      const c = entrenchmentAt(ctx, hexOfLoc(sc.shot.target));
+      if (c && c.hidden && !c.revealed) revealFortification(ctx, c.id, 'tem');
+      const extra = thExtra(ctx, sc);
+      const th = toHitNumber(ctx, sc)?.th ?? -Infinity;
+      const missed = extra > 0 && h.original + h.drm + extra > th ? beneath : [];
+      if (missed.length) ctx.emit('asl.entrench.thMissed', { units: missed, final: h.original + h.drm, extra, th });
+      return next!(ctx, sc, h, targets.filter((u) => !missed.includes(u)), results);
+    });
     r.contribute({
       id: 'asl.ent.tem',
       query: 'fire.unitDrm',
@@ -565,7 +677,7 @@ export const aslEntrenchmentsModule: RuleModule = {
         if (ffmoApplies(env, attack) && !isPinned(p)) notes.push('no FFMO beneath it');
         return notes.join(', ');
       },
-      when: ({ attack, unit }, env) => !attack.snap && isEntrenched(pieceOf(env, unit)) && !partsFt(env, attack),
+      when: ({ attack, unit }, env) => !attack.snap && isEntrenched(pieceOf(env, unit)) && !partsFt(env, attack) && !ittAttack(attack),
       apply(v, { attack, unit }, env) {
         const hex = hexOfLoc(attack.target);
         const tem = env.query('hex.tem', { hex: attack.target }, 0);
@@ -580,15 +692,29 @@ export const aslEntrenchmentsModule: RuleModule = {
         return drm;
       },
     });
-    // A hidden entrenchment is revealed when its TEM is claimed (A12.33): any attack resolved on a Location with a unit beneath it.
-    r.on<{ attack: { target: LocId } }>({
+    // A hidden entrenchment is revealed when its TEM is claimed (A12.33): any attack resolved on a Location with a unit
+    // beneath it, except one against which the TEM cannot be claimed: a Snap Shot (A8.15) or a FT (B27.3 EXC, A22.1).
+    r.on<{ attack: { target: LocId; parts: PieceId[]; snap?: unknown } }>({
       id: 'asl.ent.temReveal',
       event: 'sk1.fire.attack',
       handler(ctx, ev) {
-        const hex = hexOfLoc(ev.payload.attack.target);
+        const { attack } = ev.payload;
+        if (attack.snap || attack.parts.some((id) => (defOf(ctx, pieceOf(ctx, id)) as { type?: string }).type === 'FT')) return;
+        const hex = hexOfLoc(attack.target);
         const c = entrenchmentAt(ctx, hex);
         if (!c || !c.hidden || c.revealed) return;
         if (entrenchedAt(ctx, hex, c.side).length) revealFortification(ctx, c.id, 'tem');
+      },
+    });
+
+    // ...or when its TEM is claimed on an ordnance To Hit DR (B27.3, A12.33), hit or miss.
+    r.on<{ target: LocId; explain: { id: string }[] }>({
+      id: 'asl.ent.thReveal',
+      event: 'sk2.ordnance.shot',
+      handler(ctx, ev) {
+        if (!ev.payload.explain?.some((n) => n.id === 'asl.ent.th')) return;
+        const c = entrenchmentAt(ctx, hexOfLoc(ev.payload.target));
+        if (c && c.hidden && !c.revealed) revealFortification(ctx, c.id, 'tem');
       },
     });
 
@@ -642,6 +768,10 @@ export const aslEntrenchmentsModule: RuleModule = {
     r.procedure<RoutEnteredFn>(ROUT_ENTERED, (next) => (ctx, units, loc, beneath) => {
       next?.(ctx, units, loc, beneath);
       if (!beneath) return;
+      // Routing beneath the entrenchment nullifies any Interdiction there (B27.41): a protective benefit claimed, so a
+      // hidden counter is revealed (A12.33).
+      const c = entrenchmentAt(ctx, hexOfLoc(loc));
+      if (c) revealFortification(ctx, c.id, 'rout');
       placeBeneath(ctx, units, hexOfLoc(loc), true);
       ctx.emit('asl.entrench.move', { units, hex: hexOfLoc(loc), beneath: true, mf: entrenchmentMf(ctx, hexOfLoc(loc), pieceOf(ctx, units[0]!).side), phase: 'RtPh' });
     });
@@ -651,7 +781,11 @@ export const aslEntrenchmentsModule: RuleModule = {
       query: 'rally.drm',
       ref: 'ASLRB A10.61',
       label: '-1 trench',
-      when: ({ unit }, env) => beneathTrench(pieceOf(env, unit)),
+      // One -1 for "building, pillbox, trench or woods" (A10.61): none more for a trench in a woods or building hex.
+      when: ({ unit }, env) => {
+        const p = pieceOf(env, unit);
+        return beneathTrench(p) && !(p.loc.kind === 'hex' && terrainOf(env, p.loc.hex).rallyCover);
+      },
       apply: (v) => v - 1,
     });
     r.contribute({

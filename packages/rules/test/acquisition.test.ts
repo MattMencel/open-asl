@@ -14,6 +14,13 @@ const teleport: RuleModule = {
         ctx.emit('piece.moved', { id: a.id, loc: { kind: 'hex', hex: a.hex } });
       },
     });
+    r.action<Action & { ids: string[]; hex: string }>({
+      type: 'test.teleportAll',
+      decisionKinds: ['phase'],
+      resolve(ctx: Ctx, a) {
+        for (const id of a.ids) ctx.emit('piece.moved', { id, loc: { kind: 'hex', hex: a.hex } });
+      },
+    });
     r.action<Action & { id: string; tags: Record<string, boolean | null> }>({
       type: 'test.tag',
       decisionKinds: ['phase'],
@@ -148,5 +155,86 @@ describe('Acquired Target counters (SK4 6.10, 6.11)', () => {
     });
     const idents = gunIdents(state, engine.env(state));
     expect([idents.get('g1'), idents.get('g2'), idents.get('g40')]).toEqual(['A', 'B', 'A']);
+  });
+
+  describe('a scattered acquired stack: the firer chooses which target keeps the counter (SK4 6.10; ASLRB C6.5)', () => {
+    // A British Gun in R5 has acquired the German stack in O5 (two squads); P5, next to it, is in the Gun's LOS too.
+    const mk = (startPhase: string, dice: number[] = []) => {
+      const probe = makeEngine({ scenario: GE_VS_BR, extra, pieces: [{ id: 'x', def: 'ge.467', side: 'ge', hex: 'yK5' }] });
+      const ca = spineFor(probe.engine, probe.state, 'yR5', 'yO5');
+      return makeEngine({
+        scenario: GE_VS_BR,
+        extra,
+        startPhase,
+        dice,
+        pieces: [
+          { id: 'c1', def: 'br.228c', side: 'br', hex: 'yR5' },
+          { id: 'g40', def: 'br.AA40L', side: 'br', heldBy: 'c1', tags: { ca, acq: 'ITT', acqHex: 'yO5', acqUnits: 'e1,e2', acqLevel: 1 } },
+          { id: 'e1', def: 'ge.467', side: 'ge', hex: 'yO5' },
+          { id: 'e2', def: 'ge.467', side: 'ge', hex: 'yO5' },
+        ],
+      });
+    };
+
+    it('asks the Gun\'s owner when one unit leaves, offering both hexes; the counter stays where he says', () => {
+      for (const keep of ['yO5', 'yP5']) {
+        const { engine, state } = mk('MPh');
+        let s = act(engine, state, { type: 'move.start', units: ['e1'] }).state;
+        s = act(engine, s, { type: 'move.step', to: 'yP5' }).state;
+        expect(engine.currentDecision(s)).toMatchObject({ kind: 'acqChoice', owner: 'br', data: { gun: 'g40' } });
+        expect(engine.legalActions(s, 'br').map((a) => a['hex']).sort()).toEqual(['yO5', 'yP5']);
+        const t = act(engine, s, { type: 'acq.choose', gun: 'g40', hex: keep });
+        expect(t.state.pieces['g40']!.tags).toMatchObject({ acqHex: keep, acqUnits: keep === 'yO5' ? 'e2' : 'e1' });
+        expect(t.events.find((e) => e.type === 'sk2.acq.kept')!.payload).toMatchObject({ weapon: 'g40', hex: keep });
+        expect(engine.currentDecision(t.state)?.kind).toBe('firstFire');
+      }
+    });
+
+    it('asks nothing when the stack moves on together', () => {
+      const { engine, state } = mk('PFPh');
+      const t = act(engine, state, { type: 'test.teleportAll', ids: ['e1', 'e2'], hex: 'yP5' });
+      expect(engine.currentDecision(t.state)?.kind).toBe('phase');
+      expect(t.state.pieces['g40']!.tags).toMatchObject({ acqHex: 'yP5', acqUnits: 'e1,e2' });
+      // The same with a real move of the whole stack: Defensive First Fire is the next question, not a choice.
+      const m = mk('MPh');
+      let s = act(m.engine, m.state, { type: 'move.start', units: ['e1', 'e2'] }).state;
+      s = act(m.engine, s, { type: 'move.step', to: 'yP5' }).state;
+      expect(m.engine.currentDecision(s)?.kind).toBe('firstFire');
+      expect(s.decisions.some((d) => d.kind === 'acqChoice')).toBe(false);
+      expect(s.pieces['g40']!.tags).toMatchObject({ acqHex: 'yP5', acqUnits: 'e1,e2' });
+    });
+
+    it('in the MPh the firer chooses as soon as the step is made, before Defensive First Fire, which then fires with or without the DRM', () => {
+      for (const keep of ['yP5', 'yO5']) {
+        // 5+4 misses either way.
+        const { engine, state } = mk('MPh', [5, 4]);
+        let s = act(engine, state, { type: 'move.start', units: ['e1'] }).state;
+        s = act(engine, s, { type: 'move.step', to: 'yP5' }).state;
+        expect(engine.currentDecision(s)).toMatchObject({ kind: 'acqChoice', owner: 'br' });
+        s = act(engine, s, { type: 'acq.choose', gun: 'g40', hex: keep }).state;
+        expect(engine.currentDecision(s)?.kind).toBe('firstFire');
+        const t = act(engine, s, { type: 'defFire.ordnance', shot: { weapon: 'g40', target: 'yP5', targetType: 'ITT' } });
+        const shot = t.events.find((e) => e.type === 'sk2.ordnance.shot')!.payload as { explain: { label: string }[] };
+        // Kept on the mover: the Acquired DRM, flipped to -2. Kept in O5: P5 is a different target, which it now acquires at -1.
+        expect(shot.explain.map((n) => n.label).includes('-1 Acquired Target')).toBe(keep === 'yP5');
+        expect(t.state.pieces['g40']!.tags).toMatchObject({ acqHex: 'yP5', acqUnits: 'e1', acqLevel: keep === 'yP5' ? 2 : 1 });
+        expect(t.state.decisions.some((d) => d.kind === 'acqChoice')).toBe(false);
+      }
+    });
+
+    it('the choice is gone by the next Player Turn, and the stack moves and fires normally (SK4 6.10)', () => {
+      const { engine, state } = mk('MPh');
+      let s = act(engine, state, { type: 'move.start', units: ['e1'] }).state;
+      s = act(engine, s, { type: 'move.step', to: 'yP5' }).state;
+      s = act(engine, s, { type: 'acq.choose', gun: 'g40', hex: 'yO5' }).state;
+      for (let i = 0; i < 80 && !(s.turn === 1 && s.attacker === 'br' && s.phase === 'MPh') && !(s.turn > 1); i++) {
+        const d = engine.currentDecision(s)!;
+        const l = engine.legalActions(s, d.owner);
+        const pick = l.find((a) => a.type === 'defPass') ?? l.find((a) => a.type === 'move.end') ?? l.find((a) => a.type === 'endPhase') ?? l[0]!;
+        s = engine.submit(s, pick).state;
+      }
+      expect(s.attacker).toBe('br');
+      expect(s.decisions.some((d) => d.kind === 'acqChoice')).toBe(false);
+    });
   });
 });

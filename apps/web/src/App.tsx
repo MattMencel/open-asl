@@ -12,7 +12,7 @@ import { LobbyShell } from './lobby-v2/LobbyShell';
 import { LobbyHome } from './lobby-v2/LobbyHome';
 import { GamesHub } from './lobby-v2/GamesHub';
 import { ChatPage } from './lobby-v2/ChatPage';
-import { Presence } from './lobby-v2/Presence';
+import { MemberPresence } from './lobby-v2/Presence';
 import { AdminAnnouncements } from './lobby-v2/AdminAnnouncements';
 import { PublicReplay } from './match/PublicReplay';
 import { ProfileRedirect } from './profile/ProfileRedirect';
@@ -33,36 +33,40 @@ export function App() {
   }, []);
 
   return (
-    <Routes>
-      <Route path="/" element={<Landing />} />
-      <Route path="/login" element={<Login />} />
-      <Route path="/not-invited" element={<NotInvited />} />
-      <Route path="/profile/:nickname" element={<Suspense fallback={<Splash text="Reading service record…" />}><PublicProfilePage /></Suspense>} />
-      <Route path="/match/:id/replay" element={<PublicReplay />} />
-      <Route path="/aar/:matchId" element={<Suspense fallback={<Splash text="Reading the after action report…" />}><AarPage /></Suspense>} />
-      <Route
-        path="/app"
-        element={
-          <RequireMember>
-            <MemberArea />
-          </RequireMember>
-        }
-      >
-        <Route index element={<RulesetGate />} />
-        <Route path=":ruleset" element={<LobbyShell />}>
-          <Route index element={<Navigate to="home" replace />} />
-          <Route path="home" element={<LobbyHome />} />
-          <Route path="scenarios" element={<Suspense fallback={<Splash text="Unfolding the atlas…" />}><ScenarioExplorer /></Suspense>} />
-          <Route path="games" element={<GamesHub />} />
-          <Route path="players" element={<Navigate to="../home" replace />} />
-          <Route path="chat" element={<ChatPage />} />
-          <Route path="admin/announcements" element={<AdminAnnouncements />} />
+    <>
+      {/* One presence node per tab for a signed-in member, on every page (see MemberPresence). */}
+      <MemberPresence />
+      <Routes>
+        <Route path="/" element={<Landing />} />
+        <Route path="/login" element={<Login />} />
+        <Route path="/not-invited" element={<NotInvited />} />
+        <Route path="/profile/:nickname" element={<Suspense fallback={<Splash text="Reading service record…" />}><PublicProfilePage /></Suspense>} />
+        <Route path="/match/:id/replay" element={<PublicReplay />} />
+        <Route path="/aar/:matchId" element={<Suspense fallback={<Splash text="Reading the after action report…" />}><AarPage /></Suspense>} />
+        <Route
+          path="/app"
+          element={
+            <RequireMember>
+              <MemberArea />
+            </RequireMember>
+          }
+        >
+          <Route index element={<RulesetGate />} />
+          <Route path=":ruleset" element={<LobbyShell />}>
+            <Route index element={<Navigate to="home" replace />} />
+            <Route path="home" element={<LobbyHome />} />
+            <Route path="scenarios" element={<Suspense fallback={<Splash text="Unfolding the atlas…" />}><ScenarioExplorer /></Suspense>} />
+            <Route path="games" element={<GamesHub />} />
+            <Route path="players" element={<Navigate to="../home" replace />} />
+            <Route path="chat" element={<ChatPage />} />
+            <Route path="admin/announcements" element={<AdminAnnouncements />} />
+          </Route>
+          <Route path="profile/:uid" element={<ProfileRedirect />} />
+          <Route path="match/:id" element={<MatchRoute />} />
         </Route>
-        <Route path="profile/:uid" element={<ProfileRedirect />} />
-        <Route path="match/:id" element={<MatchRoute />} />
-      </Route>
-      <Route path="*" element={<Navigate to="/" replace />} />
-    </Routes>
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+    </>
   );
 }
 
@@ -70,7 +74,6 @@ export function App() {
 function MemberArea() {
   return (
     <>
-      <Presence />
       <InviteListener />
       <Outlet />
     </>

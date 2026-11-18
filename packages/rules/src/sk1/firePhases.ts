@@ -223,7 +223,9 @@ export function resolveDcBase(ctx: Ctx, dc: Piece) {
   // X# as fixed when the DC was placed (non-elite -2, Inexperienced -1, captured -2; SK1 4.0, 4.3, 5.4, 5.5).
   const placerDef = ctx.state.pieces[placer] ? mmc(ctx, ctx.state.pieces[placer]!) : null;
   const x = (dc.tags['dcX'] as number | undefined) ?? (d.x ?? 12) - (placerDef && placerDef.quality !== 'E' ? 2 : 0);
-  const targets = personnelAt(ctx, hex, otherSide(ctx.state, ctx.state.attacker)).map((p) => p.id).sort();
+  // The enemy units in the Location; in a Melee hex every unit of both sides held in it, as any fire into Melee
+  // ("all friendly and enemy Melee units in the hex must be attacked", SK4 3.8; ASLRB A23.1: it explodes in the Location).
+  const targets = (inMelee(ctx, hex) ? personnelAt(ctx, hex) : personnelAt(ctx, hex, otherSide(ctx.state, ctx.state.attacker))).map((p) => p.id).sort();
   const attack: FireAttackCtx = { mode: 'advancing', side: ctx.state.attacker, target: hex, parts: [], targets, hindrance: 0, residual: true };
   // The TEM, the placer's CX and any extra DRM (`dc.drm`). A secret part of the extra (an unrevealed fortified
   // building's +1) is applied, and told of, only when it changes a result (`discloseDrm`, as for small arms).

@@ -3,7 +3,7 @@ import { HttpsError, onCall } from 'firebase-functions/v2/https';
 import type { DocumentReference, Transaction } from 'firebase-admin/firestore';
 import type { Action } from '@asl/engine';
 import type { ScenarioDef } from '@asl/rules';
-import { COL, COMPUTER_NAME, COMPUTER_OPPONENTS, COMPUTER_UID, RANDOM_SIDE, XP, countsForBeta, eloUpdate, evaluateMedals, reachedOfficialProgress, type AarPlayer, type Competition, type MatchActionDoc, type MatchDoc, type MatchResult, type MatchVisibility, type PublicMatchResultDoc, type Seat, type UserDoc } from '@asl/platform';
+import { COL, COMPUTER_NAME, COMPUTER_OPPONENTS, COMPUTER_UID, RANDOM_SIDE, XP, countsForBeta, eloUpdate, evaluateMedals, reachedOfficialProgress, type AarPlayer, type Competition, type MatchActionDoc, type MatchDoc, type MatchResult, type MatchVisibility, type Seat, type UserDoc } from '@asl/platform';
 import { firstDeadline, requirePace } from './lib/clock';
 import { db, FieldValue, now, stamp } from './lib/app';
 import { requireMember, requireString } from './lib/auth';
@@ -12,6 +12,7 @@ import { readUser, requireFree } from './lib/users';
 import { usesViews } from './lib/views';
 import { seedNewOnlineMatch, seedOf } from './lib/viewStore';
 import { aarPlayers } from './aar';
+import { publicResultOf } from './lib/publicResult';
 
 export const matchRef = (id: string) => db.collection(COL.matches).doc(id) as DocumentReference<MatchDoc>;
 
@@ -271,19 +272,9 @@ export const completeHotseatMatch = onCall({ timeoutSeconds: 300, memory: '1GiB'
       const fresh = (await tx.get(ref)).data();
       if (fresh?.status !== 'active') throw new HttpsError('failed-precondition', 'That game is already over.');
       tx.update(ref, { status: 'complete', result: scoredResult, summary: summaryOf(engine, state), updatedAt: now(), completedAt: now() });
-      if (isPublic) {
-        // A public game against the computer shows on the record like a friendly: no rating, no Elo.
-        const publicResult: PublicMatchResultDoc = {
-          matchId: ref.id,
-          rulesetId: match.rulesetId ?? 'starter-kit',
-          scenarioId: match.scenarioId,
-          scenarioTitle: match.scenarioTitle,
-          playerIds: match.playerIds,
-          players: Object.fromEntries(Object.entries(match.seats).filter((x): x is [string, Seat] => x[1] !== null).map(([side, s]) => [side, { uid: s.uid, nickname: s.displayName }])),
-          competition: 'friendly', visibility: 'public', result: scoredResult, official: true, completedAt: now(),
-        };
-        tx.set(db.collection(COL.publicResults).doc(ref.id), publicResult);
-      }
+      // A public game against the computer shows on the record like a friendly: no rating, no Elo.
+      const publicResult = publicResultOf(ref.id, match, match.rulesetId ?? 'starter-kit', isPublic, scoredResult, now());
+      if (publicResult) tx.set(db.collection(COL.publicResults).doc(ref.id), publicResult);
     });
     return { result: scoredResult };
   }
@@ -354,18 +345,9 @@ export function applyMatchResult(
     tx.set(statsRef, stats, { merge: true });
   }
 
-  if (ranked && isPublic) {
-    const publicResult: PublicMatchResultDoc = {
-      matchId: ref.id,
-      rulesetId: rulesetOf(scenario),
-      scenarioId: match.scenarioId,
-      scenarioTitle: match.scenarioTitle,
-      playerIds: match.playerIds,
-      players: Object.fromEntries(Object.entries(match.seats).filter((x): x is [string, Seat] => x[1] !== null).map(([side, s]) => [side, { uid: s.uid, nickname: s.displayName }])),
-      competition: 'ranked', visibility: 'public', result, official: true, completedAt: now(),
-    };
-    tx.set(db.collection(COL.publicResults).doc(ref.id), publicResult);
-  }
+  // Every public game goes on both players' public battle history, a friendly as well (marked so, without Elo).
+  const publicResult = publicResultOf(ref.id, match, rulesetOf(scenario), isPublic, result, now());
+  if (publicResult) tx.set(db.collection(COL.publicResults).doc(ref.id), publicResult);
 
   for (const [uid, before, elo, opp] of [
     [p1, a, rating.a, b],

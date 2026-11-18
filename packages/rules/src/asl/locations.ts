@@ -1,6 +1,6 @@
 import type { RuleModule } from '@asl/engine';
 import { hexOfLoc, levelOfLoc, locId, locationsOf, type LocId } from '../common/location';
-import { statics } from '../common/pieces';
+import { defOf, statics } from '../common/pieces';
 
 /**
  * Full ASL Locations (ASLRB A2.8): a building hex with upper levels has a Location per level (B23.21–23).
@@ -17,6 +17,20 @@ export const aslLocationsModule: RuleModule = {
   summary: 'Upper building levels are Locations of their own; ADJACENT Locations follow levels and stairwells.',
   requires: ['common.pieces'],
   install(r) {
+    // A7.212: a Known enemy unit in its Location confines a unit's fire there "unless the only known enemy unit in its
+    // Location is an unarmed, unarmored vehicle" (SK4 3.2.2.1 has no exception). "Known" waits for concealment (A12).
+    r.contribute({
+      id: 'asl.locations.unarmed-unarmored',
+      query: 'fire.confinesFire',
+      ref: 'ASLRB A7.212',
+      apply(v, { unit }, env) {
+        const p = env.state.pieces[unit];
+        const d = p ? defOf(env, p) : null;
+        if (!v || !d || d.kind !== 'vehicle') return v;
+        const armed = !!d.ma || Object.values(d.mg ?? {}).some((x) => typeof x === 'number' && x > 0);
+        return !(d.unarmored && !armed);
+      },
+    });
     r.contribute({
       id: 'asl.locations.upper-levels',
       query: 'hex.locations',

@@ -71,14 +71,23 @@ export const aslLaborModule: RuleModule = {
       apply: () => 'is TI this Player Turn and may not advance (ASLRB A4.8)',
     });
     // A4.8: +1 to any CC attack a TI unit takes part in (limit one per attack); -1 to any CC attack made against it,
-    // which the example limits to attacks whose every target is TI.
+    // which "applies only to the TI units" of a group attacked together (A4.8 EX): a DRM per target. A TI attacker
+    // against TI defenders nets 0.
     r.contribute({
       id: 'asl.labor.tiCc',
       query: 'cc.drm',
       ref: 'ASLRB A4.8',
-      label: ({ attackers }, env) => (tiUnits(env, attackers).length ? '+1 TI attacker' : '-1 TI defender'),
-      when: ({ attackers, targets }, env) => tiUnits(env, attackers).length > 0 || (targets.length > 0 && tiUnits(env, targets).length === targets.length),
-      apply: (v, { attackers }, env) => v + (tiUnits(env, attackers).length ? 1 : -1),
+      label: '+1 TI attacker',
+      when: ({ attackers }, env) => tiUnits(env, attackers).length > 0,
+      apply: (v) => v + 1,
+    });
+    r.contribute({
+      id: 'asl.labor.tiCcTarget',
+      query: 'cc.targetDrm',
+      ref: 'ASLRB A4.8',
+      label: '-1 TI defender',
+      when: ({ target }, env) => env.state.pieces[target]?.tags['ti'] === true,
+      apply: (v) => v - 1,
     });
     // The TI counter comes off at the end of the CCPh (A4.8).
     r.on<{ phase: string }>({
@@ -86,7 +95,10 @@ export const aslLaborModule: RuleModule = {
       event: 'turn.phaseEnded',
       handler(ctx, ev) {
         if (ev.payload.phase !== 'CCPh') return;
-        for (const p of Object.values(ctx.state.pieces).sort(byId)) if (p.tags['ti'] !== undefined) setTags(ctx, p.id, { ti: null });
+        // The Flames fought this Player Turn (B24.72) are forgotten with it.
+        for (const p of Object.values(ctx.state.pieces).sort(byId)) {
+          if (p.tags['ti'] !== undefined || p.tags['flameClear'] !== undefined) setTags(ctx, p.id, { ...(p.tags['ti'] !== undefined ? { ti: null } : {}), ...(p.tags['flameClear'] !== undefined ? { flameClear: null } : {}) });
+        }
       },
     });
     // ... "or if the unit breaks" (A4.8).

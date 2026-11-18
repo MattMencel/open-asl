@@ -4,7 +4,7 @@ import { PHASE_DECISION, askPhaseOwner } from '../common/turn';
 import { firedOwnFpThisPhase, type FireMode } from '../sk1/fire';
 import { PHASE_FIRE_MODE, fireTargets, phaseOwner, swUsedThisPhase } from '../sk1/firePhases';
 import { P, type CasualtyFn, type FlushFn, type UnitFn } from '../sk1/morale';
-import { FIRST_FIRE, finishDefensiveFire, firstFireTargets, moveLoc, moveState, movingInfo } from '../sk1/movement';
+import { FIRST_FIRE, finishDefensiveFire, firstFireLocations, firstFireTargets, firstFireView, moveState, movingInfo } from '../sk1/movement';
 import { T, gun, isCx, isGoodOrder, isPinned, mmc, pieceOf, setTags, smc } from '../sk1/status';
 import { OP, enemyVehicleAt, swDirectorIllegal, type OrdnanceFireFn, type OrdnanceShot } from '../sk2/ordnance';
 import { vehicle } from './status';
@@ -348,26 +348,32 @@ export const panzerfaustModule: RuleModule = {
         const ms = moveState(env);
         if (!ms || !ms.hex) return [];
         const side = otherSide(env.state, env.state.attacker);
-        return simplePfShots(env, side, 'first', [moveLoc(ms)!], firstFireTargets(env, ms))
-          .filter((pf) => (ms.firedHere[pf.unit] ?? 0) < ms.mfHere)
-          .map((pf) => ({ type: 'defFire.pf', pf }));
+        // The moving stack, and (full ASL) units it left in Bypass of another hex (ASLRB A4.32, A4.33).
+        return firstFireLocations(env, ms).flatMap((target) => {
+          const view = firstFireView(env, ms, target)!;
+          return simplePfShots(env, side, 'first', [target], firstFireTargets(env, view))
+            .filter((pf) => (view.firedHere[pf.unit] ?? 0) < view.mfHere)
+            .map((pf) => ({ type: 'defFire.pf' as const, pf }));
+        });
       },
       validate(env, a) {
         const ms = moveState(env);
         if (!ms || !ms.hex) return 'Nothing is moving';
-        if (a.pf.target !== moveLoc(ms)) return 'Defensive First Fire must target the moving stack';
-        const why = pfIllegal(env, a.side, a.pf, 'first', firstFireTargets(env, ms));
+        const view = firstFireView(env, ms, a.pf.target);
+        if (!view) return 'Defensive First Fire must target the moving stack';
+        const why = pfIllegal(env, a.side, a.pf, 'first', firstFireTargets(env, view));
         if (why) return why;
-        if ((ms.firedHere[a.pf.unit] ?? 0) >= ms.mfHere) return `${a.pf.unit} cannot fire again at this location`;
+        if ((view.firedHere[a.pf.unit] ?? 0) >= view.mfHere) return `${a.pf.unit} cannot fire again at this location`;
         return null;
       },
       resolve(ctx, a) {
         const ms = moveState(ctx)!;
-        const targets = firstFireTargets(ctx, ms);
-        const fired = resolvePf(ctx, a.pf, 'first', { moving: targets, movingInfo: movingInfo(ctx, ms) });
+        const view = firstFireView(ctx, ms, a.pf.target) ?? ms;
+        const targets = firstFireTargets(ctx, view);
+        const fired = resolvePf(ctx, a.pf, 'first', { moving: targets, movingInfo: movingInfo(ctx, view) });
         // The PF check is a SW use even when it yields no shot (SK4 4.4.2): the unit has fired at this location. A
         // leader directs only a shot.
-        finishDefensiveFire(ctx, [a.pf.unit, ...(fired && a.pf.director !== undefined ? [a.pf.director] : [])]);
+        finishDefensiveFire(ctx, [a.pf.unit, ...(fired && a.pf.director !== undefined ? [a.pf.director] : [])], view === ms ? undefined : a.pf.target);
       },
     });
   },

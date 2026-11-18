@@ -257,6 +257,11 @@ export interface BeforeApplyInfo {
   heat?: boolean;
   side?: SideId;
   from?: HexId;
+  /**
+   * Every Location one Original DR attacks, when it attacks more than one (Indirect Fire at each level of a building hex,
+   * B23.32): full ASL picks the one building level the rubble dr is made for by Random Selection (B24.11).
+   */
+  group?: LocId[];
 }
 export type BeforeApplyFn = (ctx: Ctx, info: BeforeApplyInfo) => boolean;
 
@@ -897,7 +902,7 @@ export const fireModule: RuleModule = {
 // --------------------------------------------------------------------------------------
 
 /** Why a SW with a ROF did not keep it this attack. */
-export type RofLoss = 'exceeded' | 'cowered' | 'pinned' | 'fpf';
+export type RofLoss = 'exceeded' | 'cowered' | 'pinned' | 'fpf' | 'afph';
 
 function basicIllegal(env: QueryEnv, decl: FireDeclaration, mode: FireMode, side: SideId, moving = false): string | null {
   const map = statics(env).map;
@@ -1355,7 +1360,8 @@ function breakdownAndRof(ctx: Ctx, attack: FireAttackCtx, mode: FireMode, total:
   }
   // ROF (SK1 1.2.4): the colored dr within the ROF keeps it. A cowering attack marks every firer
   // (SK1 3.2, and the 3.3.1 example: the MMG is marked unless it "neither malfunctions, cowers, nor
-  // retains Rate of Fire"), a pinned unit's SW loses ROF (SK1 3.2.1) and FPF never retains it.
+  // retains Rate of Fire"), a pinned unit's SW loses ROF (SK1 3.2.1) and FPF never retains it. No SW keeps ROF in the AFPh
+  // ("may fire again in that phase (except the AFPh)", SK4 1.2.4.1; ASLRB A7.25: only an Opportunity Firer).
   const rofKept: PieceId[] = [];
   const rofLost: { sw: PieceId; rof: number; why: RofLoss }[] = [];
   const rofSeen: { sw: PieceId; rof: number }[] = [];
@@ -1365,7 +1371,7 @@ function breakdownAndRof(ctx: Ctx, attack: FireAttackCtx, mode: FireMode, total:
     if (rof <= 0) continue;
     const firer = pieceOf(ctx, p.firer);
     const usingFpf = mode === 'fpf' && (fireMarker(firer) === 'final' || fireMarker(pieceOf(ctx, p.piece)) === 'final');
-    const why: RofLoss | null = colored > rof ? 'exceeded' : cowered ? 'cowered' : isPinned(firer) ? 'pinned' : usingFpf ? 'fpf' : null;
+    const why: RofLoss | null = mode === 'advancing' ? 'afph' : colored > rof ? 'exceeded' : cowered ? 'cowered' : isPinned(firer) ? 'pinned' : usingFpf ? 'fpf' : null;
     if (why) rofLost.push({ sw: p.piece, rof, why });
     else {
       rofKept.push(p.piece);
@@ -1491,10 +1497,13 @@ export function markFirers(ctx: Ctx, attack: FireAttackCtx, mode: FireMode, cowe
   }
   for (const d of attack.directors ?? []) pieces.add(d);
   // SFF / FPF / Final after First Fire: a unit firing again flips to Final Fire with all its SW,
-  // "whether or not they all fired" (SK1 3.3.1); its fellows firing for the first time do not.
+  // "whether or not they all fired" (SK1 3.3.1); its fellows firing for the first time do not. In the DFPh only a unit
+  // marked First Fire flips: one already marked Final there has nothing to flip, and its MG that kept ROF stays
+  // unmarked and may fire again (SK1 1.2.4).
+  const flips = (id: PieceId) => (mode === 'final' ? fireMarker(pieceOf(ctx, id)) === 'first' : again(id));
   if (mode === 'subsequentFirst' || mode === 'fpf' || mode === 'final') {
     for (const p of attack.parts) {
-      if (!again(p.firer) && !again(p.piece)) continue;
+      if (!flips(p.firer) && !flips(p.piece)) continue;
       flipped.add(p.firer);
       for (const s of swHeldBy(ctx.state, p.firer)) flipped.add(s.id);
       for (const id of flipped) pieces.add(id);
@@ -1535,18 +1544,24 @@ export const applyIftResult: ApplyResultFn = (ctx, attack, column, baseFinal, ou
     groups.set(d.value, [...(groups.get(d.value) ?? []), u]);
     notes.set(u, drmNotes(d));
   }
-  for (const [extra, units] of [...groups].sort((a, b) => a[0] - b[0])) {
+  // The best leader checks first (SK1 3.2.1), whichever result he got: the groups holding leaders go first, best leader
+  // first, and a leader who passes lends his DRM to the units of the later groups too.
+  const bestLeader = (units: PieceId[]) => Math.min(Infinity, ...units.map((u) => smc(ctx, pieceOf(ctx, u))?.leadership ?? Infinity));
+  let lenders: PieceId[] = [];
+  for (const [extra, units] of [...groups].sort((a, b) => bestLeader(a[1]) - bestLeader(b[1]) || a[0] - b[0])) {
     const finalDr = baseFinal + extra;
     const res = tables.ift(column, finalDr);
     for (const u of units) {
       out[u] = res;
       ctx.emit('sk1.fire.result', { unit: u, result: res, finalDr, ...(extra ? { drm: extra, explain: notes.get(u) ?? [] } : {}) });
     }
-    applyOneResult(ctx, attack, column, res, units);
+    const checked = applyOneResult(ctx, attack, column, res, units, lenders);
+    lenders = [...lenders, ...units.filter((u) => checked[u] === 'passed' && smc(ctx, pieceOf(ctx, u)))];
   }
 };
 
-function applyOneResult(ctx: Ctx, attack: FireAttackCtx, column: number, res: IftResult, units: PieceId[]) {
+/** Applies one IFT result to `units`; returns the outcome of each check it made. */
+function applyOneResult(ctx: Ctx, attack: FireAttackCtx, column: number, res: IftResult, units: PieceId[], lenders: PieceId[] = []): Record<PieceId, CheckOutcome> {
   const check = ctx.proc<CheckGroupFn>(MP.checkGroup);
   const random = ctx.proc<RandomSelectFn>(MP.randomSelect);
   const cr = ctx.proc<CasualtyFn>(MP.casualtyReduce);
@@ -1554,14 +1569,12 @@ function applyOneResult(ctx: Ctx, attack: FireAttackCtx, column: number, res: If
   const tables = statics(ctx).tables;
   switch (res.kind) {
     case 'none':
-      return;
+      return {};
     case 'PTC':
-      check(ctx, units, { kind: 'PTC', mod: 0, reason: 'IFT PTC' });
-      return;
+      return check(ctx, units, { kind: 'PTC', mod: 0, reason: 'IFT PTC', lenders });
     case 'NMC':
     case 'MC':
-      check(ctx, units, { kind: 'MC', mod: res.n ?? 0, reason: `IFT ${res.n ? `${res.n}MC` : 'NMC'}` });
-      return;
+      return check(ctx, units, { kind: 'MC', mod: res.n ?? 0, reason: `IFT ${res.n ? `${res.n}MC` : 'NMC'}`, lenders });
     case 'K': {
       // One unit (SK1 3.2.1); in full ASL "at least one", every unit tied for the pick (ASLRB A7.302, A.9).
       const victims = random(ctx, units, 1, 'K result', { ties: true });
@@ -1570,18 +1583,19 @@ function applyOneResult(ctx: Ctx, attack: FireAttackCtx, column: number, res: If
       const wounded = victims.filter((v) => !!smc(ctx, pieceOf(ctx, v)));
       for (const v of victims) cr(ctx, v, 'IFT K');
       const rest = units.filter((u) => ctx.state.pieces[u]?.loc.kind !== 'eliminated' && !wounded.includes(u));
-      check(ctx, rest, { kind: 'MC', mod: res.n ?? 0, reason: `IFT K/${res.n ?? 0}` });
-      return;
+      return check(ctx, rest, { kind: 'MC', mod: res.n ?? 0, reason: `IFT K/${res.n ?? 0}`, lenders });
     }
     case 'KIA': {
       // As many as the number (SK1 3.2.1); in full ASL "at least as many", ties for the last one too (ASLRB A7.301).
       const killed = random(ctx, units, res.n ?? 1, 'KIA result', { ties: true });
       for (const k of killed) {
-        // Each SW possessed by a KIA'd unit: dr on the same IFT column (KIA destroys, K malfunctions).
+        // Each SW possessed by a KIA'd unit: dr on the same IFT column. KIA destroys it; K malfunctions it, "or
+        // eliminated if already malfunctioned or it has an X#" (ASLRB A9.74): a FT, DC or LATW cannot malfunction.
         for (const s of swHeldBy(ctx.state, k).sort(byId)) {
           const dr = ctx.roll(`SW ${s.id} survival`, 1).total;
           const r = tables.ift(column, dr);
           if (r.kind === 'KIA') ctx.emit('piece.eliminated', { id: s.id, reason: 'destroyed by KIA' });
+          else if (r.kind === 'K' && (s.tags[T.malf] || (defOf(ctx, s) as SwDef).x !== undefined)) ctx.emit('piece.eliminated', { id: s.id, reason: 'destroyed by KIA (K)' });
           else if (r.kind === 'K') setTags(ctx, s.id, { [T.malf]: true });
         }
         eliminate(ctx, k, 'IFT KIA');
@@ -1591,7 +1605,7 @@ function applyOneResult(ctx: Ctx, attack: FireAttackCtx, column: number, res: If
         if (isBroken(pieceOf(ctx, u))) cr(ctx, u, 'IFT KIA (already broken)');
         else brk(ctx, u);
       }
-      return;
+      return {};
     }
   }
 }

@@ -33,6 +33,10 @@ describe('The height test (ASLRB A6.2, B10.22, B23.2)', () => {
     expect([2, 3, 4, 5].map((hi) => blindHexCount(o, hi))).toEqual([3, 2, 1, 1]);
     // Within five hexes one Blind Hex, whatever the advantage (minimum one).
     expect(blindHexCount({ top: 1, range: 3 }, 6)).toBe(1);
+    // A6.4: the base is the obstacle's own full-level height: a 2½-level building makes two, a level 1 woods hex on a
+    // level 1 hill (top 2) one.
+    expect(blindHexCount({ top: 2.5, range: 3, hexLevel: 0 }, 3)).toBe(2);
+    expect(blindHexCount({ top: 2, range: 3, hexLevel: 1 }, 3)).toBe(1);
   });
 
   it('A6.4: a hex at or above the full-level height of the obstacle is never blind (the ½ level is ignored)', () => {
@@ -70,8 +74,12 @@ describe('The height test (ASLRB A6.2, B10.22, B23.2)', () => {
     expect(orchardHinders(0, 0, 0, true, false)).toBe(true);
     expect(orchardHinders(0, 0, 1, true, false)).toBe('obstacle');
     expect(orchardHinders(0, 0, 1, false, false)).toBe(true);
-    // Both ends above its base: seen over in season (B10.22), and so no Hindrance out of season either (reading).
-    expect(orchardHinders(0, 1, 1, false, false)).toBe(false);
+    // Both ends above its base: seen over in season (B10.22); out of season a +1 "to any LOS drawn through it to/from
+    // a Location higher than the base level", as written.
+    expect(orchardHinders(0, 1, 1, true, false)).toBe(false);
+    expect(orchardHinders(0, 1, 1, false, false)).toBe(true);
+    // More than one level above with no ground-level end: no orchard is adjacent to a ground-level target/firer.
+    expect(orchardHinders(0, 1, 2, false, true)).toBe(false);
     // From more than one level above: only an orchard next to the lower end hinders.
     expect(orchardHinders(0, 0, 2, false, false)).toBe(false);
     expect(orchardHinders(0, 0, 2, false, true)).toBe(true);

@@ -1,9 +1,12 @@
 import type { HexId, QueryEnv, RuleModule } from '@asl/engine';
 import { adjacentLocs, hexOfLoc, isGroundLoc, levelOfLoc, locOf, locationsOf, parseLoc, type LocId } from '../common/location';
 import { defOf, statics } from '../common/pieces';
+import { acrossSide, mod6, sidePoint } from '../common/hexCorners';
+import { hexPixel } from '../common/map';
 import { heightOf } from '../sk2/elevation';
 import { ordnanceOf } from '../sk2/status';
 import { pieceOf, sw } from '../sk1/status';
+import { terrainOf } from '../sk1/terrain';
 
 /**
  * Multi-level buildings in full ASL: what an upper building level changes beyond the Location model
@@ -11,11 +14,49 @@ import { pieceOf, sw } from '../sk1/status';
  *
  * - PBF between the levels of one hex (ASLRB A7.21): ground and level 1 of a Two Story House hex are ADJACENT.
  * - No LOS between non-ADJACENT Locations of the same building next to each other (B23.25).
+ * - LOS between different hexes to a building Location only if, as it enters that hex, it crosses no hexside within the
+ *   building depiction (B23.25): a higher firer seeing over one hex of a building into the next one beyond it.
  * - Indirect Fire (mortars, OBA; ASLRB C.1) on a building hex attacks every level with one DR, +1 DRM per non-rooftop
  *   level above the one attacked; an Interior Building Hex only at its highest level (B23.32).
  *
  * The Starter Kit has no upper levels ('hex.locations' gives one Location per hex), so none of these ever applies there.
  */
+/** A hexside of a building hex the building depiction crosses: the hex across it is of the same building and the art
+ * touches the hexside from both hexes (neither is open to Bypass there, A4.3). */
+function insideDepiction(env: QueryEnv, hex: HexId, k: number): boolean {
+  const map = statics(env).map;
+  const h = map.hex(hex);
+  const nb = acrossSide(map, hex, k);
+  const n = nb ? map.hex(nb) : undefined;
+  if (!h?.buildingId || !n || n.buildingId !== h.buildingId || !map.bypassSides) return false;
+  const closed = (id: HexId, side: number) => (map.bypassSides!(id) & (1 << mod6(side))) === 0;
+  return closed(hex, k) && closed(nb!, k + 3);
+}
+
+/**
+ * The hexside (of `end`'s hex) within a building depiction that the LOS from `other` crosses as it enters `end`'s hex, if
+ * `end` is a building Location (not a rooftop) and there is one; else null. Traced centre to centre: a LOS entering at a
+ * vertex counts only when both hexsides there are within the depiction.
+ */
+function enteredAcrossBuilding(env: QueryEnv, end: LocId, other: LocId): number | null {
+  const map = statics(env).map;
+  const hex = hexOfLoc(end);
+  const h = map.hex(hex);
+  const o = map.hex(hexOfLoc(other));
+  if (!h || !o || !h.buildingId || parseLoc(end).sub || !terrainOf(env, end).id.startsWith('building')) return null;
+  const c = hexPixel(h.cube);
+  const t = hexPixel(o.cube);
+  const dir = { x: t.x - c.x, y: t.y - c.y };
+  const len = Math.hypot(dir.x, dir.y);
+  const score = [0, 1, 2, 3, 4, 5].map((k) => {
+    const m = sidePoint(h.cube, k);
+    return ((m.x - c.x) * dir.x + (m.y - c.y) * dir.y) / (Math.hypot(m.x - c.x, m.y - c.y) * len);
+  });
+  const best = Math.max(...score);
+  const sides = score.flatMap((v, k) => (best - v < 1e-6 ? [k] : []));
+  return sides.every((k) => insideDepiction(env, hex, k)) ? sides[0]! : null;
+}
+
 export const aslLevelsModule: RuleModule = {
   id: 'asl.levels',
   ref: 'ASLRB A7.21, B23.25, B23.32',
@@ -56,6 +97,24 @@ export const aslLevelsModule: RuleModule = {
         if (!ba || ba !== map.hex(b)?.buildingId || (a !== b && map.distance(a, b) > 1)) return v;
         if (adjacentLocs(env, from).includes(to)) return v;
         return { ...v, clear: false, blockedBy: 'the building: not ADJACENT Locations of one building (ASLRB B23.25)' };
+      },
+    });
+
+    // B23.25: "LOS to a unit in a building Location ... can exist only if drawn to an ADJACENT unit or (for LOS between
+    // different hexes) if the LOS as it enters the hex does not cross a hexside within the building depiction". Either end
+    // (LOS is reciprocal, A6.5).
+    r.contribute({
+      id: 'asl.levels.los-entry-hexside',
+      query: 'los.trace',
+      layer: 161,
+      ref: 'ASLRB B23.25',
+      apply(v, { from, to }, env) {
+        if (!v.clear || hexOfLoc(from) === hexOfLoc(to) || adjacentLocs(env, from).includes(to)) return v;
+        for (const [end, other] of [[to, from], [from, to]] as const) {
+          const k = enteredAcrossBuilding(env, end, other);
+          if (k !== null) return { ...v, clear: false, blockedBy: `the building: the LOS enters ${hexOfLoc(end)} across a hexside within the building depiction (ASLRB B23.25)` };
+        }
+        return v;
       },
     });
 

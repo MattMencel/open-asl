@@ -39,6 +39,18 @@ describe('building levels table (ASLRB B23.21–23)', () => {
     expect(map.hex('uH5')?.building).toBeUndefined();
   });
 
+  it('boards m, n and o, reviewed against the art: only m I5-J5 and CC3-DD3 are Two Story Houses; n has no building', () => {
+    const upper = (board: string) =>
+      [...buildMap([{ board, x: 0, y: 0 }]).hexes()]
+        .filter((h) => h.building?.upper)
+        .map((h) => h.id)
+        .sort();
+    expect(upper('m')).toEqual(['mCC3', 'mDD3', 'mI5', 'mJ5']);
+    expect(upper('n')).toEqual([]);
+    expect(upper('o')).toEqual([]);
+    for (const board of ['m', 'n', 'o']) for (const b of Object.values(BUILDING_LEVELS[board] ?? {})) expect(b.note, board).toBeUndefined();
+  });
+
   it('full ASL: a Two Story House hex has level 1; the Starter Kit keeps every hex at ground level', () => {
     const asl = newGame(ASL_TESTBED_SCENARIO, 'levels');
     const envOf = (g: ReturnType<typeof newGame>): QueryEnv => g.engine.env(g.state);

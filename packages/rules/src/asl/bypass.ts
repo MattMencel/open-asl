@@ -4,15 +4,18 @@ import { acrossSide, cornerBetween, cornerHexes, cornerName, cornerPoint, mod6, 
 import { hexOfLoc, isGroundLoc, locationsOf, locOf, type LocId } from '../common/location';
 import { personnelAt, statics } from '../common/pieces';
 import { isAblaze } from './fire';
+import { rubbleAt } from './rubble';
+import { shownCounter, wireAt } from './fortifications';
 import type { FireAttackCtx } from '../sk1/fire';
-import { FORTIFIED_DRM } from '../sk1/fortified';
+import { FORTIFIED_DRM, fortifiedState, revealFortified } from '../sk1/fortified';
 import { visibleEnemyAt } from '../sk1/known';
-import { MOVE_BYPASS, MOVE_ENTER, MOVE_FINISH, moveInternals, moveState, type BypassPos, type MoveBypassFn, type MoveEnterFn, type MoveFinishFn, type MoveState } from '../sk1/movement';
+import { MOVE_BYPASS, MOVE_ENTER, MOVE_FINISH, exitTargets, leftUnits, moveInternals, moveState, type BypassPos, type MoveBypassFn, type MoveEnterFn, type MoveFinishFn, type MoveState } from '../sk1/movement';
 import { updateControl } from '../sk1/scenario';
 import { isBroken, isPinned, pieceOf, smc, squadEquivalents } from '../sk1/status';
 import { inPlay, smokeIn, terrainOf } from '../sk1/terrain';
-import { heightOf, levelOf } from '../sk2/elevation';
+import { entryHexside, heightOf, levelOf } from '../sk2/elevation';
 import { hiddenGunsAt, hiddenUnitsAt, revealHex } from '../sk2/hip';
+import { ceDrmApplies } from '../sk3/vehicleFire';
 
 /**
  * Bypass movement in full ASL (ASLRB A4.3–A4.34, with A6.12, A8.2, A26.11, B13.3, B23.31, B23.4).
@@ -37,7 +40,9 @@ import { hiddenGunsAt, hiddenUnitsAt, revealHex } from '../sk2/hip';
  * crosses a bypassed hexside to reach it. There is no obstacle TEM (B13.3, B23.31) except against Residual FP (A8.2), and
  * FFMO applies in the open portion. Residual FP fills the whole Location (A8.21). No Control is gained in Bypass (A26.11).
  *
- * Not here (later steps): A12.151/A12.42 concealment, vehicles (VBM), rubble/Wire/roadblocks/mines/Blaze, A2.6 exit.
+ * Exit (A2.6): from a corner on the map edge the stack may step off the map, with the MF the exit costs still in hand.
+ *
+ * Not here (later steps): A12.42 concealment, vehicles (VBM), roadblocks (B29.4), mines. (Rubble, Wire and a Blaze bar Bypass: `bypassable`, `sideFree`.)
  */
 
 const BYPASS_TERRAIN = (id: string) => id === 'woods' || id.startsWith('building');
@@ -45,10 +50,24 @@ const BYPASS_TERRAIN = (id: string) => id === 'woods' || id.startsWith('building
 /** A woods or building hex that has a hexside open to Bypass (ASLRB A4.3). */
 export function bypassable(env: QueryEnv, hex: HexId): boolean {
   const map = statics(env).map;
-  // An obstacle that is Ablaze cannot be bypassed (A4.3); rubble is not Bypass terrain at all.
-  return !!map.hex(hex) && BYPASS_TERRAIN(terrainOf(env, hex).id) && (map.bypassSides?.(hex) ?? 0) !== 0 && !isAblaze(env, hex);
+  // An obstacle that is Ablaze cannot be bypassed (A4.3); nor a hex containing rubble at any level (A4.3, B24.4: rubble
+  // on level 1 of a house still standing below bars it too).
+  return !!map.hex(hex) && BYPASS_TERRAIN(terrainOf(env, hex).id) && (map.bypassSides?.(hex) ?? 0) !== 0 && !isAblaze(env, hex) && !rubbleAt(env, hex) && !knownWire(env, hex);
 }
-const sideFree = (env: QueryEnv, hex: HexId, k: number) => ((statics(env).map.bypassSides?.(hex) ?? 0) & (1 << mod6(k))) !== 0;
+/**
+ * Wire the moving side knows of in a hex (A4.3, B26.44). A hidden Wire counter is passed as if it were not there: a unit
+ * entering a hidden Fortification, Wire included, pays nothing for it while it stays hidden (A12.33).
+ */
+function knownWire(env: QueryEnv, hex: HexId): boolean {
+  const w = wireAt(env, hex);
+  return !!w && !!shownCounter(w, env.state.attacker);
+}
+/** A hexside open to Bypass: the obstacle does not touch it, and it is no part of a hex containing Wire on either side (A4.3, B26.44). */
+function sideFree(env: QueryEnv, hex: HexId, k: number): boolean {
+  if (((statics(env).map.bypassSides?.(hex) ?? 0) & (1 << mod6(k))) === 0) return false;
+  const across = acrossSide(statics(env).map, hex, mod6(k));
+  return !(across && knownWire(env, across));
+}
 
 /** A Known enemy unit in any Location of the hex (the obstacle may not be bypassed: A4.3; nor its Location entered: A4.14). */
 const enemyIn = (env: QueryEnv, hex: HexId) => locationsOf(env, hex).some((l) => visibleEnemyAt(env, l, env.state.attacker).length > 0);
@@ -99,7 +118,11 @@ export function plan(env: QueryEnv, ms: MoveState, hex: HexId, via: HexId[]): { 
   const before = same ? ms.bypass!.sides : [];
   if (new Set([...before, ...ks]).size !== before.length + ks.length) return 'Each hexside is gone along once';
   const blocked = ks.find((k) => !sideFree(env, hex, k));
-  if (blocked !== undefined) return `The obstacle in ${hex} touches its hexside with ${acrossSide(map, hex, blocked) ?? '?'}: no Bypass along it (ASLRB A4.3)`;
+  if (blocked !== undefined) {
+    const across = acrossSide(map, hex, blocked);
+    if (across && knownWire(env, across)) return `${across} contains Wire: no Bypass along its hexside with ${hex} (ASLRB A4.3, B26.44)`;
+    return `The obstacle in ${hex} touches its hexside with ${across ?? '?'}: no Bypass along it (ASLRB A4.3)`;
+  }
   const { corners, entrySide } = startCorners(env, ms, hex);
   if (corners.length === 0) return ms.bypass ? `${hex} does not meet the stack's corner` : 'Bypass starts from the hex next to it, at ground level';
   if (entrySide !== null && ks.includes(entrySide)) return 'Bypass goes round the obstacle, not along the hexside crossed into the hex';
@@ -121,6 +144,37 @@ function exitCost(env: QueryEnv, units: PieceId[], from: HexId, x: HexId): numbe
 }
 
 /**
+ * The offboard hexes a stack at corner `at` of edge hex `hex` may exit the map into (A2.6): the imaginary hexes beyond the
+ * edge that meet the hex at that corner (the EX: from X1 by Bypass of X0 to the X0-W1-W0 vertex, then out through the
+ * mirror image of W1).
+ */
+function cornerExits(env: QueryEnv, hex: HexId, at: number): HexId[] {
+  const map = statics(env).map;
+  const h = map.hex(hex);
+  if (!h) return [];
+  const p = cornerPoint(h.cube, at);
+  return exitTargets(env, { hex, off: null }).filter((o) => {
+    const oh = map.offboardHex(o);
+    return !!oh && [0, 1, 2, 3, 4, 5].some((j) => {
+      const q = cornerPoint(oh.cube, j);
+      return Math.hypot(p.x - q.x, p.y - q.y) < 2;
+    });
+  });
+}
+
+/**
+ * Whether the stack could exit the map from Bypass at `pos` with `left` MF (A2.6: "Bypass can be claimed to exit a hex ...
+ * only if the unit has one additional MF/MP in excess of that needed for Bypass"): the scenario's exit rules, judged as if
+ * the stack stood in that hex with that much left.
+ */
+function canExitFrom(env: QueryEnv, ms: MoveState, pos: BypassPos, left: number): boolean {
+  if (ms.assault) return false;
+  const units = ms.units;
+  const there: MoveState = { ...ms, hex: pos.hex, level: undefined, sub: undefined, bypass: undefined, roadOnly: false, viaRoad: false, spent: Object.fromEntries(units.map((u) => [u, (ms.allowance[u] ?? 0) - left])) };
+  return cornerExits(env, pos.hex, pos.at).some((o) => !env.query('move.exitIllegal', { ms: there, to: o }, 'Units may not leave the map'));
+}
+
+/**
  * Whether a stack in Bypass at `pos` with `left` MF can still end its move legally: enter the obstacle, step into a hex at
  * its corner, or go further round (or into Bypass of a hex at the corner) and do one of those later (ASLRB A4.32, read
  * here as a full look-ahead). Memoised on the position and MF, bounded by MF and the six hexsides of a hex.
@@ -132,8 +186,9 @@ function canFinish(env: QueryEnv, ms: MoveState, pos: BypassPos, left: number, m
   memo.set(key, false);
   const assault = ms.assault;
   const ok = (() => {
+    // Entering the obstacle is an expenditure within the Location: it may use the last MF, ending Assault Movement (A4.61 EXC).
     const enter = terrainOf(env, pos.hex).mf;
-    if (enter <= left && (!assault || left - enter >= 1)) return true;
+    if (enter <= left) return true;
     // Assault Movement allows one Location (ASLRB A4.61): out of the hex bypassed is a second.
     if (assault) return false;
     const map = statics(env).map;
@@ -142,6 +197,8 @@ function canFinish(env: QueryEnv, ms: MoveState, pos: BypassPos, left: number, m
       const c = exitCost(env, ms.units, pos.hex, x);
       if (c !== null && c <= left) return true;
     }
+    // Off the map from a corner on its edge (A2.6).
+    if (canExitFrom(env, ms, pos, left)) return true;
     for (const dir of [1, -1]) {
       const k = dir > 0 ? pos.at : mod6(pos.at - 1);
       if (pos.sides.includes(k) || !sideFree(env, pos.hex, k)) continue;
@@ -178,10 +235,13 @@ function bypassIllegal(env: QueryEnv, ms: MoveState, to: LocId, via?: HexId[]): 
       const cost = terrainOf(env, hex).mf;
       const left = mfLeft(ms);
       if (cost > left) return `Entering the ${terrainOf(env, hex).name.toLowerCase()} from Bypass costs its whole ${cost} MF (ASLRB A4.3); ${left} MF left`;
-      if (ms.assault && left - cost < 1) return 'Assault Movement may not use all MF';
+      // Bypass and the obstacle are one Location (A4.3: "already in the hex"): entering it is an expenditure within the
+      // Location, which may use the last MF and then ends Assault Movement (A4.61 EXC; `bypassStep`).
       return null;
     }
     const exits = cornerHexes(map, b.hex, b.at);
+    // Off the map from a corner on its edge: the scenario's exit rules decide the rest, the MF included (A2.6).
+    if (map.offboardHex(hex)) return cornerExits(env, b.hex, b.at).includes(hex) ? null : `From its corner in ${b.hex} the stack may leave the map only through the offboard hex at that corner (ASLRB A2.6)`;
     if (!exits.includes(hex)) return `From its corner in ${b.hex} the stack may enter ${exits.join(' or ')}, or the obstacle of ${b.hex} (ASLRB A4.31)`;
     if (!isGroundLoc(to)) return 'From Bypass only the ground level of a hex at the corner can be entered';
     return null;
@@ -193,6 +253,8 @@ function bypassIllegal(env: QueryEnv, ms: MoveState, to: LocId, via?: HexId[]): 
   if (ms.level || ms.sub) return 'Bypass is at ground level: come down the stairs first';
   if (!isGroundLoc(to) || !map.hex(hex)) return 'Bypass is of a hex on the map, at ground level';
   if (!BYPASS_TERRAIN(terrainOf(env, hex).id)) return 'Only a woods or building hex can be bypassed (ASLRB A4.3)';
+  if (rubbleAt(env, hex)) return `${hex} contains rubble: no Bypass (ASLRB A4.3, B24.4)`;
+  if (knownWire(env, hex)) return `${hex} contains Wire: no Bypass (ASLRB A4.3, B26.44)`;
   if (!bypassable(env, hex)) return `The obstacle in ${hex} touches every hexside: no Bypass (ASLRB A4.3)`;
   if (!inPlay(env, hex)) return 'That hex is not in play';
   if (ms.units.some((u) => isBroken(pieceOf(env, u)))) return 'Broken units may not Bypass (ASLRB A4.3, A10.5)';
@@ -244,7 +306,10 @@ function bypassSteps(env: QueryEnv, ms: MoveState): { type: 'move.step'; to: Loc
 function bypassTargets(env: QueryEnv, target: LocId): Map<PieceId, number[]> {
   const out = new Map<PieceId, number[]>();
   const ms = moveState(env);
-  if (!ms || !isGroundLoc(target) || ms.hex !== target) return out;
+  if (!ms || !isGroundLoc(target)) return out;
+  // Units left in Bypass of a hex the stack has moved on from: still in its open part (A4.32, A4.33).
+  for (const r of ms.leftBypass ?? []) if (r.hex === target) for (const u of leftUnits(env, r)) out.set(u, r.units[u]!);
+  if (ms.hex !== target) return out;
   if (ms.bypass) for (const u of ms.units) out.set(u, ms.bypass.sides);
   for (const [u, sides] of Object.entries(ms.stoppedBypass ?? {})) if (env.state.pieces[u]?.loc.kind === 'hex') out.set(u, sides);
   return out;
@@ -290,12 +355,22 @@ function sidesCrossed(env: QueryEnv, fromHex: HexId, hex: HexId): number[] {
 }
 
 /** Height Advantage for a target in Bypass on a hill (B10.31): every firer lower; the obstacle TEM does not count there. */
-function heightAdvantageInBypass(env: QueryEnv, attack: FireAttackCtx): boolean {
+export function heightAdvantageInBypass(env: QueryEnv, attack: FireAttackCtx): boolean {
   if (attack.residual || attack.ordnance?.indirect) return false;
   const lt = heightOf(env, attack.target);
   const locs = [...new Set(attack.parts.map((p) => locOf(env.state, pieceOf(env, p.firer))).filter((l): l is LocId => !!l))];
-  return locs.length > 0 && locs.every((l) => heightOf(env, l) < lt);
+  if (locs.length === 0 || !locs.every((l) => heightOf(env, l) < lt)) return false;
+  // Not against a unit that crossed a Crest Line into the hex through the hexside the firers' LOS crosses (B10.31),
+  // as for any other Height Advantage (`heightAdvantageHex`).
+  const target = hexOfLoc(attack.target);
+  const from = attack.moving?.from;
+  if (from && levelOf(env, from) < levelOf(env, target) && locs.every((l) => entryHexside(env, target, hexOfLoc(l)) === from)) return false;
+  return true;
 }
+/** Height Advantage in Bypass for one target unit: not for a unit taking a CE DRM (B10.31 "any other positive TEM or
+ * CE DRM"), as for every other Height Advantage (`asl.ha.not-with-ce`, the Snap Shot's). The obstacle TEM does not count
+ * in Bypass (B23.31), so a CE crew there would take its CE DRM. */
+export const heightAdvantageInBypassFor = (env: QueryEnv, attack: FireAttackCtx, unit: PieceId): boolean => heightAdvantageInBypass(env, attack) && !ceDrmApplies(env, attack, unit, true);
 /** FFMO in the open portion of the hex (ASLRB A4.34): Defensive First Fire at a stack in Bypass with no Hindrance. */
 const ffmoInBypass = (env: QueryEnv, attack: FireAttackCtx) =>
   !!attack.moving && !attack.residual && !attack.moving.vehicle && !attack.moving.pinned && attack.hindrance === 0 && !attack.ordnance?.indirect && !heightAdvantageInBypass(env, attack);
@@ -304,8 +379,8 @@ const directFire = (attack: FireAttackCtx) => !attack.residual && !attack.ordnan
 
 export const aslBypassModule: RuleModule = {
   id: 'asl.bypass',
-  ref: 'ASLRB A4.3, A4.31, A4.32, A4.33, A4.34',
-  summary: 'Bypass movement round woods and buildings: cost, the corner reached, must leave, LOS to corners, no obstacle TEM.',
+  ref: 'ASLRB A4.3, A4.31, A4.32, A4.33, A4.34, A4.61',
+  summary: 'Bypass movement round woods and buildings: cost, the corner reached, must leave, LOS to corners, no obstacle TEM; Assault Movement voided by a last MF spent in place.',
   requires: ['sk1.movement', 'sk1.fire', 'sk1.terrain', 'asl.locations'],
   install(r) {
     // ---------------------------------------------------------------- movement
@@ -317,6 +392,11 @@ export const aslBypassModule: RuleModule = {
       ref: 'ASLRB A4.32',
       apply: (_v, { ms }, env) => !!ms.bypass && canFinish(env, ms, ms.bypass, mfLeft(ms)),
     });
+    // A MF spent within the Location may use a unit's last MF; Assault Movement is then over (`spendInPlace`).
+    r.contribute({ id: 'asl.move.assault-in-place', query: 'move.assaultInPlaceAllMf', ref: 'ASLRB A4.61 EXC', apply: () => true });
+    // Units stranded where they stand (a Smoke grenade dr of 6, A24.1; the leader bonus lost) are, in Bypass, "the same as
+    // pinned" (A4.33): still targets there for the rest of their MPh, and the DEFENDER has his say on that expenditure.
+    r.contribute({ id: 'asl.move.stranded-stay', query: 'move.strandedStay', ref: 'ASLRB A4.33, A24.1', apply: () => true });
     r.contribute({
       id: 'asl.bypass.cost',
       query: 'move.stepCost',
@@ -330,33 +410,29 @@ export const aslBypassModule: RuleModule = {
         return typeof p === 'string' ? v : p.cost;
       },
     });
+    // Going round the obstacle is not entering it: no fortified Location is revealed by it (A4.3, A12.151, B23.911).
+    r.contribute({
+      id: 'asl.bypass.not-entered',
+      query: 'fortified.entered',
+      ref: 'ASLRB A4.3, A12.151',
+      apply: (v, { piece, hex }, env) => {
+        const ms = moveState(env);
+        return v && !(ms?.bypass?.hex === hex && ms.units.includes(piece));
+      },
+    });
     r.procedure<MoveBypassFn>(MOVE_BYPASS, () => (ctx, ms, to, via, cost) => bypassStep(ctx, ms, to, via, cost));
-    // Ending the MPh in Bypass (stranded, or broken/pinned there): what hides in the obstacle is found (A12.151, interim
-    // for hidden Guns until Phase 6 brings concealment).
+    // A4.33, A12.151: "Concealed enemy units in the Location lose that status at the end of the moving unit's MPh": a stack
+    // ending its MPh in Bypass (stranded, halted by unknown units in its exit hex, or broken or pinned there) finds what
+    // hides in the obstacle's Location then, not before.
     r.procedure<MoveFinishFn>(MOVE_FINISH, (next) => (ctx) => {
       const ms = moveState(ctx);
-      if (ms?.bypass || Object.keys(ms?.stoppedBypass ?? {}).length) {
-        const hex = ms!.hex!;
-        if (hiddenGunsAt(ctx, hex, ctx.state.attacker).length || hiddenUnitsAt(ctx, hex, ctx.state.attacker).length) revealHex(ctx, hex, ctx.state.attacker, 'entered');
-      }
+      const why = 'a unit ending its MPh in Bypass (ASLRB A4.33, A12.151)';
+      for (const r of ms?.leftBypass ?? []) if (leftUnits(ctx, r).length) revealGround(ctx, r.hex, why);
+      if (ms?.hex && ((ms.bypass && ms.units.length) || Object.keys(ms.stoppedBypass ?? {}).length)) revealGround(ctx, ms.hex, why);
       next?.(ctx);
     });
     // A26.11: Control comes when the MPh of the units in Bypass is over (see `updateControl`), which ends no piece event.
     r.on({ id: 'asl.bypass.control', event: 'sk1.move.state', handler: (ctx) => updateControl(ctx) });
-    // A12.151 (A12.3: hidden status is the equal of concealment): Defensive Fire that forces a unit in Bypass to end its
-    // MPh there, broken or pinned, in a Location holding hidden enemy units reveals them at once; they may then attack
-    // it there with TPBF as Defensive First Fire (FFNAM and FFMO apply to units in Bypass, not to pinned ones, A7.83), and
-    // it is in the obstacle with its full TEM from Final Fire on (A4.32, A4.33).
-    r.on<{ state: MoveState | null }>({
-      id: 'asl.bypass.stranded-reveal',
-      event: 'sk1.move.state',
-      handler(ctx, ev) {
-        const ms = ev.payload.state;
-        if (!ms?.hex || !Object.keys(ms.stoppedBypass ?? {}).length) return;
-        const hex = ms.hex;
-        if (hiddenGunsAt(ctx, hex, ctx.state.attacker).length || hiddenUnitsAt(ctx, hex, ctx.state.attacker).length) revealHex(ctx, hex, ctx.state.attacker, 'a unit stranded in Bypass (ASLRB A12.151)');
-      },
-    });
 
     // ---------------------------------------------------------------- A4.132 b: the road point
     // Against a unit that entered a non-Open Ground hex at the road rate the firer may trace to the centre or to where
@@ -406,7 +482,7 @@ export const aslBypassModule: RuleModule = {
         }
         // To the hex centre the LOS must cross a hexside the stack bypassed (A4.34), when every target is in Bypass.
         const ms = moveState(env)!;
-        const everyone = [...ms.units, ...(ms.stopped ?? [])].filter((u) => env.state.pieces[u]?.loc.kind === 'hex');
+        const everyone = ms.hex === hex ? [...ms.units, ...(ms.stopped ?? [])].filter((u) => env.state.pieces[u]?.loc.kind === 'hex') : [...targets.keys()];
         if (!v.clear || !everyone.every((u) => targets.has(u))) return v;
         const bypassed = new Set([...targets.values()].flat());
         if (sidesCrossed(env, fromHex, hex).some((k) => bypassed.has(k))) return v;
@@ -450,6 +526,15 @@ export const aslBypassModule: RuleModule = {
       when: ({ attack }, env) => allInBypass(env, attack) && heightAdvantageInBypass(env, attack),
       apply: (v) => v + 1,
     });
+    // ... though not for a unit taking a CE DRM (B10.31): the attack-wide +1 is taken back for it.
+    r.contribute({
+      id: 'asl.bypass.height-advantage.ce',
+      query: 'fire.unitDrm',
+      ref: 'ASLRB B10.31',
+      label: '-1 no Height Advantage with a CE DRM',
+      when: ({ attack, unit }, env) => allInBypass(env, attack) && heightAdvantageInBypass(env, attack) && !heightAdvantageInBypassFor(env, attack, unit),
+      apply: (v) => v - 1,
+    });
     // Some targets in Bypass, some in the obstacle (a unit stopped in Bypass while the rest went in): per unit.
     r.contribute({
       id: 'asl.bypass.unit',
@@ -472,22 +557,35 @@ export const aslBypassModule: RuleModule = {
 };
 
 /** The `MOVE_BYPASS` procedure: into Bypass, further round, or into the obstacle of the hex bypassed. */
+/**
+ * A12.151: "all concealment in that Location is lost": the hidden units and Guns at the ground Location of a hex a unit
+ * ends its MPh in Bypass of (not those on a level above, nor in a pillbox there).
+ */
+function revealGround(ctx: Ctx, hex: HexId, reason: string): boolean {
+  const here = (p: { id: PieceId }) => locOf(ctx.state, ctx.state.pieces[p.id]!) === hex;
+  const side = ctx.state.attacker;
+  return (hiddenGunsAt(ctx, hex, side).some(here) || hiddenUnitsAt(ctx, hex, side).some(here)) && revealHex(ctx, hex, side, reason, hex);
+}
+
 function bypassStep(ctx: Ctx, ms: MoveState, to: LocId, via: HexId[] | undefined, cost: number) {
   const hex = hexOfLoc(to);
   const spent = Object.fromEntries(ms.units.map((u) => [u, (ms.spent[u] ?? 0) + cost]));
   const trail = cost > 0 ? [...(ms.trail ?? []), { hex, mp: cost }] : ms.trail;
   if (!via) {
-    // Into the obstacle (A4.3: its whole in-hex cost). The same Location: MF and First Fire counts carry on (A8.12).
-    const { bypass: _b, ...rest } = ms;
-    const guns = hiddenGunsAt(ctx, hex, ctx.state.attacker);
-    if (guns.length || hiddenUnitsAt(ctx, hex, ctx.state.attacker).length) {
-      // Hidden units in the obstacle bar the way (SK4 6.4): found, and the stack's move ends where it stands.
-      revealHex(ctx, hex, ctx.state.attacker, 'entered');
+    // Into the obstacle (A4.3: its whole in-hex cost). The same Location: MF and First Fire counts carry on (A8.12). A unit
+    // that spends its last MF so is no longer using Assault Movement (A4.61 EXC).
+    const allMf = ms.assault && ms.units.some((u) => (ms.spent[u] ?? 0) + cost >= (ms.allowance[u] ?? 0));
+    const { bypass: _b, ...rest } = { ...ms, ...(allMf ? { assault: false } : {}) };
+    // Hidden units in the obstacle bar the way (SK4 6.4): found, and the stack's move ends where it stands. Only those
+    // in the Location entered, its ground level (A12.15).
+    if (revealGround(ctx, hex, 'entered')) {
       ctx.emit('sk1.move.state', { state: { ...ms, spent, mfHere: ms.mfHere + cost, ...(trail ? { trail } : {}), halted: true } });
       moveInternals.afterMfExpenditure(ctx);
       return;
     }
     ctx.emit('sk1.move.state', { state: { ...rest, spent, mfHere: ms.mfHere + cost, ...(trail ? { trail } : {}) } satisfies MoveState });
+    // Entering the obstacle is entering its Location: a fortified one is revealed (B23.911), as by a step into the hex.
+    if (fortifiedState(ctx) && fortifiedState(ctx)!.side !== ctx.state.attacker) revealFortified(ctx, hex, 'entered');
     moveInternals.afterMfExpenditure(ctx);
     return;
   }

@@ -59,6 +59,27 @@ const hasRoad = (h: HexTerrainSpec | undefined) => !!h?.features?.some((f) => f.
  * board along the A5/A6 hexside is missed. Give every hex on a road hexside the road, of the kind
  * (dirt or paved) of the road it joins; replaces `terrain` entries rather than editing board data.
  */
+/**
+ * Roads across the seam between two boards. Each board's data knows its own road hexsides only, so a road running off one
+ * board onto the next stopped at the edge: the road bonus (SK1 3.3) ended there. A road hex whose road dead-ends at its
+ * board's edge (at most one road hexside on its own board) joins the road hex beside it on the other board whose road
+ * dead-ends there too; two roads that merely run along the seam keep their own hexsides and are not joined.
+ */
+function seamRoads(placements: readonly BoardPlacement[], terrain: Record<string, HexTerrainSpec>, roads: [string, string][]): [string, string][] {
+  const grid = new HexGridMap({ boards: placements.map(({ board, x, y, rotation }) => ({ board, x, y, ...(rotation ? { rotation } : {}) })), terrain, roadHexsides: roads, losEffect: () => 'none' });
+  const boardOf = (id: string) => grid.hex(id)?.board;
+  const deadEnd = (id: string) => grid.neighbors(id).filter((n) => boardOf(n) === boardOf(id) && grid.roadHexside(id, n)).length <= 1;
+  const out: [string, string][] = [];
+  for (const h of grid.hexes()) {
+    if (!hasRoad(terrain[h.id]) || !deadEnd(h.id)) continue;
+    for (const n of grid.neighbors(h.id)) {
+      if (n <= h.id || boardOf(n) === h.board || !hasRoad(terrain[n]) || !deadEnd(n) || grid.roadHexside(h.id, n)) continue;
+      out.push([h.id, n]);
+    }
+  }
+  return out;
+}
+
 function fillRoadHexes(terrain: Record<string, HexTerrainSpec>, roads: [string, string][]) {
   const next = new Map<string, string[]>();
   for (const [a, b] of roads) {
@@ -202,6 +223,7 @@ export function buildMap(
     roads.push(...b.roadHexsides, ...cornerRoads(p.board));
     addBuildingLevels(terrain, p.board);
   }
+  if (placements.length > 1) roads.push(...seamRoads(placements, terrain, roads));
   fillRoadHexes(terrain, roads);
   // PTO Terrain (SK4 8.2): the transform comes before any SSR redraw, so a card may redraw the jungle it produces.
   let paths: [string, string][] = [];

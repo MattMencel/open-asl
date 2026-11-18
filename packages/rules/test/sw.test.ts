@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import type { Engine, GameState } from '@asl/engine';
+import type { Action, Ctx, Engine, GameState, RuleModule } from '@asl/engine';
 import { GE_VS_BR, RU_VS_GE, act, makeEngine } from './fixtures';
-import { moveState, sk2CoreModules } from '../src';
+import { FPP, moveState, sk2CoreModules, type ResolveDcFn } from '../src';
 
 /** Let the defender pass any Defensive First Fire opportunity that interrupts the mover. */
 function settle(engine: Engine, state: GameState): GameState {
@@ -317,6 +317,28 @@ describe('SW of a unit killed by a KIA (SK1 4.0)', () => {
     expect(t.state.pieces['gC']!.loc).toEqual({ kind: 'hex', hex: 'yN6' });
     expect(t.state.pieces['gC']!.tags['malf']).toBeUndefined();
   });
+
+  it('a K eliminates a SW with an X# (FT, DC, LATW) or one already malfunctioned instead of malfunctioning it (ASLRB A9.74)', () => {
+    const { engine, state } = makeEngine({
+      startPhase: 'PFPh',
+      // As above: a final 1 is 2KIA on the 6 column. Then a dr of 3 (K) for each SW.
+      dice: [1, 1, 3, 3, 3],
+      pieces: [
+        { id: 'a1', def: 'am.747', side: 'am', hex: 'yN4' },
+        { id: 'aL', def: 'am.L91', side: 'am', hex: 'yN4' },
+        { id: 'g1', def: 'ge.467', side: 'ge', hex: 'yN6' },
+        { id: 'gA', def: 'ge.FT', side: 'ge', heldBy: 'g1' },
+        { id: 'gB', def: 'ge.LMG', side: 'ge', heldBy: 'g1', tags: { malf: true } },
+        { id: 'gC', def: 'ge.LMG', side: 'ge', heldBy: 'g1' },
+      ],
+    });
+    const t = act(engine, state, { type: 'fire', decl: { units: ['a1'], sw: [], target: 'yN6', directors: ['aL'] } });
+    expect(t.state.pieces['g1']!.loc).toEqual({ kind: 'eliminated' });
+    expect(t.state.pieces['gA']!.loc).toEqual({ kind: 'eliminated' });
+    expect(t.state.pieces['gB']!.loc).toEqual({ kind: 'eliminated' });
+    expect(t.state.pieces['gC']!.loc).toEqual({ kind: 'hex', hex: 'yN6' });
+    expect(t.state.pieces['gC']!.tags['malf']).toBe(true);
+  });
 });
 
 describe('SW uses per phase (SK1 4.0)', () => {
@@ -367,5 +389,39 @@ describe('SW uses per phase (SK1 4.0)', () => {
     const { engine, state } = game('ru.237');
     const s = act(engine, state, { type: 'fire', decl: { units: ['r'], sw: [], target: 'yM6' } }).state;
     expect(fire(engine, s, ['lmg'], 'yN6')).toMatch(/half-squad that fired its own FP may not then fire a weapon/);
+  });
+});
+
+describe('a DC in a Melee hex (SK4 3.8, ASLRB A23.1)', () => {
+  /** Resolve a placed DC as the AFPh would. */
+  const testDc: RuleModule = {
+    id: 'test.dcMelee',
+    install(r) {
+      r.action<Action & { dc: string }>({
+        type: 'test.dc',
+        decisionKinds: ['phase'],
+        resolve(ctx: Ctx, a) {
+          ctx.proc<ResolveDcFn>(FPP.resolveDc)(ctx, ctx.state.pieces[a.dc]!);
+        },
+      });
+    },
+  };
+  it('attacks every unit held in the Melee, friendly and enemy alike', () => {
+    // DR 4+3 = 7 on the 30 column: a result for each unit in the hex.
+    const { engine, state } = makeEngine({
+      extra: [testDc],
+      startPhase: 'PFPh',
+      dice: [4, 3, 6, 6, 6, 6],
+      hexMarkers: { yP5: { melee: true } },
+      pieces: [
+        { id: 'a1', def: 'am.747', side: 'am', hex: 'yO5' },
+        { id: 'aL', def: 'am.L91', side: 'am', hex: 'yP5' },
+        { id: 'd1', def: 'am.DC', side: 'am', hex: 'yP5', tags: { dcPlaced: true, dcPlacer: 'a1' } },
+        { id: 'g1', def: 'ge.467', side: 'ge', hex: 'yP5' },
+      ],
+    });
+    const t = act(engine, state, { type: 'test.dc', dc: 'd1' });
+    const hit = t.events.filter((e) => e.type === 'sk1.fire.result').map((e) => (e.payload as { unit: string }).unit).sort();
+    expect(hit).toEqual(['aL', 'g1']);
   });
 });

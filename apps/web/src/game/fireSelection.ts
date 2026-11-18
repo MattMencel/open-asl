@@ -1,5 +1,5 @@
 import type { HexId, Piece, PieceId, QueryEnv, SideId } from '@asl/engine';
-import { defOf, fireMarker, isGoodOrder, isRofShot, ordnanceOf, swHeldBy, unitsInHex, vehicle } from '@asl/rules';
+import { UNKNOWN_DEF_ID, defOf, enemyVehicleAt, fireMarker, isGoodOrder, isRofShot, ordnanceOf, personnelInHex, swHeldBy, unitsInHex, vehicle } from '@asl/rules';
 
 /**
  * What a click on an own stack picks up in a fire phase, so the stack is ready to shoot as
@@ -50,4 +50,17 @@ export function fireLeaders(env: QueryEnv, leaders: Piece[], units: PieceId[], o
  */
 export function blindFireOffered(env: QueryEnv, hex: HexId, side: SideId): boolean {
   return unitsInHex(env, hex, side).length === 0;
+}
+
+/**
+ * Whether a click on `hex` aims the selected fire at it: enemy personnel there, an enemy's concealed "?" stack (Area
+ * Fire, SK4 8.3.2), or an enemy vehicle. Infantry and MG fire on the IFT attacks a Crew Exposed crew (+2 DRM) and does
+ * nothing to a Buttoned Up AFV (SK4 3.2.3, 7.7); Ordnance never attacks the crew alone (7.7), so a Gun's or a PF's
+ * shot aims at a lone vehicle only on the Vehicle Target Type. `env` is the viewer's (redacted) position.
+ */
+export function aimsAt(env: QueryEnv, hex: HexId, side: SideId, special: { targetType: string } | null): boolean {
+  const enemyThere = Object.values(env.state.pieces).filter((p) => p.side !== side && p.loc.kind === 'hex' && p.loc.hex === hex);
+  if (enemyThere.some((p) => p.defId === UNKNOWN_DEF_ID)) return true;
+  if (personnelInHex(env, hex).some((p) => p.side !== side)) return true;
+  return !!enemyVehicleAt(env, hex, side) && (special ? special.targetType === 'VTT' : true);
 }

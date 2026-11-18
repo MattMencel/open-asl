@@ -50,6 +50,11 @@ export interface CheckOptions {
   /** Leadership DRM applied (negative helps). */
   leaderDrm?: number;
   reason: string;
+  /**
+   * Leaders of the Location who already passed a check from this attack under another result (a unit's own DRM split
+   * the targets, e.g. -1 vs a FT possessor): they checked first, and lend their DRM to this group's units too (SK1 3.2.1).
+   */
+  lenders?: PieceId[];
 }
 
 /** Procedure ids — other rule packs may wrap or replace these. */
@@ -307,7 +312,7 @@ export const moraleModule: RuleModule = {
         });
       const others = alive.filter((id) => !leaders.includes(id)).sort();
       // Leaders who passed unharmed, each lending his DRM to the units after him (to those he may lead).
-      const lenders: PieceId[] = [];
+      const lenders: PieceId[] = (opts.lenders ?? []).filter((l) => ctx.state.pieces[l]?.loc.kind !== 'eliminated');
       const lend = (to: PieceId) => Math.min(0, ...lenders.map((l) => ctx.query('unit.leadership', { unit: l, for: to }, smc(ctx, pieceOf(ctx, l))!.leadership)));
       const usable = (id: PieceId) => {
         const p = pieceOf(ctx, id);

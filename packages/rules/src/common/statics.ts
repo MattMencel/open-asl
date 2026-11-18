@@ -195,6 +195,8 @@ export interface VehicleDef extends CounterBase {
   stallOn11?: boolean;
   /** The unit letter's box (low) or circle (high) in the counter's upper left (SK4 7.6). */
   groundPressure: 'low' | 'normal' | 'high';
+  /** An unarmored vehicle (no Armor Factors printed: trucks, jeeps; ASLRB D1.1). None is in the counter set yet. */
+  unarmored?: true;
   /** Armor Factors (SK4 7.1), the turret's already stepped along the AF ladder for the circle/square marks. */
   af: { hull: ArmorFacings; turret: ArmorFacings };
   turret: TurretType;

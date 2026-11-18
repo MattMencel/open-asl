@@ -6,15 +6,15 @@ import { PHASE_DECISION, PHASE_DONE, askPhaseOwner, type PhaseDoneFn } from '../
 import { fortifiedRevealed, isFortified, revealFortified } from '../sk1/fortified';
 import { knownEnemyAt } from '../sk1/known';
 import { P as MP, eliminate, type FlushFn, type RandomSelectFn, type UnitFn } from '../sk1/morale';
-import { ROUT_START_SIDE, type RoutStartSideFn } from '../sk1/rout';
-import { moveState } from '../sk1/movement';
+import { ROUT_START_SIDE, interdicted, interdictionCheck, type RoutStartSideFn } from '../sk1/rout';
+import { moveInternals, moveState, type MoveState } from '../sk1/movement';
 import { updateControl, type ControlState } from '../sk1/scenario';
 import { T, fireMarker, hasDm, inMelee, isBroken, isGoodOrder, isPinned, mmc, pieceOf, setTags, smc } from '../sk1/status';
-import { isWoodsRoad, smoke58Counters, terrainOf, type LosTrace } from '../sk1/terrain';
+import { isWoodsRoad, smoke58Counters, smoke58Markers, smokeGrenades, terrainOf, type LosTrace } from '../sk1/terrain';
 import { heightOf } from '../sk2/elevation';
 import { T2 } from '../sk2/status';
 import { FP, type AttackResolvedFn, type AttackResolvedInfo } from '../sk1/fire';
-import { ecDrm, gustDir, windDirectionDrm, windOf } from './wind';
+import { downwind, ecDrm, gustDir, noWindHex, windAt, windDirectionDrm, windOf } from './wind';
 
 /*
  * Fire in full ASL (ASLRB B25, with B24.6, B24.7, B24.72, B24.721, B24.8 for Flame clearance and A26.16 for Control).
@@ -105,6 +105,21 @@ export const blazeLocations = (env: QueryEnv): LocId[] =>
     .filter(([, f]) => f.blaze)
     .map(([loc]) => loc)
     .sort();
+/**
+ * The levels a Blaze's smoke in `hex` rises above the Fire's level (B25.2: four; two in a Mild Breeze, A24.4; none in Heavy
+ * Winds, B25.63), by the wind in effect there (No Wind in an Interior Building hex, B25.63).
+ */
+export const blazeSmokeLevels = (env: QueryEnv, hex: HexId): number => ({ none: 4, breeze: 2, heavy: 0 })[windAt(env, hex).force];
+/**
+ * Whether a Location is a SMOKE Location by a Blaze of its hex (B25.2): above the Fire's level, within the levels its smoke
+ * reaches. The Blaze Location itself cannot be entered at all (B25.4).
+ */
+export function inBlazeSmoke(env: QueryEnv, loc: LocId): boolean {
+  const hex = hexOfLoc(loc);
+  const lvl = levelOfLoc(loc);
+  const up = blazeSmokeLevels(env, hex);
+  return blazeLocations(env).some((b) => hexOfLoc(b) === hex && b !== loc && levelOfLoc(b) < lvl && lvl <= levelOfLoc(b) + up);
+}
 /** Every Location with a Flame or a Blaze. */
 export const fireLocations = (env: QueryEnv): LocId[] =>
   Object.entries(fireState(env))
@@ -149,9 +164,13 @@ export function placeBlaze(ctx: Ctx, loc: LocId, opts: { kindledBy: SideId | nul
   if (blazeAt(ctx, loc)) return;
   const blaze: BlazeRecord = { since: opts.since ?? turnKey(ctx), kindledBy: opts.kindledBy, ...(opts.rubble ? { rubble: true as const } : {}) };
   ctx.emit('asl.fire.blaze', { loc, blaze, source: opts.source });
-  // Unpossessed SW/Guns in a Blaze Location are removed from play (A4.44).
-  for (const w of unpossessedWeaponsAt(ctx, loc).sort(byId)) ctx.emit('piece.eliminated', { id: w.id, reason: 'lost in the Blaze' });
+  burnUnpossessed(ctx, loc);
   updateControl(ctx);
+}
+
+/** Unpossessed SW/Guns in a Blaze Location are removed from play (A4.44): when the Blaze comes, and whenever one is left there later. */
+function burnUnpossessed(ctx: Ctx, loc: LocId) {
+  for (const w of unpossessedWeaponsAt(ctx, loc).sort(byId)) ctx.emit('piece.eliminated', { id: w.id, reason: 'lost in the Blaze' });
 }
 
 /** Every Flame in the Location goes (falling rubble, B24.6; a Clearance DR; the Blaze DR). */
@@ -183,8 +202,12 @@ function tryFlameBase(ctx: Ctx, loc: LocId, opts: TryFlameOpts): boolean {
   const drm = ec + fort + (opts.drm ?? 0);
   const roll = ctx.roll(`Flame DR in ${loc}`);
   const flame = roll.total + drm >= n.kindle;
-  ctx.emit('asl.fire.attackFlame', { loc, source: opts.source, dr: roll.dice as [number, number], drm, needed: n.kindle, flame, explain: [...(ec ? [`EC ${ec > 0 ? '+' : ''}${ec}`] : []), ...(fort ? ['-1 Fortified Building (ASLRB B23.94)'] : []), ...(opts.drm ? [`${opts.drm > 0 ? '+' : ''}${opts.drm}`] : [])] });
-  if (fort && flame !== roll.total + drm - fort >= n.kindle) revealFortified(ctx, loc, 'fire');
+  // The Fortified -1 is secret until it changes the outcome (B23.94, read with B23.911 as the +1 TEM): only then is it
+  // shown in the DR, and the Location revealed.
+  const decides = !!fort && flame !== roll.total + drm - fort >= n.kindle;
+  if (decides) revealFortified(ctx, loc, 'fire');
+  const shown = decides ? drm : drm - fort;
+  ctx.emit('asl.fire.attackFlame', { loc, source: opts.source, dr: roll.dice as [number, number], drm: shown, needed: n.kindle, flame, explain: [...(ec ? [`EC ${ec > 0 ? '+' : ''}${ec}`] : []), ...(decides ? ['-1 Fortified Building (ASLRB B23.94)'] : []), ...(opts.drm ? [`${opts.drm > 0 ? '+' : ''}${opts.drm}`] : [])] });
   if (flame) placeFlame(ctx, loc, { kindledBy: null, source: opts.source });
   return flame;
 }
@@ -298,10 +321,13 @@ export function spreadTargets(env: QueryEnv, from: LocId): LocId[] {
   const h = map.hex(hex);
   const out: LocId[] = [];
   if (inBuilding(env, from) || inRubble(env, from)) {
-    // Horizontally at its own level (ground to any neighbour; above ground only within the building), vertically in its hex.
+    // Horizontally (B25.6 "spread to any adjacent Burnable Terrain Location"; "Building Blazes spread horizontally and
+    // vertically, but not diagonally"): from the ground to every neighbour's ground; from above it to the Location of each
+    // adjacent hex at the same height, whatever building or hill it is in (-2 if not directly attached, B25.62).
+    const height = heightOf(env, from);
     for (const n of map.neighbors(hex)) {
       if (level === 0) out.push(n);
-      else if (map.hex(n)?.buildingId && map.hex(n)!.buildingId === h?.buildingId && locationsOf(env, n).includes(locId(n, level))) out.push(locId(n, level));
+      else out.push(...locationsOf(env, n).filter((l) => !parseLoc(l).sub && heightOf(env, l) === height));
     }
     const levels = locationsOf(env, hex).filter((l) => !parseLoc(l).sub);
     if (level > 0) out.push(locId(hex, level - 1));
@@ -416,7 +442,8 @@ function fireAfph(ctx: Ctx) {
   const autos: { from: LocId; to: LocId; how: 'heavy' | 'gust' }[] = [];
   for (const { loc, blaze } of blazes) {
     const old = !sameTurn(blaze.since, key);
-    if (gust !== undefined) {
+    // No Gust in an Interior Building hex, where No Wind is always in effect (B25.63).
+    if (gust !== undefined && !noWindHex(ctx, hexOfLoc(loc))) {
       const to = targetAcross(ctx, loc, gust);
       if (to) autos.push({ from: loc, to, how: 'gust' });
     }
@@ -444,7 +471,7 @@ function fireAfph(ctx: Ctx) {
   }
   // A Gust also carries one Blaze (or every one tied, A.9) two hexes downwind, to ground level (B25.651).
   if (gust !== undefined) {
-    const eligible = blazes.filter(({ loc }) => twoDownwind(ctx, loc, gust) !== undefined).map((b) => b.loc);
+    const eligible = blazes.filter(({ loc }) => !noWindHex(ctx, hexOfLoc(loc)) && twoDownwind(ctx, loc, gust) !== undefined).map((b) => b.loc);
     if (eligible.length) {
       const chosen = eligible.length === 1 ? eligible : ctx.proc<RandomSelectFn>(MP.randomSelect)(ctx, eligible, 1, 'Gust: the Blaze spreading two hexes', { ties: true });
       ctx.emit('asl.fire.gustSelect', { candidates: eligible, chosen });
@@ -462,9 +489,10 @@ function fireAfph(ctx: Ctx) {
     const final = roll.total + c.drm;
     const spread = final >= c.needed;
     // The Fortified -1 is secret until it changes the outcome (B23.94, as the +1 TEM).
-    const shown = c.fortified && spread === roll.total + c.drm - c.fortified >= c.needed ? c.drm - c.fortified : c.drm;
-    const explain = c.fortified && shown !== c.drm ? [...c.explain, '-1 Fortified Building Location (ASLRB B23.94)'] : c.explain;
-    if (c.fortified && shown === c.drm && !fortifiedRevealed(ctx, to)) revealFortified(ctx, to, 'fire');
+    const decides = !!c.fortified && spread !== roll.total + c.drm - c.fortified >= c.needed;
+    const shown = decides ? c.drm : c.drm - c.fortified;
+    const explain = decides ? [...c.explain, '-1 Fortified Building Location (ASLRB B23.94)'] : c.explain;
+    if (decides && !fortifiedRevealed(ctx, to)) revealFortified(ctx, to, 'fire');
     ctx.emit('asl.fire.spread', { from: c.from, to, dr: roll.dice as [number, number], drm: shown, needed: c.needed, explain, flame: spread });
     if (spread) placeFlame(ctx, to, { kindledBy: blazeAt(ctx, c.from)?.kindledBy ?? null, source: 'spread', from: c.from });
   }
@@ -518,10 +546,14 @@ function escapers(env: QueryEnv, side: SideId): Piece[] {
     .sort(byId);
 }
 
-/** A unit that cannot break voluntarily (A10.41): no broken side to flip to. Heroes and berserk units will join here. */
+/**
+ * A unit that cannot break voluntarily (A10.41: "only if breaking will not cause their immediate Reduction or
+ * elimination"): one with no broken side, as Japanese MMC, which are Reduced instead (G1.13), and Japanese SMC (G1.4).
+ * Heroes and berserk units will join here when they exist.
+ */
 const cannotBreak = (env: QueryEnv, p: Piece): boolean => {
-  const d = defOf(env, p) as { brokenMorale?: number };
-  return d.brokenMorale === undefined;
+  const d = defOf(env, p) as { brokenMorale?: number; noBrokenSide?: true };
+  return d.brokenMorale === undefined || !!d.noBrokenSide;
 };
 
 /** Adjacent Locations a unit that cannot break may move out to (B25.4, A11.2: an Accessible Location, not ablaze, no Known enemy). */
@@ -610,7 +642,7 @@ export const aslFireModule: RuleModule = {
     r.event<{ from: LocId; to: LocId; dr?: [number, number]; drm?: number; needed?: number; auto?: string; far?: boolean; flame: boolean; explain?: string[] }>({ type: 'asl.fire.spread', apply() {} });
     r.event<{ candidates: LocId[]; chosen: LocId[] }>({ type: 'asl.fire.gustSelect', apply() {} });
     r.event<{ units: PieceId[]; loc: LocId }>({ type: 'asl.fire.eliminated', apply() {} });
-    r.event<{ unit: PieceId; choice: 'break' | 'stay' | 'move'; to?: LocId }>({ type: 'asl.fire.escape', apply() {} });
+    r.event<{ unit: PieceId; choice: 'break' | 'stay' | 'move'; to?: LocId; interdicted?: PieceId[] }>({ type: 'asl.fire.escape', apply() {} });
     r.event<{ loc: LocId; id: number; units: PieceId[]; director?: PieceId; dr: [number, number]; drm: number; outcome: 'extinguished' | 'hampered' | 'failed'; explain: string[]; labor?: number }>({ type: 'asl.fire.extinguish', apply() {} });
     r.procedure<TryFlameFn>(FIRE_PROC.tryFlame, () => (ctx, loc, opts) => tryFlameBase(ctx, loc, opts));
 
@@ -679,6 +711,17 @@ export const aslFireModule: RuleModule = {
         askPhaseOwner(ctx, side);
       },
     });
+    // A4.44: a SW/Gun left unpossessed in a Blaze Location later (its possessor eliminated or gone, a weapon dropped) is
+    // removed as well.
+    for (const event of ['piece.moved', 'piece.eliminated']) {
+      r.on({
+        id: `asl.fire.burnUnpossessed.${event}`,
+        event,
+        handler(ctx) {
+          for (const loc of blazeLocations(ctx)) if (unpossessedWeaponsAt(ctx, loc).length) burnUnpossessed(ctx, loc);
+        },
+      });
+    }
     r.on<{ phase: string }>({
       id: 'asl.fire.kindledReset',
       event: 'turn.phaseEnded',
@@ -706,15 +749,51 @@ export const aslFireModule: RuleModule = {
       },
     });
 
+    // ---------------------------------------------------------------- A24.61: Smoke drifting from a Blaze in a Mild Breeze
+    r.event<{ source: LocId; hexes: HexId[] }>({ type: 'asl.fire.drift', apply() {} });
+    r.on<{ phase: string }>({
+      id: 'asl.fire.drift.place',
+      event: 'turn.phaseStarted',
+      handler(ctx, ev) {
+        const first = ev.payload.phase === 'RPh' && ctx.state.turn === 1 && ctx.state.attacker === statics(ctx).scenario.firstSide;
+        if (ev.payload.phase === 'AFPh' || first) placeDrift(ctx);
+      },
+    });
+    for (const event of ['asl.wind.set', 'asl.fire.blaze', 'asl.rubble']) r.on({ id: `asl.fire.drift.stale.${event}`, event, handler: (ctx) => clearStaleDrift(ctx) });
+
     // ---------------------------------------------------------------- B25.2, A24.4: the Blaze's smoke, and Smoke heights
+    // A24.7: one more MF to enter a SMOKE Location, a level within a Blaze's smoke included (B25.2). An upper building level is
+    // entered at the ground's cost (B23.421), never doubled, so the +1 is simply added.
+    r.contribute({
+      id: 'asl.move.blaze-smoke',
+      query: 'move.stepCost',
+      layer: 450,
+      ref: 'ASLRB A24.7, B25.2',
+      label: '+1 MF entering a Blaze\'s smoke',
+      when: ({ ms, to, bypass }, env) => !bypass && !ms.vehicle && to !== (ms.hex ? locId(ms.hex, ms.level ?? 0) : null) && inBlazeSmoke(env, to),
+      apply: (v) => v + 1,
+    });
+    // ... and for a routing unit taking the stairs into one (A10.5 rout is movement; the interim rule lets it climb a level).
+    r.contribute({
+      id: 'asl.rout.blaze-smoke',
+      query: 'rout.stairsMf',
+      ref: 'ASLRB A24.7, B25.2',
+      when: ({ to }, env) => inBlazeSmoke(env, to),
+      apply: (v) => v + 1,
+    });
     r.contribute({
       id: 'asl.smoke.heights',
       query: 'smoke.reaches',
       ref: 'ASLRB A24.4',
       apply(_v, { hex, from, to }, env) {
         const m = env.state.hexMarkers[hex];
-        const wp = smoke58Counters(m).some((c) => c.kind === 'wp');
-        return smokeReaches(env, hex, from, to, 0, wp ? 4 : 2);
+        const counters = smoke58Counters(m);
+        const wp = counters.some((c) => c.kind === 'wp');
+        // Drifting SMOKE is never a Hindrance below the Location of its source (A24.61): a hex holding only drift from
+        // upper-level Blazes starts at the lowest of them.
+        const drift = counters.map((c) => driftOf(c.side));
+        const base = counters.length && smokeGrenades(m) === 0 && drift.every((d) => d) ? Math.min(...drift.map((d) => levelOfLoc(d!.source))) : 0;
+        return smokeReaches(env, hex, from, to, base, wp ? 4 : 2);
       },
     });
     r.contribute({
@@ -724,12 +803,11 @@ export const aslFireModule: RuleModule = {
       ref: 'ASLRB B25.2, A24.2, A24.4, A24.8',
       apply(v, c, env): LosTrace {
         if (!v.clear || c.noSmoke) return v;
-        const wind = windOf(env);
-        if (wind.force === 'heavy') return v;
-        const levels = wind.force === 'breeze' ? 2 : 4;
+        // Each Blaze hex by the wind in effect there (none in Heavy Winds; No Wind in an Interior Building hex, B25.63).
         const ablaze = new Map<HexId, number>();
         for (const loc of blazeLocations(env)) {
           const h = hexOfLoc(loc);
+          if (blazeSmokeLevels(env, h) === 0) continue;
           ablaze.set(h, Math.min(ablaze.get(h) ?? Infinity, levelOfLoc(loc)));
         }
         if (ablaze.size === 0) return v;
@@ -742,10 +820,10 @@ export const aslFireModule: RuleModule = {
           const add = Math.max(0, cap - already(h));
           if (add > 0) parts.push({ label: out ? `+${add} firing out of a Blaze` : `+${add} Blaze (smoke)`, hex: h, drm: add });
         };
-        if (ablaze.has(from) && smokeReaches(env, from, c.from, c.to, ablaze.get(from)!, levels)) push(from, true);
+        if (ablaze.has(from) && smokeReaches(env, from, c.from, c.to, ablaze.get(from)!, blazeSmokeLevels(env, from))) push(from, true);
         const steps = map.lineSteps ? map.lineSteps(from, to) : map.los(from, to).crossed.filter((x) => x.hex !== from && x.hex !== to).map((x) => [x.hex]);
         for (const step of c.noTargetSmoke ? steps : [...steps, [to]]) {
-          const h = step.find((x) => ablaze.has(x) && smokeReaches(env, x, c.from, c.to, ablaze.get(x)!, levels));
+          const h = step.find((x) => ablaze.has(x) && smokeReaches(env, x, c.from, c.to, ablaze.get(x)!, blazeSmokeLevels(env, x)));
           if (h) push(h, false);
         }
         return parts.length === v.parts.length ? v : { ...v, parts, hindrance: parts.reduce((a, p) => a + p.drm, 0) };
@@ -861,8 +939,18 @@ export const aslFireModule: RuleModule = {
         return escapeDestinations(env, a.unit).includes(a.to) ? null : `${a.to} is not an Accessible Location out of the Blaze`;
       },
       resolve(ctx, a, d) {
-        ctx.emit('asl.fire.escape', { unit: a.unit, choice: 'move', to: a.to });
+        const p = pieceOf(ctx, a.unit);
+        const from = hexOfLoc(locOf(ctx.state, p)!);
+        const to = hexOfLoc(a.to);
+        // "Such units are vulnerable to Interdiction" (B25.4, A10.53): an Open Ground hex entered in the LOS and Normal Range
+        // of an enemy able to interdict.
+        const by = from === to ? [] : interdicted(ctx, p.side, to, from).map((e) => e.id).sort();
+        ctx.emit('asl.fire.escape', { unit: a.unit, choice: 'move', to: a.to, ...(by.length ? { interdicted: by } : {}) });
         ctx.emit('piece.moved', { id: a.unit, loc: locationAt(a.to) });
+        if (by.length) {
+          interdictionCheck(ctx, a.unit, 0, true);
+          ctx.proc<FlushFn>(MP.flushLeaderLoss)(ctx);
+        }
         answered(ctx, a.unit);
         ctx.popDecision(d.id);
         afterEscape(ctx, d.owner);
@@ -899,12 +987,15 @@ export const aslFireModule: RuleModule = {
         const out: (Action & { type: 'fire.extinguish'; loc: LocId; flame: number; units: PieceId[]; director?: PieceId })[] = [];
         for (const [loc, f] of Object.entries(fireState(env)).sort()) {
           if (!f.flames.length || f.blaze) continue;
-          const units = clearers(env, loc, side);
-          if (!units.some((p) => mmc(env, p))) continue;
-          const director = units.find((p) => defOf(env, p).kind === 'leader');
-          const ids = units.map((p) => p.id);
-          const a = { type: 'fire.extinguish' as const, loc, flame: f.flames[0]!.id, units: director ? ids.filter((u) => u !== director.id) : ids, ...(director ? { director: director.id } : {}) };
-          if (!extinguishIllegal(env, { ...a, side })) out.push(a as Action & typeof a);
+          // Each Flame is cleared with its own DR, and every extinguishing unit may try each one (B24.72).
+          for (const flame of f.flames) {
+            const units = clearers(env, loc, side, flame.id);
+            if (!units.some((p) => mmc(env, p))) continue;
+            const director = units.find((p) => defOf(env, p).kind === 'leader');
+            const ids = units.map((p) => p.id);
+            const a = { type: 'fire.extinguish' as const, loc, flame: flame.id, units: director ? ids.filter((u) => u !== director.id) : ids, ...(director ? { director: director.id } : {}) };
+            if (!extinguishIllegal(env, { ...a, side })) out.push(a as Action & typeof a);
+          }
         }
         return out;
       },
@@ -917,7 +1008,10 @@ export const aslFireModule: RuleModule = {
         const final = roll.total + drm;
         const outcome = final <= 2 ? 'extinguished' : final <= 6 ? 'hampered' : 'failed';
         // TI and Hazardous Movement for the Player Turn (B24.72, B24.7).
-        for (const id of all) setTags(ctx, id, { ti: true, [T2.hazardous]: true });
+        for (const id of all) {
+          const done = flamesFought(pieceOf(ctx, id), a.loc);
+          setTags(ctx, id, { ti: true, [T2.hazardous]: true, flameClear: `${a.loc}|${[...done, a.flame].join(',')}` });
+        }
         let nextLabor: number | undefined;
         if (outcome === 'failed') {
           nextLabor = Math.max(-2, labor - 1);
@@ -929,6 +1023,39 @@ export const aslFireModule: RuleModule = {
           updateControl(ctx);
         } else if (outcome === 'hampered') ctx.emit('asl.fire.hampered', { loc: a.loc, id: a.flame, hampered: true });
         ctx.popDecision();
+        if (ctx.state.phase === 'MPh') {
+          // In the MPh the attempt is Hazardous Movement (B24.72, A4.62): the DEFENDER may First Fire at the units then, as at
+          // a stack that has spent MF there (-2, no FFNAM or FFMO). They are held as stopped where they stand, so they are
+          // neither moved nor marked by it, and may fight the next Flame (B24.72).
+          const lvl = levelOfLoc(a.loc);
+          const allowance = Object.fromEntries(all.map((u) => [u, 0]));
+          const clearing: MoveState = {
+            units: [],
+            stopped: all,
+            started: all,
+            hex: hexOfLoc(a.loc),
+            ...(lvl ? { level: lvl } : {}),
+            allowance,
+            spent: allowance,
+            doubleTime: false,
+            assault: false,
+            hexesEntered: 0,
+            roadOnly: false,
+            viaRoad: false,
+            mfHere: 1,
+            firedHere: {},
+            residualDrmHere: null,
+            smokeTried: false,
+            leaderBonus: [],
+            halted: true,
+            hazardous: true,
+            from: null,
+            trail: [],
+          };
+          ctx.emit('sk1.move.state', { state: clearing });
+          moveInternals.offerFirstFire(ctx);
+          return;
+        }
         askPhaseOwner(ctx, side);
       },
     });
@@ -950,16 +1077,34 @@ function clearancePhaseSide(env: QueryEnv): SideId | null {
   return null;
 }
 
-/** Units of `side` in `loc` that may fight a Flame there now (B24.72): unpinned Good Order Infantry, not moved, fired or TI. */
-export function clearers(env: QueryEnv, loc: LocId, side: SideId): Piece[] {
-  return personnelAt(env, loc, side).filter((p) => clearerIllegal(env, p) === null);
+/** The Flames of `loc` a unit has fought this Player Turn (its `flameClear` tag), none elsewhere. */
+function flamesFought(p: Piece, loc: LocId): number[] {
+  const tag = p.tags['flameClear'];
+  if (typeof tag !== 'string') return [];
+  const [at, ids] = tag.split('|');
+  return at === loc && ids ? ids.split(',').map(Number) : [];
 }
-function clearerIllegal(env: QueryEnv, p: Piece): string | null {
+
+/**
+ * Units of `side` in `loc` that may fight a Flame there now (B24.72): unpinned Good Order Infantry, not moved, fired or
+ * TI. "If more than one Flame counter exists in a Location, each must be cleared separately with its own separate DR,
+ * although all extinguishing units may attempt to put out each Flame": a unit made TI by fighting a Flame there may
+ * still fight each other Flame of that Location once. `flame`: for that Flame; absent, for any Flame there.
+ */
+export function clearers(env: QueryEnv, loc: LocId, side: SideId, flame?: number): Piece[] {
+  const ids = flame !== undefined ? [flame] : (fireAt(env, loc)?.flames.map((f) => f.id) ?? []);
+  return personnelAt(env, loc, side).filter((p) => (ids.length ? ids.some((id) => clearerIllegal(env, p, loc, id) === null) : clearerIllegal(env, p) === null));
+}
+function clearerIllegal(env: QueryEnv, p: Piece, loc?: LocId, flame?: number): string | null {
   if (!isInfantry(env, p)) return `${p.id} is not Infantry`;
   if (!isGoodOrder(env, p) || isPinned(p)) return `${p.id} must be unpinned and in Good Order (ASLRB B24.7)`;
   if (p.tags[T.moved]) return `${p.id} has moved this Player Turn (ASLRB B24.72)`;
   if (fireMarker(p) || p.tags[T.firedSw]) return `${p.id} has fired this Player Turn (ASLRB B24.72)`;
-  if (p.tags['ti']) return tiIllegal(p);
+  if (p.tags['ti']) {
+    const fought = loc ? flamesFought(p, loc) : [];
+    if (!fought.length) return tiIllegal(p);
+    if (flame !== undefined && fought.includes(flame)) return `${p.id} has already fought that Flame this Player Turn (ASLRB B24.72)`;
+  }
   if (p.tags[T2.manhandled]) return `${p.id} is manhandling a Gun`;
   return null;
 }
@@ -978,7 +1123,7 @@ export function extinguishIllegal(env: QueryEnv, a: { loc: LocId; flame: number;
     const p = env.state.pieces[id];
     if (!p || p.side !== side) return `${id} is not your unit`;
     if (locOf(env.state, p) !== a.loc) return `${id} is not in ${a.loc}`;
-    const why = clearerIllegal(env, p);
+    const why = clearerIllegal(env, p, a.loc, a.flame);
     if (why) return why;
   }
   if (a.director && defOf(env, pieceOf(env, a.director)).kind !== 'leader') return `${a.director} is not a leader`;
@@ -1022,6 +1167,61 @@ export function clearanceDrm(env: QueryEnv, loc: LocId, units: PieceId[], direct
     explain.push(`EC ${ec > 0 ? '+' : ''}${ec}`);
   }
   return { drm, explain, labor };
+}
+
+// ---------------------------------------------------------------- A24.61, B25.2: Smoke drifting from a Blaze
+
+/**
+ * Drifting Dispersed SMOKE (A24.61; B25.2: "Both Wreck and terrain Blazes can create drifting Dispersed Smoke ... in a Mild
+ * Breeze"): gray Dispersed ⅝" counters, as many as the source's Hindrance DRM (+3 for a terrain Blaze), one in each hex
+ * directly downwind. Each is a ⅝" counter whose side is `drift~<source Location>~<direction>`, so the Smoke rules apply
+ * to it as to any Dispersed Smoke (+2, two levels, +1 MF, +1 out of) and the PFPh never disperses it; a Gust removes it
+ * as Dispersed SMOKE (A24.62).
+ */
+const DRIFT = 'drift~';
+const driftOf = (side: string): { source: LocId; dir: number } | null => {
+  if (!side.startsWith(DRIFT)) return null;
+  const [, source, dir] = side.split('~');
+  return source && dir !== undefined ? { source, dir: Number(dir) } : null;
+};
+
+/** Removes drifting SMOKE whose source is gone, or whose wind has changed direction or force (A24.61). */
+function clearStaleDrift(ctx: Ctx) {
+  for (const [hex, m] of Object.entries(ctx.state.hexMarkers).sort()) {
+    const counters = smoke58Counters(m);
+    const kept = counters.filter((c) => {
+      const d = driftOf(c.side);
+      if (!d) return true;
+      const w = windAt(ctx, d.source);
+      return !!blazeAt(ctx, d.source) && w.force === 'breeze' && w.dir === d.dir;
+    });
+    if (kept.length !== counters.length) for (const e of smoke58Markers(hex as HexId, m, kept)) ctx.emit('hex.marker', e);
+  }
+}
+
+/** Places the drifting SMOKE of every Blaze that has none, in a Mild Breeze (A24.61: the first RPh and each AFPh start). */
+function placeDrift(ctx: Ctx) {
+  clearStaleDrift(ctx);
+  const map = statics(ctx).map;
+  const drifting = new Set<LocId>();
+  for (const m of Object.values(ctx.state.hexMarkers)) for (const c of smoke58Counters(m)) { const d = driftOf(c.side); if (d) drifting.add(d.source); }
+  for (const source of blazeLocations(ctx)) {
+    const hex = hexOfLoc(source);
+    const w = windAt(ctx, source);
+    // None from (or into) the non-rooftop Locations of an Interior Building hex (A24.61 EXC), where there is No Wind.
+    if (w.force !== 'breeze' || w.dir === undefined || drifting.has(source)) continue;
+    let at: HexId | undefined = hex;
+    const placed: HexId[] = [];
+    for (let n = 0; n < 3; n++) {
+      at = at ? downwind(ctx, at, w.dir) : undefined;
+      if (!at || !map.hex(at)) break;
+      if (noWindHex(ctx, at)) continue;
+      const m = ctx.state.hexMarkers[at];
+      for (const e of smoke58Markers(at, m, [...smoke58Counters(m), { kind: 'smoke', dispersed: true, side: `${DRIFT}${source}~${w.dir}` }])) ctx.emit('hex.marker', e);
+      placed.push(at);
+    }
+    if (placed.length) ctx.emit('asl.fire.drift', { source, hexes: placed });
+  }
 }
 
 /**

@@ -164,6 +164,17 @@ describe('game log', () => {
     expect(lines).toContainEqual(expect.stringMatching(/^PTC German 4-4-7: DR 2\+1=3 → 3 vs 7 — passed$/));
   });
 
+  it('does not call a Crew Exposed crew’s PTC "no effect" when the crew then takes it (SK4 7.7)', () => {
+    const { engine, state } = makeEngine({ terrain, pieces: [{ id: 'v', def: 'ge.pzivf2', side: 'ge', hex: 'yP5', tags: { ce: true } }] });
+    const events = [
+      { seq: 1, type: 'sk1.fire.result', payload: { unit: 'v', result: { kind: 'PTC' }, finalDr: 8, drm: 2, explain: [{ id: 'sk3.ce', label: '+2 Crew Exposed' }] } },
+      { seq: 2, type: 'sk3.vehicle.check', payload: { vehicle: 'v', kind: 'PTC', dr: [1, 1], morale: 8, passed: true, reason: 'fire on the CE crew' } },
+    ];
+    const lines = describeEvents(engine.env(state), events as never).map((l) => l.text.trim());
+    expect(lines.some((l) => l.includes('PTC (final DR 8'))).toBe(true);
+    expect(lines.filter((l) => /no effect: already pinned/.test(l))).toEqual([]);
+  });
+
   it('names a unit as it was at each event and says when ELR replaced it', () => {
     const { engine, state } = makeEngine({
       terrain,
@@ -530,6 +541,52 @@ describe('fortification counters in the log (full ASL A12.33, B28.45, B28.47)', 
     for (const open of ['trench O7', 'trench P6', 'Wire P9', 'minefield N9', 'minefield N10', 'foxhole 1S O10']) expect(line).toContain(open);
     expect(line).toMatch(/5 hidden or recorded/);
     for (const secret of ['O6', 'O4', 'P10', 'O9', 'O3', 'Dummy', 'Known', 'A-P', 'A-T', 'Secret dr', 'hidden)']) expect(line, secret).not.toContain(secret);
+  });
+  it('a HE KIA Breach of an unrevealed fortified Location is told to its owner only, and only where it Breached (B23.911, B23.9221)', () => {
+    const { env } = placed();
+    const breach = { type: 'asl.breach.he', payload: { loc: 'uP3', toward: 'uQ3', breached: true }, seq: 9002 };
+    const none = { type: 'asl.breach.he', payload: { loc: 'uP3', toward: 'uQ3', breached: false }, seq: 9003 };
+    const text = (viewer: string) => describeEvents(env, [breach, none] as never, viewer).map((l) => l.text).join('\n');
+    expect(text('ge')).toBe('');
+    expect(text('ru')).toMatch(/Breach: the P3\/Q3 hexside is open \(a HE KIA\)/);
+    expect(text('ru').match(/Breach/g)).toHaveLength(1);
+  });
+  it('a move beneath a hidden foxhole is told to its owner only (A12.33)', () => {
+    const { env } = placed();
+    const ru = Object.values(env.state.pieces).find((p) => p.side === 'ru' && p.loc.kind === 'hex' && p.loc.hex === 'uO6')!;
+    const move = { type: 'asl.entrench.move', payload: { units: [ru.id], hex: 'uO6', beneath: true, mf: 0, phase: 'MPh' }, seq: 9001 };
+    expect(describeEvents(env, [move] as never, 'ge')).toEqual([]);
+    expect(describeEvents(env, [move] as never, 'ru').map((l) => l.text).join('\n')).toMatch(/go beneath the entrenchment in O6/);
+  });
+  it('a secret roll is never taken for another side’s DR in the log', () => {
+    const { env } = placed();
+    const roll = { type: 'dice.rolled', payload: { label: 'ru: test', dice: [3, 4], secret: 'ru' }, seq: 9001 };
+    const unit = Object.values(env.state.pieces).find((p) => p.side === 'ru' && p.loc.kind === 'hex')!.id;
+    const nmc = { type: 'ssr.onceDr.nmc', payload: { unit, dr: 7, final: 7, morale: 7, failed: false, rule: 'SSR' }, seq: 9002 };
+    const line = (viewer: string) => describeEvents(env, [roll, nmc] as never, viewer).find((l) => l.text.includes('NMC'))!.text;
+    expect(line('ru')).toContain('DR 4+3=7');
+    expect(line('ge')).toContain('DR 7 ');
+  });
+  it('the 0-MF moves out of and back beneath a hidden foxhole are in the owner\'s log only (A12.33)', () => {
+    const g = newGame(ASL_TESTBED_SCENARIO, 'describe-foxhole');
+    let state = g.state;
+    const events: unknown[] = [...g.events];
+    const submit = (a: Record<string, unknown>) => {
+      const d = g.engine.currentDecision(state)!;
+      const t = g.engine.submit(state, { ...a, side: d.owner, decisionId: d.id } as never);
+      state = t.state;
+      events.push(...t.events);
+    };
+    for (const a of fixtureActions(g.engine, g.state, 'foxhole-hidden')) submit(a);
+    submit({ type: 'endPhase' });
+    const sq = Object.values(state.pieces).find((p) => p.loc.kind === 'hex' && p.loc.hex === 'uC2')!.id;
+    submit({ type: 'move.start', units: [sq] });
+    submit({ type: 'move.entrenchment', beneath: false });
+    submit({ type: 'move.entrenchment', beneath: true });
+    const env = g.engine.env(state);
+    const lines = (viewer: string) => describeEvents(env, events as never, viewer).map((l) => l.text).filter((t) => /entrenchment|foxhole/i.test(t));
+    expect(lines('ge')).toEqual([]);
+    expect(lines('ru').filter((t) => /climb out of|go beneath/.test(t))).toHaveLength(2);
   });
   it('the owner reads every counter, its strength and the Secret dr', () => {
     const { env, events } = placed();

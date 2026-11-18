@@ -604,17 +604,21 @@ function nearestHexes(centers: { h: MapHex; p: { x: number; y: number } }[], x: 
   return sh && second - best < 0.75 / GEO.px.hexHeight ? [bh, sh] : [bh];
 }
 
-/** Raster pixels within this distance of a hexside count as on it: the line itself and its anti-aliased neighbours. */
-export const BYPASS_TOLERANCE_PX = 1;
+/**
+ * Art pixels within this distance of a hexside count as on it (ASLRB A4.31: "Should there be any question whether a building
+ * or woods symbol touches a hexside, Bypass in that hex is blocked"). A board is 645 px for 8 inches, so a pixel is about
+ * 0.3 mm: the printed hexside line takes one, and a sliver of one or two more is still a question. Open ground must show
+ * clear of the line by more than this (about a millimetre) for the hexside to be bypassed.
+ */
+export const BYPASS_TOLERANCE_PX = 3;
 
 /**
  * The hexsides of an obstacle hex open to Bypass (ASLRB A4.3, A4.31), as a 6-bit mask (bit k: hexside k of
  * `hexCorners.ts`), measured on the LOS raster. A hexside is closed when the hex's obstacle depiction reaches it: the
  * obstacle pixels of the hex itself, and every obstacle pixel joined to them with no open ground between (8-connected,
  * so a neighbour's woods grown into this hex's building closes the hexside, a neighbour's woods with a strip of open
- * ground between them does not. Read here as: "as long as there is even the tiniest piece of open
- * ground depicted between a building and an obstacle it can be bypassed"). A pixel within `BYPASS_TOLERANCE_PX` of
- * the hexside segment, corners included, is on it.
+ * ground between them does not). A pixel within `BYPASS_TOLERANCE_PX` of the hexside segment, corners included, is on
+ * it: a gap too thin to be beyond question blocks Bypass (A4.31).
  */
 export function bypassMask(h: MapHex, isObstacle: (x: number, y: number) => boolean): number {
   const c = pixelOf(h.cube);

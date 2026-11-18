@@ -170,6 +170,10 @@ describe('where each counter may go', () => {
     // The M4–M5 hexside's vertices touch the woods of L4 and the brush of N4: the roadblock extends into the woods only.
     expect(roadblockExtension(env, { hex: 'uM5', hexside: 4 })).toEqual(['uL4']);
     expect(fortPlaceIllegal(env, 'ru', [{ kind: 'roadblock', hex: 'uM5', hidden: true, hexside: 4 }, { kind: 'roadblock', hex: 'uM6', hidden: true, hexside: 4 }])).toMatch(/Only 1 roadblock/);
+    // One roadblock per hexside, set up from either of its hexes: M5's south hexside is M6's north one.
+    const two = game(far, { ...PARAMS, roadblocks: 2 }).engine.env(state);
+    expect(fortPlaceIllegal(two, 'ru', [{ kind: 'roadblock', hex: 'uM5', hidden: true, hexside: 1 }, { kind: 'roadblock', hex: 'uM6', hidden: true, hexside: 4 }])).toMatch(/One roadblock per hexside \(uM5-uM6/);
+    expect(fortPlaceIllegal(two, 'ru', [{ kind: 'roadblock', hex: 'uM5', hidden: true, hexside: 1 }, { kind: 'roadblock', hex: 'uM5', hidden: true, hexside: 4 }])).toBeNull();
   });
   it('a pillbox only in Open Ground, brush, orchard, grain or woods, with a Covered Arc; one per hex, not with an entrenchment (B30.1)', () => {
     const { engine, state } = game(far);
@@ -232,6 +236,9 @@ describe('units set up with the counters', () => {
     // The AT Gun's crew may start beneath the trench, not beneath the foxhole (only a mortar may).
     expect(fortSetupIllegal(env, 'ru', setup({ c: 'uL5' }, { beneath: ['c'] }))).toBeNull();
     expect(fortSetupIllegal(env, 'ru', setup({ c: 'uL4' }, { beneath: ['c'] }))).toMatch(/only Infantry, SW and a mortar may \(ASLRB B27.1\)/);
+    // Nor the Gun counter itself, set up beneath the foxhole on its own.
+    expect(fortSetupIllegal(env, 'ru', setup({ gun: 'uL4' }, { beneath: ['gun'] }))).toMatch(/gun cannot be placed beneath a foxhole: only Infantry, SW and a mortar may/);
+    expect(fortSetupIllegal(env, 'ru', setup({ gun: 'uL5' }, { beneath: ['gun'] }))).toBeNull();
   });
   it('inside a pillbox: its capacity, one Gun, no vehicle, only the owner (B30.111)', () => {
     const { engine, state } = game(units);
@@ -302,16 +309,48 @@ describe('hidden counters and their reveal (A12.33)', () => {
     expect(((seen.ext['asl.fortifications'] as { counters: FortRecord[] }).counters).find((c) => c.hex === 'uN4')).toMatchObject({ kind: 'pillbox', ca: 1, revealed: true });
     expect(locationsOf(engine.env(seen), 'uN4')).toEqual(['uN4', 'uN4:pb']);
   });
-  it('a broken enemy reveals nothing; a unit in Open Ground is seen at any range (A12.33)', () => {
+  it('a broken enemy reveals nothing, even in the counter\'s own hex; a unit in Open Ground is seen at any range (A12.33)', () => {
     const { engine, state } = game(pieces);
     let s = place(engine, state, counters);
     s = move(engine, s, 'gb', 'uM3');
     expect(fortCounters(engine.env(s)).some((c) => c.revealed)).toBe(false);
+    // Not even in the foxhole's own hex: only a Good Order enemy ground unit reveals it.
+    s = move(engine, s, 'gb', 'uL4');
+    expect(fortCounters(engine.env(s)).find((c) => c.hex === 'uL4')!.revealed).toBeUndefined();
     s = move(engine, s, 'g', 'uGG1');
     // The Wire at N5 (Open Ground) is 20 hexes from GG1 with a clear LOS across the open board: revealed; the foxhole in the woods of L4, 21 hexes off, is not.
     const after = fortCounters(engine.env(s));
     expect(after.find((c) => c.hex === 'uN5')!.revealed).toBe(true);
     expect(after.find((c) => c.hex === 'uL4')!.revealed).toBeUndefined();
+  });
+  it('with no Dummy allotted, one free Dummy for every 24 Known minefield factors set up (B28.47)', () => {
+    const params = { side: 'ru', mines: { known: 60 } };
+    const { engine, state } = game(far, params);
+    const env = engine.env(state);
+    const known = (hex: string): FortPlacement => ({ kind: 'mines', hex, hidden: false, mines: { ap: 12, known: true } });
+    const dummy = (hex: string): FortPlacement => ({ kind: 'mines', hex, hidden: false, mines: { known: true, dummy: true } });
+    expect(fortPools(env, 'ru', []).dummies).toBe(0);
+    // 24 Known factors: one Dummy; 48: two; 36 still one.
+    expect(fortPools(env, 'ru', [known('uL4'), known('uL5')]).dummies).toBe(1);
+    expect(fortPlaceIllegal(env, 'ru', [known('uL4'), known('uL5'), dummy('uK5')])).toBeNull();
+    expect(fortPlaceIllegal(env, 'ru', [known('uL4'), known('uL5'), known('uN5'), dummy('uK5'), dummy('uO5')])).toMatch(/Only 1 Dummy Minefield counter: one for every 24 Known minefield factors set up/);
+    expect(fortPlaceIllegal(env, 'ru', [known('uL4'), known('uL5'), known('uN5'), known('uN6'), dummy('uK5'), dummy('uO5')])).toBeNull();
+    expect(fortPlaceIllegal(env, 'ru', [known('uL4'), dummy('uK5')])).toMatch(/Only 0 Dummy/);
+    // The engine's own placement takes them too.
+    expect(defaultFortPlacement(env, 'ru').filter((c) => c.mines?.dummy)).toHaveLength(2);
+  });
+  it('A-T mines in full view on a paved road: the counter is seen, its factors only once a Good Order enemy ground unit has a LOS (B28.53, A12.33)', () => {
+    const { engine, state } = game(pieces);
+    let s = place(engine, state, [{ kind: 'mines', hex: 'uM4', hidden: false, mines: { at: 2 } }]);
+    expect(fortificationView(engine.env(s), 'ge')).toMatchObject([{ hex: 'uM4', kind: 'mines', mines: {} }]);
+    expect(fortificationView(engine.env(s), 'ge')[0]!.mines?.at).toBeUndefined();
+    // A broken German in LOS shows nothing; a Good Order one, any range off across Open Ground, sees the factors.
+    s = move(engine, s, 'gb', 'uM3');
+    expect(fortificationView(engine.env(s), 'ge')[0]!.mines?.at).toBeUndefined();
+    const r = act(engine, s, { type: 'test.teleport', id: 'g', hex: 'uGG4' });
+    expect(r.events.find((e) => e.type === 'asl.fort.revealed')?.payload).toMatchObject({ reason: 'strength' });
+    expect(fortificationView(engine.env(r.state), 'ge')).toMatchObject([{ hex: 'uM4', mines: { at: 2, strengthRevealed: true } }]);
+    expect(((redactState(engine, r.state, 'ge').ext['asl.fortifications'] as { counters: FortRecord[] }).counters)[0]!.mines).toMatchObject({ at: 2 });
   });
   it('the Dummy Secret dr adds half its value in Dummy counters, known to the owner alone (B28.47)', () => {
     const { engine, state } = game(far, PARAMS, { dice: [5] });

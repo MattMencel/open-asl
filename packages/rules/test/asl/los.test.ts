@@ -36,6 +36,26 @@ const losOf = (pieces: PieceSpec[] = [], opts: { asl?: boolean; terrain?: Record
   return (from: string, to: string) => env.query('los.trace', { from, to }, { clear: true, hindrance: 0, parts: [] });
 };
 
+describe('B23.25: LOS into a building Location may not enter its hex across a hexside within the building depiction', () => {
+  // K4 and K5 are one house whose depiction crosses the K4-K5 hexside (bypassBlocked). With K4's obstacle lowered to one
+  // level, the level 1 hill in K2 would see over it into level 1 of K5; B23.25 forbids it, the LOS entering K5 across the
+  // K4-K5 hexside. A gap in the art there (the hexside open) leaves the LOS alone.
+  const house = (closed: boolean): Record<string, HexTerrainSpec> => ({
+    ...MAP,
+    uK4: { terrain: 'building-stone', buildingId: 'u-B16', building: TWO, obstacleHeight: 1, ...(closed ? { bypassBlocked: [1] } : {}) },
+    uK5: { terrain: 'building-stone', buildingId: 'u-B16', building: TWO, obstacleHeight: 1.5, ...(closed ? { bypassBlocked: [4] } : {}) },
+  });
+  it('blocked from the hill in K2 to level 1 of K5, both ways; clear when the depiction does not cross the hexside; the ADJACENT Location still seen', () => {
+    const los = losOf([], { terrain: house(true) });
+    const r = los('uK2', 'uK5:1');
+    expect(r.clear).toBe(false);
+    expect(r.blockedBy).toMatch(/enters uK5 across a hexside within the building depiction \(ASLRB B23.25\)/);
+    expect(los('uK5:1', 'uK2').clear).toBe(false);
+    expect(los('uK4:1', 'uK5:1').clear).toBe(true);
+    expect(losOf([], { terrain: house(false) })('uK2', 'uK5:1').clear).toBe(true);
+  });
+});
+
 describe('LOS between Location heights (ASLRB A6.2, B10.22, B23.2)', () => {
   it('level 1 sees over ground-level woods to level 1 beyond, not to the ground beyond', () => {
     const los = losOf();
@@ -119,5 +139,22 @@ describe('Units trace LOS from their own Location (ASLRB A6.1)', () => {
     const env = engine.env(state);
     expect(heightAdvantageHex(env, 'uK2', ['uK4'])).toBe(true);
     expect(heightAdvantageHex(env, 'uK2', ['uK4:1'])).toBe(false);
+  });
+});
+
+describe('A6.6, A6.7: a vehicle or wreck hinders only a LOS between same-level ends', () => {
+  // K1 is a level 1 hill hex; K2 and K3 Open Ground below it. A wreck in K2.
+  const terrain: Record<string, HexTerrainSpec> = { uK1: { terrain: 'open', elevation: 1 } };
+  const wreck: PieceSpec = { id: 'w', def: 'ge.pzivf2', side: 'ge', hex: 'uK2', tags: { vca: 0, ca: 0, wreck: true } };
+  it('from level 1 down to the ground beyond the wreck: no Hindrance in full ASL (the Starter Kit counts it); at ground level both do', () => {
+    const asl = losOf([wreck], { terrain });
+    const down = asl('uK1', 'uK3');
+    expect(down.clear).toBe(true);
+    expect(down.hindrance).toBe(0);
+    const sk = losOf([wreck], { terrain, asl: false })('uK1', 'uK3');
+    expect(sk.hindrance).toBe(1);
+    // Same level: K2 and K4, both on the ground, see each other through a wreck in K3 with +1.
+    const flat = losOf([{ ...wreck, hex: 'uK3' }], { terrain })('uK2', 'uK4');
+    expect(flat.hindrance).toBe(1);
   });
 });

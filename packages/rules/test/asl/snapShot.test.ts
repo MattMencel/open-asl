@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Action, GameState, RuleModule } from '@asl/engine';
-import { aslCoreModules, moveState, piecesModule, SNAP, snapSide, turnModule, type HexTerrainSpec } from '../../src';
+import { aslCoreModules, entryHexside, moveState, piecesModule, SNAP, snapSide, snapWhyNot, turnModule, type HexTerrainSpec } from '../../src';
 import { sk1CoreModules } from '../../src/sk1';
 import { sk2CoreModules } from '../../src/sk2';
 import { sk3CoreModules } from '../../src/sk3';
@@ -40,6 +40,7 @@ const pass = (engine: Eng, s: GameState) => {
   return x;
 };
 type Ev = { type: string; payload: unknown }[];
+const entryHexsideOf = (engine: Eng, s: GameState, target: string, from: string) => entryHexside(engine.env(s), target, from);
 const attackOf = (events: Ev) => events.find((e) => e.type === 'sk1.fire.attack')?.payload as { fp: number; drm: number; explain: { label?: string }[]; fpExplain: { label?: string }[]; attack: { snap?: unknown } } | undefined;
 const labels = (events: Ev) => (attackOf(events)?.explain ?? []).map((n) => n.label ?? '');
 const fpLabels = (events: Ev) => (attackOf(events)?.fpExplain ?? []).map((n) => n.label ?? '');
@@ -91,6 +92,30 @@ describe('Snap Shot (ASLRB A8.15)', () => {
     const blocked = act(g2.engine, into(g2.engine, g2.state), snapFire(['r']));
     expect(blocked.events.some((e) => e.type === 'sk1.fire.noLos')).toBe(true);
     expect(blocked.state.pieces['r']!.tags['fire']).toBe('first');
+  });
+
+  it('a Gun, which may not Snap Shot, does not prompt the defender when only the hexside is in view (A6.11, A8.15)', () => {
+    // As above, but a German 88 and its crew in T7 (out of the crew's range) watch a Russian squad step into R3.
+    const terrain = { ...BUILDING, uS5: { terrain: 'woods' } };
+    const pieces: PieceSpec[] = [ru('r', 'uQ4'), { id: 'c', def: 'ge.228c', side: 'ge', hex: 'uT7' }, { id: 'g88', def: 'ge.AA88L', side: 'ge', heldBy: 'c' }];
+    const { engine, state } = makeEngine({ board: 'u', terrain, scenario: { ...RU_VS_GE, firstSide: 'ru' }, modules: ASL, startPhase: 'MPh', pieces });
+    let s = act(engine, state, { type: 'move.start', units: ['r'] }).state;
+    s = act(engine, s, { type: 'move.step', to: 'uR3' }).state;
+    expect(snapSide(engine.env(s), 'uR3')).toEqual(SIDE);
+    expect(engine.currentDecision(s)).not.toMatchObject({ kind: 'firstFire' });
+  });
+
+  it('when there is none the engine says why: a further MF in the hex, or the stairs', () => {
+    const { engine, state } = game([squad(), ru('r', 'uR5')]);
+    const s = into(engine, state);
+    expect(snapWhyNot(engine.env(s), 'uR3')).toBeNull();
+    const ms = moveState(engine.env(s))!;
+    const later = { ...s, ext: { ...s.ext, 'sk1.move': { ...ms, mfHere: ms.mfHere + 1, trail: [...(ms.trail ?? []), { hex: 'uR3', mp: 1 }] } } };
+    expect(snapWhyNot(engine.env(later), 'uR3')).toMatch(/further MF/);
+    const stairs = { ...s, ext: { ...s.ext, 'sk1.move': { ...ms, from: 'uR3' } } };
+    expect(snapWhyNot(engine.env(stairs), 'uR3')).toMatch(/stairs/);
+    const trench = { ...s, ext: { ...s.ext, 'sk1.move': { ...ms, trenchMove: true } } };
+    expect(snapWhyNot(engine.env(trench), 'uR3')).toMatch(/B27.54/);
   });
 
   it('one Snap Shot per firer at a crossing, though the stack spent two MF entering; the per-MF limit counts it', () => {
@@ -208,5 +233,97 @@ describe('Snap Shot (ASLRB A8.15)', () => {
     expect(snapSide(engine.env(s), 'uR4')).toEqual(['uR4', 'uR3']);
     expect(engine.currentDecision(s)!.owner).toBe('ru');
     expect(check(engine, s, { type: 'defFire', decl: { units: ['r'], sw: [], target: 'uR4', snap: ['uR4', 'uR3'] } })).toBeNull();
+  });
+  it('into Bypass from the next hex and from a Bypass corner into a hex there: the hexside between the two hexes; none from off the map (A8.15)', () => {
+    const { engine, state } = game([squad(), ru('r', 'uY9')]);
+    let s = pass(engine, into(engine, state, 'uR3', { bypass: ['uR4', 'uS4'] }));
+    expect(snapSide(engine.env(s), 'uR3')).toEqual(SIDE);
+    // From the R3-S3-S4 corner into S4: the S4-R3 hexside.
+    s = pass(engine, act(engine, s, { type: 'move.step', to: 'uS4' }).state);
+    expect(snapSide(engine.env(s), 'uS4')).toEqual(['uS4', 'uR3']);
+    // A stack that came on from off the map crossed a hexside on no board: no Snap Shot.
+    const ms = moveState(engine.env(s))!;
+    const fromOff = { ...s, ext: { ...s.ext, 'sk1.move': { ...ms, from: 'uS0x' } } };
+    expect(snapSide(engine.env(fromOff), 'uS4')).toBeNull();
+    expect(snapWhyNot(engine.env(fromOff), 'uS4')).toMatch(/off the map/);
+  });
+
+  it('no Snap Shot at a unit entering the firer\'s own hex, even from another Location of it (A8.15)', () => {
+    // R3 is a Two Story House; the Russian squad is on its level 1 as the German squad enters its ground level.
+    const terrain = { uR3: { terrain: 'building-stone', buildingId: 'u-R3', building: { upper: 1 as const, stairwell: 'inherent' as const }, obstacleHeight: 1.5 } };
+    const { engine, state } = game([squad(), { id: 'r', def: 'ru.447', side: 'ru', hex: 'uR3', level: 1 }], { terrain });
+    const s = into(engine, state);
+    expect(snapSide(engine.env(s), 'uR3')).toEqual(SIDE);
+    expect(check(engine, s, snapFire(['r']))).toMatch(/your own hex/);
+    expect(engine.legalActions(s, 'ru').some((a) => a.type === 'defFire' && (a['decl'] as { snap?: unknown }).snap)).toBe(false);
+  });
+
+  it('range is to the hex entered: an adjacent firer\'s Snap Shot is Point Blank Fire, doubled and then halved (C.5A, A7.21)', () => {
+    const { engine, state } = game([squad(), ru('r', 'uR4')], { dice: [6, 6] });
+    const r = act(engine, into(engine, state), snapFire(['r']));
+    expect(fpLabels(r.events)).toEqual(expect.arrayContaining(['x2 Point Blank Fire', '½ Snap Shot (Area Fire)']));
+    expect(attackOf(r.events)!.fp).toBe(4);
+  });
+
+  it('Height Advantage still applies to a Snap Shot up a hill, but not from a firer whose LOS crosses the Crest Line the stack came over (A8.15 EX, B10.31)', () => {
+    // R3 is a building on a level 1 hill; the German squad comes up from Q4 (level 0) across the R3-Q4 hexside.
+    const terrain = { uR3: { terrain: 'building-wood', elevation: 1 } };
+    const ha = (firer: string) => {
+      const { engine, state } = game([squad(), ru('r', firer)], { terrain, dice: [6, 6] });
+      return labels(act(engine, into(engine, state), snapFire(['r'])).events);
+    };
+    expect(ha('uR5')).toContain('+1 Height Advantage TEM');
+    // From P5, two hexes beyond Q4, the LOS enters R3 across the same R3-Q4 hexside: no Height Advantage.
+    const { engine, state } = game([squad(), ru('r', 'uP5')], { terrain });
+    expect(entryHexsideOf(engine, state, 'uR3', 'uP5')).toBe('uQ4');
+    expect(ha('uP5')).not.toContain('+1 Height Advantage TEM');
+    // The building's TEM is not claimed either way.
+    expect(ha('uR5').some((l) => /\+2 TEM|TEM \(/.test(l))).toBe(false);
+  });
+
+  it('at a moving vehicle: only its Vulnerable crew is affected, with the CE DRM; a Buttoned Up one is unharmed (A8.15, A7.307)', () => {
+    const shoot = (ce: boolean) => {
+      const { engine, state } = makeEngine({
+        board: 'u',
+        terrain: {},
+        scenario: { ...RU_VS_GE, firstSide: 'ru' },
+        modules: ASL,
+        startPhase: 'MPh',
+        dice: [3, 3, 3, 3],
+        pieces: [{ id: 't34', def: 'ru.T34M43', side: 'ru', hex: 'uQ4', tags: { vca: 1, ca: 1, ...(ce ? { ce: true } : {}) } }, { id: 'g', def: 'ge.467', side: 'ge', hex: 'uR6' }],
+      });
+      let s = act(engine, state, { type: 'vmove.start', vehicle: 't34' }).state;
+      while (engine.currentDecision(s)?.kind === 'firstFire') s = act(engine, s, { type: 'defPass' }).state;
+      s = act(engine, s, { type: 'move.step', to: 'uR4' }).state;
+      expect(engine.legalActions(s, 'ge').some((a) => a.type === 'defFire' && (a['decl'] as { snap?: unknown }).snap)).toBe(true);
+      const r = act(engine, s, { type: 'defFire', decl: { units: ['g'], sw: [], target: 'uR4', snap: ['uR4', 'uQ4'] } });
+      expect(attackOf(r.events)!.attack.snap).toEqual(['uR4', 'uQ4']);
+      expect(labels(r.events).some((l) => /FFNAM|FFMO/.test(l))).toBe(false);
+      return r.events.find((e) => e.type === 'sk1.fire.result')!.payload as { unit: string; result: { kind: string }; explain: { id: string }[] };
+    };
+    const ce = shoot(true);
+    expect(ce.unit).toBe('t34');
+    expect(ce.explain.map((x) => x.id)).toContain('sk3.drm.ce');
+    const bu = shoot(false);
+    expect(bu.result.kind).toBe('none');
+    expect(bu.explain.map((x) => x.id)).toContain('sk3.bu');
+  });
+
+  it('rubble in the hex left modifies the shot when the LOF crosses it on the way to the hexside (A8.15, B24.3)', () => {
+    // A level 1 hill in P4 looks over the stone rubble in Q4 (a half-level obstacle, B24.2) at the R3-Q4 hexside.
+    const terrain = { ...BUILDING, uP4: { terrain: 'open', elevation: 1 } };
+    const rubbled = (s: GameState): GameState => ({ ...s, ext: { ...s.ext, 'asl.rubble': { uQ4: { from: 0, kind: 'stone' } } } });
+    const { engine, state } = game([squad(), ru('r', 'uP4')], { terrain, dice: [6, 5] });
+    // The German squad starts in the rubble (3 MF there is no matter: it is only leaving).
+    const r = act(engine, into(engine, rubbled(state)), snapFire(['r']));
+    expect(attackOf(r.events)!.drm).toBe(3);
+    expect(labels(r.events)).toContain('+3 rubble TEM crossed (Snap Shot)');
+    // Without the rubble the same shot has no TEM at all.
+    const g2 = game([squad(), ru('r', 'uP4')], { terrain, dice: [6, 5] });
+    expect(attackOf(act(g2.engine, into(g2.engine, g2.state), snapFire(['r'])).events)!.drm).toBe(0);
+    // From R5 the LOF reaches the hexside without crossing Q4: the rubble does not count.
+    const g3 = game([squad(), ru('r', 'uR5')], { dice: [6, 5] });
+    const r3 = act(g3.engine, into(g3.engine, rubbled(g3.state)), snapFire(['r']));
+    expect(labels(r3.events).some((l) => /rubble/.test(l))).toBe(false);
   });
 });

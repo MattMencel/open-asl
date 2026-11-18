@@ -1,13 +1,15 @@
 import type { HexId, PieceId, QueryEnv, RuleModule } from '@asl/engine';
-import { mod6, sideToward } from '../common/hexCorners';
+import { cornerPoint, mod6, sideToward } from '../common/hexCorners';
+import { hexPixel } from '../common/map';
 import { hexOfLoc, locOf, type LocId } from '../common/location';
 import { statics } from '../common/pieces';
 import type { FireDeclaration } from '../sk1/fire';
 import { FORTIFIED_DRM } from '../sk1/fortified';
 import { expenditureKey, moveLoc, moveState } from '../sk1/moveState';
 import { pieceOf, sw, vehicleIfe, weapon } from '../sk1/status';
-import type { LosTrace } from '../sk1/terrain';
+import { terrainOf, type LosTrace } from '../sk1/terrain';
 import { entryHexside, heightOf, levelOf } from '../sk2/elevation';
+import { ceDrmApplies } from '../sk3/vehicleFire';
 import { vehicleMgOf } from '../sk3/vehicleMg';
 
 /*
@@ -32,7 +34,11 @@ import { vehicleMgOf } from '../sk3/vehicleMg';
  *   out, A6.11), and Snap Shots form a Mandatory Fire Group only with each other (a different aiming point).
  * - One Snap Shot per firer at a unit crossing a hexside, even if it spends more than one MF to enter the hex (the record
  *   under `ext['asl.snap']`, cleared when the stack's move ends). No Residual FP (A8.223).
- * Not here: Fire Lane Snap Shots (A9.221, with Fire Lanes); wall/hedge/rubble hexside TEM (no such terrain yet); a stack
+ * - Rubble in the hex entered or the hex left modifies the shot with its TEM when the LOF crosses one of that hex's
+ *   hexsides or hexspines on its way to the target hexside (A8.15 "a wall/hedge/SMOKE/rubble hexside/spine of a hex being
+ *   entered/exited"): the firer looks across the rubble (from above it, a half-level obstacle, B24.2) at the hexside.
+ *   A Fire Group takes the kindest trace for the target, as with a Woods-Road (B13.31).
+ * Not here: Fire Lane Snap Shots (A9.221, with Fire Lanes); wall/hedge hexside TEM (none on the boards); a stack
  * forced back by a concealed unit (A12.15, with concealment).
  */
 
@@ -49,14 +55,22 @@ interface SnapRecord {
  */
 export function snapSide(env: QueryEnv, target: LocId): [HexId, HexId] | null {
   const ms = moveState(env);
-  if (!ms?.hex || ms.off || !ms.from || ms.from === ms.hex || moveLoc(ms) !== target) return null;
+  return ms?.hex && ms.from && !snapWhyNot(env, target) ? [ms.hex, ms.from] : null;
+}
+
+/** Why there is no Snap Shot at the moving stack in `target` now (see `snapSide`), or null when there is one. */
+export function snapWhyNot(env: QueryEnv, target: LocId): string | null {
+  const ms = moveState(env);
+  if (!ms?.hex || ms.off || moveLoc(ms) !== target) return 'No Snap Shot: no stack is moving there (ASLRB A8.15)';
+  if (!ms.from || ms.from === ms.hex) return 'No Snap Shot: the stack has crossed no hexside on its latest MF here (it took the stairs, or has not left its hex) (ASLRB A8.15)';
   // No Snap Shot at Infantry moving from one connecting trench to another (ASLRB B27.54).
-  if (ms.trenchMove) return null;
+  if (ms.trenchMove) return 'No Snap Shot: the stack moved from one connecting trench to another (ASLRB B27.54)';
   const map = statics(env).map;
-  if (!map.hex(ms.from) || !map.hex(ms.hex) || sideToward(map, ms.hex, ms.from) === null) return null;
+  if (!map.hex(ms.from)) return 'No Snap Shot at a unit entering from off the map: that hexside is on no board (ASLRB A8.15)';
+  if (!map.hex(ms.hex) || sideToward(map, ms.hex, ms.from) === null) return 'No Snap Shot: no hexside between the hexes (ASLRB A8.15)';
   const last = ms.trail?.[ms.trail.length - 1];
-  if (!last || last.hex !== ms.hex || last.mp !== ms.mfHere) return null;
-  return [ms.hex, ms.from];
+  if (!last || last.hex !== ms.hex || last.mp !== ms.mfHere) return 'No Snap Shot: the stack has crossed no hexside on its latest MF here (a further MF in the hex, or round the same Bypass hex) (ASLRB A8.15)';
+  return null;
 }
 
 /** The two corners (0–5 of the hex entered) of a Snap Shot's hexside. */
@@ -128,6 +142,45 @@ function snapHeightAdvantage(env: QueryEnv, attack: { target: LocId; parts: { fi
   return true;
 }
 
+/** Whether the LOF from `firer`'s hex centre to point `v` reaches it through hex `hex` (its interior or along one of its
+ * hexsides/hexspines): just short of the vertex the line is inside that hex or on its edge. A hex is convex, so a line
+ * that enters it anywhere is in it at the vertex too. */
+function lofCrossesHex(env: QueryEnv, firer: HexId, hex: HexId, v: { x: number; y: number }): boolean {
+  const map = statics(env).map;
+  const f = map.hex(firer);
+  const h = map.hex(hex);
+  if (!f || !h || firer === hex) return false;
+  const fc = hexPixel(f.cube);
+  const len = Math.hypot(fc.x - v.x, fc.y - v.y);
+  if (len < 1e-6) return false;
+  const p = { x: v.x + ((fc.x - v.x) / len) * 1, y: v.y + ((fc.y - v.y) / len) * 1 };
+  const pts = [0, 1, 2, 3, 4, 5].map((k) => cornerPoint(h.cube, k));
+  // Corners run clockwise on the map (y down): inside or on the edge when every cross product is ≥ 0 (within a hair).
+  return pts.every((a, i) => {
+    const b = pts[(i + 1) % 6]!;
+    const cross = (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
+    return cross >= -1e-3 * Math.hypot(b.x - a.x, b.y - a.y);
+  });
+}
+
+/** The rubble TEM a Snap Shot's LOF crosses on its way to the target hexside (A8.15, B24.3), or 0. */
+export function snapRubbleTem(env: QueryEnv, attack: { snap?: [HexId, HexId]; parts: { firer: PieceId }[] }): number {
+  const snap = attack.snap;
+  if (!snap) return 0;
+  const corners = snapCorners(env, snap);
+  const entered = statics(env).map.hex(snap[0]);
+  if (!corners || !entered) return 0;
+  const vs = corners.map((k) => cornerPoint(entered.cube, k));
+  const firers = [...new Set(attack.parts.map((p) => locOf(env.state, pieceOf(env, p.firer))).filter((l): l is LocId => !!l).map(hexOfLoc))];
+  let best = 0;
+  for (const hex of snap) {
+    const t = terrainOf(env, hex);
+    if (!t.id.startsWith('rubble-')) continue;
+    if (firers.some((f) => vs.some((v) => lofCrossesHex(env, f, hex, v)))) best = Math.max(best, t.tem);
+  }
+  return best;
+}
+
 export const aslSnapShotModule: RuleModule = {
   id: 'asl.snapShot',
   ref: 'ASLRB A8.15, A8.223, C.5',
@@ -184,6 +237,23 @@ export const aslSnapShotModule: RuleModule = {
       label: '+1 Height Advantage TEM',
       when: ({ attack }, env) => !!attack.snap && snapHeightAdvantage(env, attack),
       apply: (v) => v + 1,
+    });
+    r.contribute({
+      id: 'asl.snap.rubble',
+      query: 'fire.drm',
+      ref: 'ASLRB A8.15, B24.3',
+      label: ({ attack }, env) => `+${snapRubbleTem(env, attack)} rubble TEM crossed (Snap Shot)`,
+      when: ({ attack }, env) => !!attack.snap && snapRubbleTem(env, attack) > 0,
+      apply: (v, { attack }, env) => v + snapRubbleTem(env, attack),
+    });
+    // ... though not for a vehicle whose crew takes the CE DRM (B10.31 "any other positive TEM or CE DRM").
+    r.contribute({
+      id: 'asl.snap.height-advantage.ce',
+      query: 'fire.unitDrm',
+      ref: 'ASLRB B10.31',
+      label: '-1 no Height Advantage with a CE DRM',
+      when: ({ attack, unit }, env) => !!attack.snap && snapHeightAdvantage(env, attack) && ceDrmApplies(env, attack, unit),
+      apply: (v) => v - 1,
     });
     // Who has made a Snap Shot at this crossing (one each, A8.15); forgotten when the stack's move is over.
     for (const event of ['sk1.fire.attack', 'sk1.fire.noLos']) {

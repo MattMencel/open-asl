@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Action, Engine, GameState, RuleModule } from '@asl/engine';
-import { SMOKE58, applyChange, aslCoreModules, ecForDr, ecMonthDrm, ecState, piecesModule, smoke58Counters, smokeGrenades, turnModule, windDirectionDrm, windOf, type HexTerrainSpec } from '../../src';
+import { SMOKE58, applyChange, aslCoreModules, ecForDr, ecMonthDrm, ecState, piecesModule, smoke58Counters, smokeGrenades, statics, turnModule, downwind, windDirectionDrm, windOf, type HexTerrainSpec } from '../../src';
 import { sk1CoreModules } from '../../src/sk1';
 import { sk2CoreModules } from '../../src/sk2';
 import { sk3CoreModules } from '../../src/sk3';
@@ -20,13 +20,13 @@ const PIECES: PieceSpec[] = [
   { id: 'g1', def: 'ge.467', side: 'ge', hex: 'uR4' },
 ];
 
-function game(opts: { dice?: number[]; startPhase?: string; scenario?: Record<string, unknown>; hexMarkers?: Record<string, Record<string, unknown>> } = {}) {
+function game(opts: { dice?: number[]; startPhase?: string; scenario?: Record<string, unknown>; hexMarkers?: Record<string, Record<string, unknown>>; terrain?: Record<string, HexTerrainSpec>; pieces?: PieceSpec[] } = {}) {
   return makeEngine({
     board: 'u',
-    terrain: TERRAIN,
+    terrain: opts.terrain ?? TERRAIN,
     scenario: { firstSide: 'ge', sides: [{ side: 'ge', name: 'German', nationality: 'ge', elr: 3 }, { side: 'ru', name: 'Russian', nationality: 'ru', elr: 3 }], month: 8, turns: 6, ...opts.scenario },
     modules: ASL,
-    pieces: PIECES,
+    pieces: opts.pieces ?? PIECES,
     ...(opts.dice ? { dice: opts.dice } : {}),
     ...(opts.startPhase ? { startPhase: opts.startPhase } : {}),
     ...(opts.hexMarkers ? { hexMarkers: opts.hexMarkers } : {}),
@@ -94,7 +94,8 @@ describe('Wind Changes (B25.65, B25.651)', () => {
     expect(applyChange({ force: 'breeze', dir: 2 }, 5)).toEqual({ force: 'heavy', dir: 2 });
     expect(applyChange({ force: 'heavy', dir: 2 }, 5)).toEqual({ force: 'breeze', dir: 2 });
     expect(applyChange({ force: 'none' }, 6)).toEqual({ force: 'breeze' });
-    expect(applyChange({ force: 'breeze', dir: 2 }, 6)).toEqual({ force: 'none', dir: 2 });
+    // A drop to No Wind loses the direction (B25.64 "until there is no wind"): the next wind rolls a new one.
+    expect(applyChange({ force: 'breeze', dir: 2 }, 6)).toEqual({ force: 'none' });
     expect(applyChange({ force: 'heavy', dir: 2 }, 6)).toEqual({ force: 'breeze', dir: 2 });
   });
 
@@ -135,6 +136,38 @@ describe('Heavy Winds and Smoke (B25.63, A24.6)', () => {
     expect(engine.env(s).query('unit.smoke', { unit: 'g1' }, 0)).toBe(0);
     s = act(engine, s, { type: 'move.start', units: ['g1'] }).state;
     expect(engine.legalActions(s, 'ge').some((a) => a.type === 'move.smoke')).toBe(false);
+  });
+
+  it('leaves the Smoke in an Interior Building hex when Heavy Winds begin: No Wind is in effect there (B25.63)', () => {
+    const probe = game();
+    const ring = statics(probe.engine.env(probe.state)).map.neighbors('uK4');
+    const block: HexTerrainSpec = { terrain: 'building-stone', buildingId: 'u-X' };
+    const terrain = { ...TERRAIN, uK4: block, ...Object.fromEntries(ring.map((h) => [h, block])) };
+    const markers = { uK4: { [SMOKE58.kind]: 'smoke@ge' }, uR4: { smoke: 1 } };
+    const { engine, state } = game({ dice: [6, 1, 3, 4], scenario: { ec: 'moderate', weather: undefined }, hexMarkers: markers, startPhase: 'RPh', terrain });
+    const s = until(engine, state, 'MPh', { turn: 1, attacker: 'ge' });
+    expect(windOf(engine.env(s)).force).toBe('heavy');
+    expect(smokeGrenades(s.hexMarkers['uR4'])).toBe(0);
+    expect(smoke58Counters(s.hexMarkers['uK4'])).toHaveLength(1);
+  });
+
+  it('a FT has no Long Range FP in Heavy Winds unless fired directly with the wind (B25.63, A22.1)', () => {
+    const pieces: PieceSpec[] = [...PIECES, { id: 'ft', def: 'ge.FT', side: 'ge', heldBy: 'g1' }];
+    const illegal = (force: string, target: string) => {
+      const { engine, state } = game({ scenario: { ec: 'moderate', weather: { wind: { from: 'W', force, dir: 0 } } }, pieces, startPhase: 'PFPh' });
+      const env = engine.env(state);
+      return env.query('fire.illegal', { decl: { units: [], sw: ['ft'], target }, mode: 'prep', side: 'ge' }, null) ?? '';
+    };
+    const { engine, state } = game({ pieces });
+    const env = engine.env(state);
+    const one = downwind(env, 'uR4', 0)!;
+    const withWind = downwind(env, one, 0)!;
+    const map = statics(env).map;
+    const across = [...map.hexes()].map((h) => h.id).find((h) => map.distance('uR4', h) === 2 && h !== withWind)!;
+    expect(illegal('heavy', withWind)).not.toMatch(/Long Range/);
+    expect(illegal('heavy', across)).toMatch(/no Long Range FP in Heavy Winds/);
+    expect(illegal('heavy', one)).not.toMatch(/Long Range/);
+    expect(illegal('breeze', across)).not.toMatch(/Long Range/);
   });
 });
 

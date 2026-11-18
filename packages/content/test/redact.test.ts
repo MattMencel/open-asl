@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { deepEqual, type GameState, type LoggedEvent } from '@asl/engine';
-import { fortCounters, fortifiedState, hiddenFrom, redactState, scatterState, shownCounter, type FortRecord, type FortifiedState, type ScatterState } from '@asl/rules';
-import { PLAYABLE_SCENARIOS, mulberry, newSk1Game } from '../src';
+import { breaches, fortCounters, fortifiedKnownTo, fortifiedState, hiddenFrom, redactState, scatterState, shownCounter, type Breach, type FortRecord, type FortifiedState, type ScatterState } from '@asl/rules';
+import { ASL_TESTBED_SCENARIO, PLAYABLE_SCENARIOS, mulberry, newGame, newSk1Game } from '../src';
 
 /** Strings the viewer must never receive: ids of pieces hidden from them, and the other side's unrevealed secrets. */
 function secretsFrom(engine: ReturnType<typeof newSk1Game>['engine'], state: GameState, viewer: string | null): string[] {
@@ -58,6 +58,18 @@ describe('redacted views on random play', () => {
             expect(fort.buildings.every((b) => realFort.revealed.includes(b)), `${viewer} sees unrevealed fortified buildings`).toBe(true);
             for (const e of stream) if (e.type === 'sk1.fortified') expect((e.payload as { state: FortifiedState }).state.buildings.every((b) => realFort.revealed.includes(b))).toBe(true);
             if (realFort.buildings.some((b) => !realFort.revealed.includes(b))) secretsSeen++;
+            // Designated by Location (B23.911): only the revealed Locations, upper levels included.
+            if (realFort.locations) {
+              const shown = realFort.revealedLocs ?? [];
+              expect(fort.locations ?? [], `${viewer} sees unrevealed fortified Locations`).toEqual(realFort.locations.filter((l) => shown.includes(l)));
+              for (const e of stream) if (e.type === 'sk1.fortified') expect(((e.payload as { state: FortifiedState }).state.locations ?? []).every((l) => shown.includes(l))).toBe(true);
+              if (realFort.locations.some((l) => !shown.includes(l))) secretsSeen++;
+            }
+            // Breaches (B23.9221): only those of Locations the viewer knows are fortified.
+            const env = engine.env(t.state);
+            const seenBreaches = (snapshot.ext['asl.breach'] as Breach[] | undefined) ?? [];
+            expect(seenBreaches, `${viewer} sees a Breach of an unrevealed Location`).toEqual(breaches(env).filter((b) => fortifiedKnownTo(env, b.loc, viewer)));
+            for (const e of stream) if (e.type === 'asl.breach.he' && (e.payload as { breached: boolean }).breached) expect(fortifiedKnownTo(env, (e.payload as { loc: string }).loc, viewer)).toBe(true);
           }
           // Fortification counters (full ASL A12.33, B28.1): a viewer sees exactly what `shownCounter` allows, nothing of a hidden one's hex, factors or arc.
           const forts = (snapshot.ext['asl.fortifications'] as { counters: FortRecord[] } | undefined)?.counters;
@@ -113,4 +125,23 @@ describe('redacted views on random play', () => {
       if (s0.sides.some((side) => hiddenFrom(env, s0, side).size > 0) || scatterState(env)) expect(secretsSeen).toBeGreaterThan(0);
     });
   }
+});
+
+describe('redacted views of a game being created', () => {
+  it('the Dummy Minefield Secret dr (B28.47) reaches its owner only: no dice for the other seat or a spectator', () => {
+    const { engine, init, events, state } = newGame(ASL_TESTBED_SCENARIO, 'redact-create');
+    const start = engine.initialState(init);
+    const isSecret = (e: LoggedEvent) => e.type === 'dice.rolled' && /Secret dr/.test((e.payload as { label: string }).label);
+    expect(events.some(isSecret)).toBe(true);
+    for (const viewer of ['ru', 'ge', null]) {
+      const redact = (s: GameState) => redactState(engine, s, viewer);
+      const stream = engine.redactTransition(viewer, redact, start, events as LoggedEvent[]);
+      expect(deepEqual(engine.applyEvents(redact(start), stream), redact(state))).toBe(true);
+      if (viewer === 'ru') expect(stream.some(isSecret)).toBe(true);
+      else {
+        expect(JSON.stringify(stream), `${viewer} sees the Secret dr`).not.toMatch(/Secret dr/);
+        expect(stream.some((e) => e.type === 'asl.fort.dummies')).toBe(false);
+      }
+    }
+  });
 });

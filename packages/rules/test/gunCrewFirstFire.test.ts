@@ -118,3 +118,42 @@ describe('Final Fire of a SW whose holder is marked First Fire (SK4 3.3.3, SK1 4
     expect(attackFp(env, buildAttack(env, { units: [], sw: ['l'], target: 'yK7' }, 'final', 'ge'))).toBe(3);
   });
 });
+
+/*
+ * A crew fires its Gun or its own FP, not both (SK4 4.0): its own fire marks the Gun's fire too in every phase. Prep
+ * Fire marks "the firing unit (and Weapon)" (SK4 3.2.2), and only units "which did not fire in the PFPh" fire in the
+ * AFPh (ASLRB A3.5).
+ */
+describe("a Gun after its crew fired its own FP (SK4 4.0)", () => {
+  const ge = (dice: number[]) => makeEngine({ scenario: { ...RU_VS_GE, firstSide: 'ge' }, extra, startPhase: 'PFPh', dice, pieces: [...crewGun, ...russians] });
+  const shot = (target: string, intensive = false) => ({ type: 'fire.ordnance', shot: { weapon: 'gun', target, targetType: 'ITT', ...(intensive ? { intensive } : {}) } });
+  const gunShots = (engine: Engine, s: GameState) =>
+    (engine.legalActions(s, 'ge').filter((a) => a.type === 'fire.ordnance') as unknown as { shot: { weapon: string } }[]).filter((a) => a.shot.weapon === 'gun');
+
+  it('a crew that Prep Fired its own FP fires its Gun neither in the PFPh nor in the AFPh', () => {
+    const { engine, state } = ge([6, 5]);
+    const s = act(engine, state, { type: 'fire', decl: { units: ['c'], sw: [], target: 'yK8' } }).state;
+    expect(s.pieces['c']!.tags['fire']).toBe('prep');
+    expect(validate(engine, s, shot('yK8'))).toMatch(/crew that fired its own FP this phase/);
+    expect(validate(engine, s, shot('yK8', true))).toMatch(/crew that fired its own FP this phase/);
+    expect(gunShots(engine, s)).toEqual([]);
+    const afph = toPhase(engine, s, 'AFPh', 'ge');
+    expect(validate(engine, afph, shot('yK8'))).toMatch(/crew that fired its own FP in the PFPh/);
+    expect(gunShots(engine, afph)).toEqual([]);
+    // Next Player Turn the crew's marker is gone and the Gun fires.
+    const next = toPhase(engine, afph, 'DFPh', 'ru');
+    expect(next.pieces['c']!.tags['fire']).toBeUndefined();
+    expect(validate(engine, next, { type: 'fire.ordnance', shot: { weapon: 'gun', target: 'yK8', targetType: 'ITT' } })).toBeNull();
+  });
+
+  it('a Gun that keeps ROF fires again; one that loses it is done for the phase', () => {
+    // To Hit 3+1: colored 1 within ROF 2, a hit (IFT 6+6, no effect). Then 4+5: colored 5, ROF lost (a miss).
+    const { engine, state } = ge([3, 1, 6, 6, 4, 5]);
+    let s = act(engine, state, shot('yK8')).state;
+    expect(validate(engine, s, shot('yK8'))).toBeNull();
+    s = act(engine, s, shot('yK8')).state;
+    expect(validate(engine, s, shot('yK8'))).toMatch(/already fired this phase/);
+    // Nor may the crew then fire its own FP.
+    expect(validate(engine, s, { type: 'fire', decl: { units: ['c'], sw: [], target: 'yK8' } })).not.toBeNull();
+  });
+});

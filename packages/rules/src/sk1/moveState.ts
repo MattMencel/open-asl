@@ -13,10 +13,19 @@ export const moveLoc = (ms: Pick<MoveState, 'hex' | 'level'> & { sub?: SubLoc })
 
 /**
  * What Defensive First Fire at the moving stack attacks: its moving units and those broken or pinned in this
- * Location by earlier Defensive First Fire (`stopped`; SK1 3.3.1), as long as they are still on the map.
+ * Location by earlier Defensive First Fire (`stopped`; SK1 3.3.1), as long as they are still on the map. Full ASL: a
+ * stack back in a hex where it left units in Bypass is attacked with them, still in the open part of that hex until the
+ * end of their MPh (ASLRB A4.32, A4.33; the Starter Kit never sets `leftBypass`).
  */
-export const firstFireTargets = (env: QueryEnv, ms: MoveState): PieceId[] =>
-  [...ms.units, ...(ms.stopped ?? [])].filter((u) => env.state.pieces[u]?.loc.kind === 'hex');
+export const firstFireTargets = (env: QueryEnv, ms: MoveState): PieceId[] => {
+  const left = ms.hex && !ms.level && !ms.sub ? (ms.leftBypass ?? []).filter((r) => r.hex === ms.hex).flatMap((r) => Object.keys(r.units)) : [];
+  const onMap = (u: PieceId) => {
+    const l = env.state.pieces[u]?.loc;
+    return l?.kind === 'hex' && (!left.includes(u) || (l.hex === ms.hex && !l.level && !l.sub));
+  };
+  if (left.length === 0) return [...ms.units, ...(ms.stopped ?? [])].filter((u) => env.state.pieces[u]?.loc.kind === 'hex');
+  return [...new Set([...ms.units, ...(ms.stopped ?? []), ...left])].filter(onMap);
+};
 
 /**
  * Identity of the moving stack's current MF/MP expenditure, for the Mandatory Fire Group rule: same-hex

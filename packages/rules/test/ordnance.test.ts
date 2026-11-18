@@ -299,3 +299,46 @@ describe('Guns as targets (SK4 6.7) and the Gunshield (6.6)', () => {
     expect(res).toMatchObject({ drm: 2, explain: [{ label: '+2 Gunshield' }] });
   });
 });
+
+describe('no Rate of Fire for ordnance in the AFPh (SK4 1.2.4.1 "except the AFPh")', () => {
+  const BR_FIRST = { ...GE_VS_BR, firstSide: 'br' };
+  it('a Gun firing in the AFPh loses ROF however low the colored dr', () => {
+    const probe = makeEngine({ scenario: BR_FIRST, extra, pieces: [{ id: 'x', def: 'ge.467', side: 'ge', hex: 'yK5' }] });
+    const ca = spineFor(probe.engine, probe.state, 'yR5', 'yO5');
+    // DR 1+2: colored 2 is within the 40mm's ROF 3.
+    const { engine, state } = makeEngine({
+      scenario: BR_FIRST,
+      extra,
+      startPhase: 'AFPh',
+      dice: [1, 2, 6, 6, 6, 6],
+      pieces: [
+        { id: 'c1', def: 'br.228c', side: 'br', hex: 'yR5' },
+        { id: 'g40', def: 'br.AA40L', side: 'br', heldBy: 'c1', tags: { ca } },
+        { id: 'e1', def: 'ge.467', side: 'ge', hex: 'yO5' },
+      ],
+    });
+    const t = act(engine, state, { type: 'fire.ordnance', shot: { weapon: 'g40', target: 'yO5', targetType: 'ITT' } });
+    expect(t.events.find((e) => e.type === 'sk2.ordnance.rof')!.payload).toMatchObject({ kept: false, why: 'afph', colored: 2 });
+  });
+});
+
+describe('Area Target Type fire uses up a Gun\'s ROF (SK4 3.2.4; ASLRB C3.33)', () => {
+  it('reports the loss as the Area Target Type\'s, not as a colored dr above a ROF of 0', () => {
+    const probe = makeEngine({ scenario: GE_VS_BR, extra, pieces: [{ id: 'x', def: 'ge.467', side: 'ge', hex: 'yK5' }] });
+    const ca = spineFor(probe.engine, probe.state, 'yK5', 'yO5');
+    // DR 1+1 on the Area Target Type: whatever it hits, colored 1 would be within ROF 3 on the Infantry Target Type.
+    const { engine, state } = makeEngine({
+      scenario: GE_VS_BR,
+      extra,
+      startPhase: 'PFPh',
+      dice: [1, 1, 6, 6, 6, 6, 6, 6],
+      pieces: [
+        { id: 'c1', def: 'ge.228c', side: 'ge', hex: 'yK5' },
+        { id: 'g88', def: 'ge.AA88L', side: 'ge', heldBy: 'c1', tags: { ca } },
+        { id: 'b1', def: 'br.457', side: 'br', hex: 'yO5' },
+      ],
+    });
+    const t = act(engine, state, { type: 'fire.ordnance', shot: { weapon: 'g88', target: 'yO5', targetType: 'ATT' } });
+    expect(t.events.find((e) => e.type === 'sk2.ordnance.rof')!.payload).toMatchObject({ kept: false, why: 'area' });
+  });
+});

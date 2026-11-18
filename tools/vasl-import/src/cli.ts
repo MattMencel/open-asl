@@ -64,6 +64,8 @@ const MARKERS = [
   // its force faces, the Gust/Change face, TI and Labor (B24.7, B24.8), grey drifting Smoke.
   'MS/Flame', 'MS/Blaze', 'ML/Rubble', 'ML/Wind1', 'ML/Wind2', 'ML/Wind3', 'ML/Wind4', 'ML/Wind5', 'ML/Wind6', 'ML/WindNo', 'ML/WindMB', 'ML/WindHW', 'ML/WindB',
   'MS/ti=TI', 'MS/Labor1', 'MS/Labor2', 'ML/Smk2gr',
+  // The ½" Smoke grenade counter (SK4 3.3.1; ASLRB A24.1): +2, gone at the end of the Player Turn.
+  'MS/Smk12',
   // Full ASL minefields (ASLRB B28): the blank Known/revealed-presence counter, the A-P strengths, the A-T factors, the
   // Dummy face and the arrowed Known Minefield counters (B28.46).
   'MS/Mine', 'MS/MineD', 'MS/MineAP06', 'MS/MineAP08', 'MS/MineAP12', 'MS/KnownMineleft', 'MS/KnownMineright',

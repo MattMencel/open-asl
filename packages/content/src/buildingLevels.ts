@@ -34,42 +34,45 @@ export interface BuildingLevels {
   note?: string;
 }
 
-/**
- * Boards m, n and o (the SK4 HR boards, added later): taken from the importer's
- * buildingId grouping by the same rule (multi-hex: a Two Story House; single-hex: a Single Story House). Not yet checked against the board art as t–z were: `vasl` is a placeholder.
+/*
+ * Boards m, n and o (the SK4 HR boards) were judged the same way on 2026-11-17: every building hex centre is a round dot
+ * (no stairwell square, so no Multi-Story Building), and of the ten hexsides between adjacent building hexes only m
+ * I5-J5 and CC3-DD3 are crossed by a depiction: those two are Two Story Houses, every other building a Single Story
+ * House. Board n has no building. The VASL codes agree (51 on the two multi-hex buildings; 50 or 203 "Multiple" on the
+ * single-hex ones). Under PTO Terrain a Single Story House hex with two or more separate buildings and no partial
+ * depiction is a hut (ASLRB G5.1, SK4 8.2): that is the terrain's rule, not a level.
  */
-const UNREVIEWED = 'from the import grouping (2026-11-10 rebase); not yet checked against the art';
 
 export const BUILDING_LEVELS: Record<string, Record<string, BuildingLevels>> = {
   m: {
-    'm-B1': { kind: 'single', hexes: ['mC5'], vasl: 50, note: UNREVIEWED },
-    'm-B2': { kind: 'single', hexes: ['mH6'], vasl: 50, note: UNREVIEWED },
-    'm-B3': { kind: 'single', hexes: ['mH9'], vasl: 50, note: UNREVIEWED },
-    'm-B4': { kind: 'two', hexes: ['mI5', 'mJ5'], vasl: 51, note: UNREVIEWED },
-    'm-B5': { kind: 'single', hexes: ['mI7'], vasl: 50, note: UNREVIEWED },
-    'm-B6': { kind: 'single', hexes: ['mI8'], vasl: 50, note: UNREVIEWED },
-    'm-B7': { kind: 'single', hexes: ['mK6'], vasl: 50, note: UNREVIEWED },
-    'm-B8': { kind: 'single', hexes: ['mL7'], vasl: 50, note: UNREVIEWED },
-    'm-B9': { kind: 'single', hexes: ['mV7'], vasl: 50, note: UNREVIEWED },
-    'm-B10': { kind: 'single', hexes: ['mX3'], vasl: 50, note: UNREVIEWED },
-    'm-B11': { kind: 'two', hexes: ['mCC3', 'mDD3'], vasl: 51, note: UNREVIEWED },
-    'm-B12': { kind: 'single', hexes: ['mCC5'], vasl: 50, note: UNREVIEWED },
-    'm-B13': { kind: 'single', hexes: ['mCC7'], vasl: 50, note: UNREVIEWED },
-    'm-B14': { kind: 'single', hexes: ['mDD5'], vasl: 50, note: UNREVIEWED },
-    'm-B15': { kind: 'single', hexes: ['mK9'], vasl: 50, note: UNREVIEWED },
+    'm-B1': { kind: 'single', hexes: ['mC5'], vasl: 203 },
+    'm-B2': { kind: 'single', hexes: ['mH6'], vasl: 203 },
+    'm-B3': { kind: 'single', hexes: ['mH9'], vasl: 203 },
+    'm-B4': { kind: 'two', hexes: ['mI5', 'mJ5'], vasl: 51 },
+    'm-B5': { kind: 'single', hexes: ['mI7'], vasl: 203 },
+    'm-B6': { kind: 'single', hexes: ['mI8'], vasl: 50 },
+    'm-B7': { kind: 'single', hexes: ['mK6'], vasl: 203 },
+    'm-B8': { kind: 'single', hexes: ['mL7'], vasl: 203 },
+    'm-B9': { kind: 'single', hexes: ['mV7'], vasl: 203 },
+    'm-B10': { kind: 'single', hexes: ['mX3'], vasl: 203 },
+    'm-B11': { kind: 'two', hexes: ['mCC3', 'mDD3'], vasl: 51 },
+    'm-B12': { kind: 'single', hexes: ['mCC5'], vasl: 203 },
+    'm-B13': { kind: 'single', hexes: ['mCC7'], vasl: 203 },
+    'm-B14': { kind: 'single', hexes: ['mDD5'], vasl: 203 },
+    'm-B15': { kind: 'single', hexes: ['mK9'], vasl: 203 },
   },
   n: {
   },
   o: {
-    'o-B1': { kind: 'single', hexes: ['oY5'], vasl: 50, note: UNREVIEWED },
-    'o-B2': { kind: 'single', hexes: ['oY8'], vasl: 50, note: UNREVIEWED },
-    'o-B3': { kind: 'single', hexes: ['oZ8'], vasl: 50, note: UNREVIEWED },
-    'o-B4': { kind: 'single', hexes: ['oAA4'], vasl: 50, note: UNREVIEWED },
-    'o-B5': { kind: 'single', hexes: ['oAA5'], vasl: 50, note: UNREVIEWED },
-    'o-B6': { kind: 'single', hexes: ['oBB3'], vasl: 50, note: UNREVIEWED },
-    'o-B7': { kind: 'single', hexes: ['oCC6'], vasl: 50, note: UNREVIEWED },
-    'o-B8': { kind: 'single', hexes: ['oDD5'], vasl: 50, note: UNREVIEWED },
-    'o-B9': { kind: 'single', hexes: ['oDD7'], vasl: 50, note: UNREVIEWED },
+    'o-B1': { kind: 'single', hexes: ['oY5'], vasl: 203 },
+    'o-B2': { kind: 'single', hexes: ['oY8'], vasl: 203 },
+    'o-B3': { kind: 'single', hexes: ['oZ8'], vasl: 203 },
+    'o-B4': { kind: 'single', hexes: ['oAA4'], vasl: 203 },
+    'o-B5': { kind: 'single', hexes: ['oAA5'], vasl: 203 },
+    'o-B6': { kind: 'single', hexes: ['oBB3'], vasl: 50 },
+    'o-B7': { kind: 'single', hexes: ['oCC6'], vasl: 203 },
+    'o-B8': { kind: 'single', hexes: ['oDD5'], vasl: 203 },
+    'o-B9': { kind: 'single', hexes: ['oDD7'], vasl: 203 },
   },
   t: {
     't-B1': { kind: 'single', hexes: ['tI2'], vasl: 50 },

@@ -41,6 +41,8 @@ declare module '@asl/engine' {
     'rout.beneath': { ctx: { unit: PieceId; from: HexId; to: LocId }; value: { cost: number } | string | null };
     /** Full ASL: MF a routing unit pays on top of a step's cost to leave the entrenchment it stands beneath (ASLRB B27.41); 0 in the Starter Kit. */
     'rout.exitCost': { ctx: { unit: PieceId; from: HexId; to: HexId }; value: number };
+    /** Full ASL: MF a routing unit pays to take the stairs to Location `to` of its hex (ASLRB B23.4: one; A24.7 one more into a SMOKE Location). */
+    'rout.stairsMf': { ctx: { unit: PieceId; to: LocId }; value: number };
   }
 }
 
@@ -160,13 +162,28 @@ export function routRequirement(env: QueryEnv, unit: Piece): RoutReason | null {
 export const mustRout = (env: QueryEnv, unit: Piece): boolean => routRequirement(env, unit) !== null;
 
 /** The broken units of the side now routing, with whether each must rout and whether it is dealt with. */
-export function pendingRouts(env: QueryEnv): { unit: PieceId; must: boolean; reason: RoutReason | null; done: boolean }[] {
+export function pendingRouts(env: QueryEnv): { unit: PieceId; must: boolean; reason: RoutReason | null; done: boolean; cannot: RoutBar | null }[] {
   const st = routState(env);
   if (!st || env.state.phase !== 'RtPh') return [];
   return Object.values(env.state.pieces)
     .filter((p) => p.side === st.side && p.loc.kind === 'hex' && isBroken(p))
     .sort(byId)
-    .map((p) => ({ unit: p.id, must: st.mustRout.includes(p.id), reason: st.mustRout.includes(p.id) ? routRequirement(env, p) : null, done: st.done.includes(p.id) }));
+    .map((p) => ({ unit: p.id, must: st.mustRout.includes(p.id), reason: st.mustRout.includes(p.id) ? routRequirement(env, p) : null, done: st.done.includes(p.id), cannot: routBarred(env, p) }));
+}
+
+/** Why a broken unit may not rout at all this RtPh: not under DM, or in Melee. */
+export type RoutBar = 'noDm' | 'melee';
+export const ROUT_BAR_TEXT: Record<RoutBar, string> = { noDm: 'Only broken units under DM may rout', melee: 'A unit in Melee cannot rout' };
+
+/**
+ * Why a broken unit may not rout at all this RtPh, or null: only a unit under DM routs (SK1 3.6; every unit that must
+ * rout is marked DM as the phase begins), and none in Melee.
+ */
+function routBarred(env: QueryEnv, u: Piece): RoutBar | null {
+  if (!hasDm(u)) return 'noDm';
+  const start = locOf(env.state, u);
+  if (!start || inMelee(env, start)) return 'melee';
+  return null;
 }
 
 /** Units that must rout and have not yet (and are still on the map). */
@@ -553,6 +570,9 @@ function headingRefusal(env: QueryEnv, v: RoutView, to: LocId, base: string): st
  * decided by hex per SK1 3.6: it comes down to leave its hex, and it may climb only in a hex it may end its rout in,
  * as its last step. Starter Kit hexes have one Location, so this never applies there.
  */
+/** The MF of a rout up or down the stairs of its hex to `toLoc` (full ASL; the Starter Kit has no levels). */
+const stairsMf = (env: QueryEnv, unit: PieceId, toLoc: LocId): number => env.query('rout.stairsMf', { unit, to: toLoc }, LEVEL_CHANGE_MF);
+
 function stairStepCheck(env: QueryEnv, v: RoutView, toLoc: LocId, lowCrawl: boolean, woods: boolean): string | null {
   if (!adjacentLocs(env, locId(v.at, v.level)).includes(toLoc)) return 'There are no stairs to that level here';
   if (lowCrawl || woods) return 'Low Crawl and Woods-Road choices do not apply on the stairs';
@@ -561,12 +581,13 @@ function stairStepCheck(env: QueryEnv, v: RoutView, toLoc: LocId, lowCrawl: bool
   const all = [...here, pieceOf(env, v.unit)];
   if (squadEquivalents(env, all) > 3) return 'Stacking limit: 3 squad-equivalents';
   if (all.filter((p) => smc(env, p)).length > 4) return 'Stacking limit: 4 SMC';
-  if (v.spent + LEVEL_CHANGE_MF > v.mf) return `Not enough MF (${v.mf}) for that rout path`;
+  const mf = stairsMf(env, v.unit, toLoc);
+  if (v.spent + mf > v.mf) return `Not enough MF (${v.mf}) for that rout path`;
   if (levelOfLoc(toLoc) > v.level) {
     if (!canStop(env, v)) return 'A routing unit may go upstairs only in a hex where its rout may end (SK1 3.6 destination; interim rule)';
     return null;
   }
-  if (!finishReachable(env, afterStep(env, v, toLoc, LEVEL_CHANGE_MF))) return 'Rout must head for the nearest legal building or woods hex';
+  if (!finishReachable(env, afterStep(env, v, toLoc, mf))) return 'Rout must head for the nearest legal building or woods hex';
   return null;
 }
 
@@ -598,9 +619,10 @@ function startIllegal(env: QueryEnv, st: RoutState, a: { unit: PieceId; side: Si
   if (!u || u.side !== st.side || u.side !== a.side) return 'Not your unit to rout';
   if (st.active) return st.active.unit === a.unit ? 'The unit is already routing' : `${st.active.unit} has not finished routing`;
   if (st.done.includes(a.unit)) return 'Unit already routed';
-  if (!isBroken(u) || !hasDm(u)) return 'Only broken units under DM may rout';
-  const start = locOf(env.state, u);
-  if (!start || inMelee(env, start)) return 'Unit cannot rout';
+  if (!isBroken(u)) return 'Only broken units under DM may rout';
+  const barred = routBarred(env, u);
+  if (barred) return ROUT_BAR_TEXT[barred];
+  const start = locOf(env.state, u)!;
   // SK1 3.6: an unpinned, unbroken leader already stacked with the unit (in its Location) may rout with it, once.
   for (const l of a.leaders ?? []) {
     const lp = env.state.pieces[l];
@@ -776,7 +798,7 @@ export const routModule: RuleModule = {
         let act = st.active?.unit === a.unit ? st.active : beginRout(ctx, a.unit, a.leaders ?? []);
         const v = activeView(ctx, act);
         const stairs = routNode(a.to) === v.at;
-        const costOrWhy = a.lowCrawl ? v.mf : stairs ? LEVEL_CHANGE_MF : beneathOrStepCost(ctx, a.unit, v.at, a.to, !!a.woods, !!a.beneath);
+        const costOrWhy = a.lowCrawl ? v.mf : stairs ? stairsMf(ctx, a.unit, a.to) : beneathOrStepCost(ctx, a.unit, v.at, a.to, !!a.woods, !!a.beneath);
         const cost = typeof costOrWhy === 'string' ? 0 : costOrWhy;
         const r = enterHex(ctx, act, a.to, cost, !!a.lowCrawl, true, !stairs && !a.woods && woodsRoadStep(ctx, v.at, hexOfLoc(a.to)), !!a.beneath);
         act = r.act;
@@ -1034,11 +1056,15 @@ function executeRout(ctx: Ctx, a: RoutAction & { type: 'rout' }) {
 }
 
 /** Interdiction NMC: failure means Casualty Reduction (not breaking again); pin stops the rout. */
-function interdictionCheck(ctx: Ctx, unit: PieceId, leaderDrm: number): CheckOutcome {
+/**
+ * The Interdiction NMC. `unbroken`: a unit leaving a Blaze as if Withdrawing (full ASL B25.4), for which an Original 12 is
+ * simply a failure (Casualty Reduction, A10.53), not the broken unit's elimination.
+ */
+export function interdictionCheck(ctx: Ctx, unit: PieceId, leaderDrm: number, unbroken = false): CheckOutcome {
   const morale = ctx.query('unit.morale', { unit }, 0);
   const roll = ctx.roll(`Interdiction NMC for ${unit}`);
   const final = roll.total + leaderDrm;
-  if (roll.total === 12) {
+  if (roll.total === 12 && !unbroken) {
     ctx.emit('piece.eliminated', { id: unit, reason: 'Interdiction: original 12 while broken' });
     return 'eliminated';
   }

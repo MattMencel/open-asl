@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import type { RuleModule } from '@asl/engine';
+import type { GameState, RuleModule } from '@asl/engine';
+import { aslCoreModules, defaultPlacement, piecesModule, placementIllegal, statics, turnModule } from '../../src';
+import { sk1CoreModules } from '../../src/sk1';
 import { sk2CoreModules } from '../../src/sk2';
 import { sk3CoreModules } from '../../src/sk3';
 import { RU_VS_GE, act, makeEngine, type PieceSpec } from '../fixtures';
@@ -161,5 +163,54 @@ describe('A6.5 RECIPROCITY, A6.6 UNITS', () => {
     const attack = t.events.find((e) => e.type === 'sk1.fire.attack')!.payload as { drm: number; fp: number };
     expect(attack.fp).toBe(7);
     expect(attack.drm).toBe(0);
+  });
+});
+
+describe('A2.5 ENTRY, A2.51 OFFBOARD SETUP, A2.6 EXIT, A2.9 SETUP LIMITATIONS under the full ASL ruleset', () => {
+  const ASL: RuleModule[] = [piecesModule, turnModule, ...sk1CoreModules, ...sk2CoreModules, ...sk3CoreModules, ...aslCoreModules];
+  type MapApi = { offboard(e: string): { id: string }[]; offboardNeighbors(h: string): { onboard: string[]; offboard: string[] } };
+  const mapOf = (engine: ReturnType<typeof makeEngine>['engine'], state: GameState) => statics(engine.env(state)).map as unknown as MapApi;
+  const entering = (id: string): PieceSpec => ({ id, def: 'ru.447', side: 'ru', tags: { force: 0, entryTurn: 1, entryEdge: 'N' } });
+  const scenario = { ...RU_VS_GE, forces: [{ side: 'ru', units: [{ def: 'ru.447', count: 4 }], setup: { kind: 'enter' as const, turn: 1, edge: 'N' } }], exits: [{ side: 'ru', edge: 'N' }] };
+
+  it('units set up offboard under the stacking limits (A2.51, A2.9), then enter onto the board from there (A2.5)', () => {
+    const rph = makeEngine({ pieces: ['a', 'b', 'c', 'd'].map(entering), scenario, modules: ASL, startPhase: 'RPh' });
+    const env = rph.engine.env(rph.state);
+    const off = mapOf(rph.engine, rph.state).offboard('N')[5]!.id;
+    const todo = ['a', 'b', 'c', 'd'].map((id) => rph.state.pieces[id]!);
+    expect(placementIllegal(env, 'ru', todo, Object.fromEntries(todo.map((p) => [p.id, off])))).toMatch(/Stacking limit exceeded/);
+    const auto = defaultPlacement(env, 'ru', todo)!;
+    expect(placementIllegal(env, 'ru', todo, auto)).toBeNull();
+    // In the MPh a squad in that offboard hex steps onto the board.
+    const mph = makeEngine({ pieces: [entering('a'), { id: 'g', def: 'ge.467', side: 'ge', hex: 'yY10' }], scenario, modules: ASL, startPhase: 'MPh' });
+    const s0: GameState = { ...mph.state, pieces: { ...mph.state.pieces, a: { ...mph.state.pieces['a']!, loc: { kind: 'offboard', edge: 'N', hex: off } } } };
+    const onto = mapOf(mph.engine, s0).offboardNeighbors(off).onboard[0]!;
+    let s = act(mph.engine, s0, { type: 'move.start', units: ['a'] }).state;
+    s = act(mph.engine, s, { type: 'move.step', to: onto }).state;
+    expect(s.pieces['a']!.loc).toEqual({ kind: 'hex', hex: onto });
+  });
+
+  it('a unit on the map edge exits across it in its MPh where the scenario allows (A2.6)', () => {
+    const probe = makeEngine({ pieces: [], scenario, modules: ASL });
+    const off = mapOf(probe.engine, probe.state).offboard('N')[5]!.id;
+    const edge = mapOf(probe.engine, probe.state).offboardNeighbors(off).onboard[0]!;
+    const { engine, state } = makeEngine({ pieces: [{ id: 'a', def: 'ru.447', side: 'ru', hex: edge }, { id: 'g', def: 'ge.467', side: 'ge', hex: 'yY10' }], scenario, modules: ASL, startPhase: 'MPh' });
+    const s = act(engine, state, { type: 'move.start', units: ['a'] }).state;
+    const exit = engine.legalActions(s, 'ru').find((a) => a.type === 'move.step' && !statics(engine.env(s)).map.hex(a['to'] as string));
+    expect(exit).toBeDefined();
+    expect(act(engine, s, exit as never).state.pieces['a']!.loc.kind).toBe('offboard');
+  });
+
+  it('three squads may set up in one hex, not four (A2.9, A5.1)', () => {
+    const area = { ...RU_VS_GE, forces: [{ side: 'ru', units: [{ def: 'ru.447', count: 4 }], setup: { kind: 'area' as const, description: 'N5-N6', hexes: ['yN5', 'yN6'] } }] };
+    const pieces = ['a', 'b', 'c', 'd'].map((id): PieceSpec => ({ id, def: 'ru.447', side: 'ru', tags: { force: 0 } }));
+    const made = makeEngine({ pieces, scenario: area, modules: ASL, startPhase: 'RPh' });
+    const engine = made.engine;
+    // Waiting to be set up in the area (the setup box).
+    const state: GameState = { ...made.state, pieces: Object.fromEntries(Object.entries(made.state.pieces).map(([id, p]) => [id, { ...p, loc: { kind: 'offboard' as const, edge: 'setup' } }])) };
+    const env = engine.env(state);
+    const todo = ['a', 'b', 'c', 'd'].map((id) => state.pieces[id]!);
+    expect(placementIllegal(env, 'ru', todo, { a: 'yN5', b: 'yN5', c: 'yN5', d: 'yN5' })).toMatch(/Stacking limit exceeded/);
+    expect(placementIllegal(env, 'ru', todo, { a: 'yN5', b: 'yN5', c: 'yN5', d: 'yN6' })).toBeNull();
   });
 });

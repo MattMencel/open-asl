@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Action, Engine, GameState } from '@asl/engine';
+import { aslCoreModules } from '../src';
 import { controlState } from '../src/sk1/scenario';
 import { interdicted } from '../src/sk1/rout';
 import { sk2CoreModules } from '../src/sk2';
@@ -305,5 +306,21 @@ describe('Flamethrowers, DCs and Open-Topped AFVs (SK4 4.2, 4.3, 7.13)', () => {
     const far = makeEngine({ pieces: [{ id: 'ot', def: 'ge.otv', side: 'ge', hex: 'yM5', tags: { vca: 3, ca: 3 } }, sq('ru', 'yM6')], scenario: RU_VS_GE, extra, startPhase: 'PFPh', dice: [1, 1] });
     const r2 = act(far.engine, far.state, { type: 'fire', decl: { units: ['ru'], sw: [], target: 'yM5' } });
     expect(ev(r2, 'sk1.fire.result').find((x) => x['unit'] === 'ot')!['result']).toEqual({ kind: 'none' });
+  });
+
+  it('a Fire Group partly outside the hex: full ASL attacks the crew with the FP from its own hex alone; the Starter Kit spares it (ASLRB A7.211)', () => {
+    // A 4-4-7 in the OT AFV's hex (TPBF 12) and one next door (PBF 8) fire together at 20 FP. In full ASL the crew is
+    // attacked on the 12 column (+2 CE): DR 5 + 2 = 7, a 2MC on the test IFT (the whole 20 column would make it a K/1).
+    const pieces: PieceSpec[] = [{ id: 'ot', def: 'ge.otv', side: 'ge', hex: 'yM5', tags: { vca: 3, ca: 3 } }, sq('ru', 'yM5'), sq('ru2', 'yM6')];
+    const run = (asl: boolean) => {
+      const { engine, state } = makeEngine({ pieces, scenario: RU_VS_GE, extra: asl ? [...extra, ...aslCoreModules] : extra, startPhase: 'PFPh', dice: asl ? [2, 3, 5, 5] : [2, 3] });
+      return act(engine, state, { type: 'fire', decl: { units: ['ru', 'ru2'], sw: [], target: 'yM5' } });
+    };
+    const r = run(true);
+    expect(ev(r, 'sk1.fire.attack')[0]).toMatchObject({ fp: 20 });
+    const res = ev(r, 'sk1.fire.result').find((x) => x['unit'] === 'ot')!;
+        expect(res).toMatchObject({ drm: 2, result: { kind: 'MC', n: 2 } });
+    expect((res['explain'] as { label: string }[]).map((n) => n.label)).toContain('only the FP fired from its own hex (12 column)');
+    expect(ev(run(false), 'sk1.fire.result').find((x) => x['unit'] === 'ot')!['result']).toEqual({ kind: 'none' });
   });
 });

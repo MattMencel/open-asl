@@ -50,11 +50,12 @@ const toy: RuleModule = {
       events: ['toy.secret'],
       redactEvent: (ev, viewer) => ((ev.payload as { side: string }).side === viewer ? ev : null),
     });
-    r.action<Action & { events: GameEvent[]; roll?: boolean }>({
+    r.action<Action & { events: GameEvent[]; roll?: boolean; secretRoll?: string }>({
       type: 'act',
       decisionKinds: ['main'],
       resolve(ctx, a) {
         if (a.roll) ctx.roll('toy');
+        if (a.secretRoll) ctx.roll('toy secret', 1, { secret: a.secretRoll });
         for (const ev of a.events) ctx.emit(ev.type, ev.payload);
         ctx.popDecision();
         const other = ctx.state.sides.find((s) => s !== a.side)!;
@@ -180,6 +181,22 @@ describe('redactTransition', () => {
 
     const forSpectator = checkViewer(null, s0, t);
     expect(forSpectator.filter((e) => e.type === 'view.patch')).toHaveLength(3);
+  });
+
+  it('shows a secret roll to its side only: everyone else gets an empty patch, with no dice', () => {
+    const s0 = start();
+    const d = engine.currentDecision(s0)!;
+    const t = engine.submit(s0, { type: 'act', side: d.owner, decisionId: d.id, events: [], secretRoll: 'A' } as Action);
+    expect(t.events[0]).toMatchObject({ type: 'dice.rolled', payload: { label: 'toy secret', secret: 'A' } });
+    const forA = checkViewer('A', s0, t);
+    expect(forA[0]).toMatchObject({ type: 'dice.rolled', payload: { label: 'toy secret', secret: 'A', dice: (t.events[0]!.payload as { dice: number[] }).dice } });
+    expect((forA[0]!.payload as { rng?: unknown }).rng).toBeUndefined();
+    for (const viewer of ['B', null]) {
+      const forOther = checkViewer(viewer, s0, t);
+      expect(forOther[0]).toMatchObject({ type: 'view.patch', payload: {} });
+      expect(JSON.stringify(forOther)).not.toContain('toy secret');
+      expect(forOther.some((e) => e.type === 'dice.rolled')).toBe(false);
+    }
   });
 
   it('replaces an event with a patch when the viewer cannot see a piece it names, even if it would apply', () => {

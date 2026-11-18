@@ -46,8 +46,11 @@ export interface Transition {
 }
 
 interface BuiltinPayloads {
-  /** `rng` is the generator state after the roll; a redacted view carries the dice without it. */
-  'dice.rolled': { label: string; dice: number[]; rng?: RngState };
+  /**
+   * `rng` is the generator state after the roll; a redacted view carries the dice without it. `secret`: the only side
+   * that may see the roll (a secret dr); any other viewer gets a `view.patch` in its place.
+   */
+  'dice.rolled': { label: string; dice: number[]; rng?: RngState; secret?: SideId };
   'decision.pushed': { decision: Decision };
   'decision.popped': { id: string };
   'game.ended': { result: GameResult };
@@ -241,7 +244,7 @@ export class Engine {
   /**
    * The events of a transition as `viewer` may see them: one per real event, same `seq`. `redact` turns a full
    * state into that viewer's snapshot (the rules' `redactState`); it must be a pure function of the state. An
-   * event is passed through (a `dice.rolled` without its `rng`, or as a module's redactor rewrites it) only when
+   * event is passed through (a `dice.rolled` without its `rng` unless it is another side's secret roll, or as a module's redactor rewrites it) only when
    * it names no piece the viewer cannot see and folding it over the previous redacted snapshot gives exactly the
    * next one; otherwise the viewer gets a `view.patch` with the difference. So for every prefix,
    * `applyEvents(redact(before), redacted) ≡ redact(after)`.
@@ -258,7 +261,8 @@ export class Engine {
       const hidden = new Set<string>();
       for (const id of Object.keys(full.pieces)) if (!(id in view.pieces)) hidden.add(id);
       for (const id of Object.keys(nextFull.pieces)) if (!(id in nextView.pieces)) hidden.add(id);
-      let candidate: GameEvent | null = ev.type === 'dice.rolled' ? { ...ev, payload: stripRng(ev.payload as BuiltinPayloads['dice.rolled']) } : ev;
+      const secretRoll = ev.type === 'dice.rolled' && (ev.payload as BuiltinPayloads['dice.rolled']).secret;
+      let candidate: GameEvent | null = ev.type !== 'dice.rolled' ? ev : secretRoll && secretRoll !== viewer ? null : { ...ev, payload: stripRng(ev.payload as BuiltinPayloads['dice.rolled']) };
       const redactor = byEvent.get(ev.type);
       if (candidate && redactor?.redactEvent) candidate = redactor.redactEvent(candidate, viewer, this.env(nextFull));
       let accepted: GameEvent | null = null;
@@ -330,7 +334,7 @@ export class Engine {
       emit(type, payload, source) {
         emitRaw({ type, payload, ...(source ? { source } : {}) }, new Set());
       },
-      roll(label, count = 2): DiceRoll {
+      roll(label, count = 2, opts): DiceRoll {
         const dice: number[] = [];
         let rng = state.rng;
         for (let i = 0; i < count; i++) {
@@ -343,7 +347,7 @@ export class Engine {
             rng = next;
           }
         }
-        ctx.emit('dice.rolled', { label, dice, rng });
+        ctx.emit('dice.rolled', { label, dice, rng, ...(opts?.secret ? { secret: opts.secret } : {}) });
         return { label, dice, total: dice.reduce((a, b) => a + b, 0) };
       },
       pushDecision(d) {

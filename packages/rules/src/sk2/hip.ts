@@ -1,5 +1,6 @@
 import type { Ctx, HexId, Location, Piece, PieceId, QueryEnv, RuleModule, SideId } from '@asl/engine';
 import { byId, defOf, hexOf, isVehicleDef, otherSide, personnelAt, statics, swHeldBy, unitsAt } from '../common/pieces';
+import { locOf, type LocId } from '../common/location';
 import { FP, iftColumn, type ApplyResultFn } from '../sk1/fire';
 import { hasLos, isVisibleTo } from '../sk1/known';
 import { MOVE_ENTER, moveInternals, moveState, type MoveEnterFn } from '../sk1/movement';
@@ -73,11 +74,15 @@ export function revealUnit(ctx: Ctx, unit: PieceId, reason: string) {
   for (const w of held) if (isHidden(w)) setTags(ctx, w.id, { [T2.hip]: null });
 }
 
-/** Reveal everything hidden in a hex from `side`: Guns first (with their crews), then any other hidden units. */
-export function revealHex(ctx: Ctx, hex: HexId, side: SideId, reason: string): boolean {
-  const guns = hiddenGunsAt(ctx, hex, side);
+/**
+ * Reveal everything hidden in a hex from `side`: Guns first (with their crews), then any other hidden units. `loc`: only
+ * what is in that one Location of the hex (full ASL, e.g. A12.151 "all concealment in that Location is lost").
+ */
+export function revealHex(ctx: Ctx, hex: HexId, side: SideId, reason: string, loc?: LocId): boolean {
+  const inLoc = (p: Piece) => loc === undefined || locOf(ctx.state, p) === loc;
+  const guns = hiddenGunsAt(ctx, hex, side).filter(inLoc);
   for (const g of guns) ctx.proc<(c: Ctx, gun: PieceId, reason: string) => void>(REVEAL_GUN)(ctx, g.id, reason);
-  const units = hiddenUnitsAt(ctx, hex, side);
+  const units = hiddenUnitsAt(ctx, hex, side).filter(inLoc);
   for (const u of units) revealUnit(ctx, u.id, reason);
   return guns.length + units.length > 0;
 }

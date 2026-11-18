@@ -1,7 +1,7 @@
 import type { Ctx, PieceId, QueryEnv, RuleModule } from '@asl/engine';
 import { hexOfLoc, locOf, type LocId } from '../common/location';
 import { defOf, isVehicleDef, otherSide, unitsAt } from '../common/pieces';
-import { MOVE_FINISH, type MoveFinishFn } from '../sk1/movement';
+import { MOVE_FINISH, leftUnits, type MoveFinishFn } from '../sk1/movement';
 import { moveState } from '../sk1/moveState';
 import { inMelee, pieceOf, sw } from '../sk1/status';
 import { heightOf } from '../sk2/elevation';
@@ -18,6 +18,9 @@ import { isWreck } from '../sk3/status';
  * - TPBF vs PRC from a higher Location of the hex (A7.211: "from enemy units in that Location or any higher Location in
  *   that hex"): an attack whose every target is a vehicle (its crew) is tripled, not doubled, from the level above. Against
  *   Infantry on another floor it stays PBF (A7.21: TPBF needs the same Location).
+ * - A BU Open-Topped AFV's crew is subject to TPBF "from enemy units in that Location or any higher Location in that
+ *   hex" (A7.211): in a Fire Group with parts outside the hex it is attacked by the FP of the parts in its hex alone,
+ *   not spared the whole attack (the Starter Kit, SK4 7.13, exposes it only when every part fires from its hex).
  * - When an Infantry stack's MPh ends in a Location it shares with enemy units outside Melee, that Location gets a CC
  *   counter: they are not held in Melee until after the CCPh, and broken units may rout away in the RtPh (A12.151, A7.211,
  *   A8.31; the CC marker goes on "not until the ... unit end[s] its MPh in the defender's Location").
@@ -62,6 +65,12 @@ export const aslTpbfModule: RuleModule = {
   summary: 'TPBF in full ASL: fire into one\'s own Location at enemy units not in Melee, TPBF at PRC from above, the CC counter.',
   requires: ['sk1.fire', 'sk1.movement', 'asl.locations'],
   install(r) {
+    r.contribute({
+      id: 'asl.tpbf.ot-crew-parts',
+      query: 'fire.otExposedParts',
+      ref: 'ASLRB A7.211',
+      apply: (_v, { attack }, env) => attack.parts.filter((part) => part.dist === 0 && !!pieceOf(env, part.firer)).map((part) => part.piece),
+    });
     r.contribute({ id: 'asl.tpbf.own-location', query: 'fire.ownLocation', ref: 'ASLRB A7.21, A8.4', apply: (v, { target, side, firer }, env) => v || ownLocationFire(env, target, side, firer) });
     // A7.211: TPBF at PRC from a higher Location of the hex, instead of the PBF between levels.
     const tpbfAbove = (part: { dist: number; firer: PieceId; kind: string; piece: PieceId }, attack: { target: LocId; targets: PieceId[]; residual?: boolean }, env: QueryEnv) =>
@@ -83,7 +92,7 @@ export const aslTpbfModule: RuleModule = {
     // The CC counter when an Infantry stack's MPh ends in a Location shared with the enemy.
     r.procedure<MoveFinishFn>(MOVE_FINISH, (next) => (ctx) => {
       const ms = moveState(ctx);
-      const units = ms && !ms.vehicle ? [...ms.units, ...(ms.stopped ?? [])] : [];
+      const units = ms && !ms.vehicle ? [...ms.units, ...(ms.stopped ?? []), ...(ms.leftBypass ?? []).flatMap((r) => leftUnits(ctx, r))] : [];
       next?.(ctx);
       for (const loc of sharedLocations(ctx, units)) ctx.emit('hex.marker', { hex: loc, key: 'cc', value: true });
     });

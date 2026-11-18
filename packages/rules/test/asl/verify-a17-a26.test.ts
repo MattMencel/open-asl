@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import type { CounterDef } from '../../src';
+import type { RuleModule } from '@asl/engine';
+import { achieved, aslCoreModules, piecesModule, turnModule, type CounterDef, type VictoryCondition } from '../../src';
+import { sk1CoreModules } from '../../src/sk1';
 import { sk2CoreModules } from '../../src/sk2';
+import { sk3CoreModules } from '../../src/sk3';
 import { paatcDrm } from '../../src/sk3/paatc';
-import { COUNTERS, act, makeEngine, type PieceSpec } from '../fixtures';
+import { COUNTERS, RU_VS_GE, act, makeEngine, type PieceSpec } from '../fixtures';
 import { testFire } from './helpers';
 
 /*
@@ -172,5 +175,32 @@ describe('A25.65, A25.91 PAATC of non-elite Italian and Allied Minor troops', ()
     expect(paatcDrm(env, 'al').drm).toBe(1);
     expect(paatcDrm(env, 'iE').drm).toBe(0);
     expect(paatcDrm(env, 'us').drm).toBe(0);
+  });
+});
+
+describe('A26.1 CONTROL VICTORY CONDITIONS under the full ASL ruleset', () => {
+  const ASL: RuleModule[] = [piecesModule, turnModule, ...sk1CoreModules, ...sk2CoreModules, ...sk3CoreModules, ...aslCoreModules];
+  it('a building Controlled by entering it meets a controlBuildings condition; a controlHexes condition needs each hex entered (A26.1, A26.13, A26.14)', () => {
+    const terrain = { zK5: { terrain: 'building-stone', buildingId: 'K5' }, zK6: { terrain: 'building-stone', buildingId: 'K5' }, zK7: { terrain: 'building-stone', buildingId: 'K7' } };
+    const building: VictoryCondition = { kind: 'controlBuildings', side: 'ru', buildings: ['K5'], atLeast: 1 };
+    const hexes: VictoryCondition = { kind: 'controlHexes', side: 'ru', hexes: ['zK5', 'zK6'], atLeast: 2 };
+    const { engine, state } = makeEngine({
+      board: 'z',
+      scenario: { ...RU_VS_GE, victory: [building, hexes] },
+      modules: ASL,
+      startPhase: 'MPh',
+      terrain,
+      pieces: [
+        { id: 'r1', def: 'ru.447', side: 'ru', hex: 'zJ4' },
+        { id: 'g1', def: 'ge.467', side: 'ge', hex: 'zK7' },
+      ],
+    });
+    expect(achieved(engine.env(state), building)).toBe(false);
+    let s = act(engine, state, { type: 'move.start', units: ['r1'] }).state;
+    s = act(engine, s, { type: 'move.step', to: 'zK5' }).state;
+    expect(achieved(engine.env(s), building)).toBe(true);
+    expect(achieved(engine.env(s), hexes)).toBe(false);
+    s = act(engine, s, { type: 'move.step', to: 'zK6' }).state;
+    expect(achieved(engine.env(s), hexes)).toBe(true);
   });
 });

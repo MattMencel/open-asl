@@ -26,7 +26,7 @@ import {
 } from '../sk1/fire';
 import { PHASE_FIRE_MODE, fireTargets, phaseOwner } from '../sk1/firePhases';
 import { P as MP, type CasualtyFn, type CheckGroupFn, type FlushFn, type RandomSelectFn } from '../sk1/morale';
-import { FIRST_FIRE, finishDefensiveFire, firstFireIllegal, firstFireTargets, firstFireMode, moveLoc, moveState, movingInfo, plausibleShot, recordRofChoice } from '../sk1/movement';
+import { FIRST_FIRE, finishDefensiveFire, firstFireIllegal, firstFireLocations, firstFireTargets, firstFireMode, firstFireView, moveState, movingInfo, plausibleShot, recordRofChoice } from '../sk1/movement';
 import { hasLos, visibleEnemyAt, isKnownTo, knownEnemyAt } from '../sk1/known';
 import {
   T,
@@ -55,7 +55,7 @@ import { isWoodsRoad, smoke58Counters, smoke58Markers, terrainOf } from '../sk1/
 import { AMMO_NAME, AMMO_OUT, ammoColumn, ammoKinds, ammoOut, ammoStatus, defaultAmmo, isSmokeAmmo, leavesResidual, specialAmmoOf } from './ammo';
 import { caChangeDrm, inCoveredArc, mountLabel, nearestSpine, spineChange } from './arc';
 import { emplacementThDrm, revealGun } from './guns';
-import { T2, caTurnedIllegal, coveredArc, isHidden, isMgOrdnance, ACQ_CLEAR, acquisitionOf, ordnanceHeldBy, ordnanceOf, shotWeaponOf } from './status';
+import { T2, caTurnedIllegal, coveredArc, isHidden, isMgOrdnance, ACQ_CLEAR, acqCandidates, acquisitionOf, ordnanceHeldBy, ordnanceOf, shotWeaponOf } from './status';
 
 /*
  * Ordnance (SK4 3.2.4, 6.0–6.12): a Gun must secure a hit on the To Hit Chart before its effect
@@ -192,6 +192,9 @@ export type OrdnanceFireFn = (
 ) => OrdnanceOutcome;
 
 export type OrdnanceAction = Action & { shot: OrdnanceShot };
+/** The question put to a Gun's owner when its acquired stack scatters (SK4 6.10): which hex keeps the counter. */
+export const ACQ_CHOICE_DECISION = 'acqChoice';
+export type AcqChooseAction = Action & { type: 'acq.choose'; gun: PieceId; hex: HexId };
 
 /** The year of the scenario, from its dateline ("26 April 1941"); undefined when not given. */
 const scenarioYear = (env: QueryEnv): number | undefined => {
@@ -361,11 +364,16 @@ export function swDirectorIllegal(env: QueryEnv, leader: PieceId, side: SideId, 
  * A HS or crew fires one weapon "but forfeits its own FP" (SK4 4.0): in a fire phase it uses one or the other. Having
  * fired its own FP this phase it may not fire a Gun, Mortar or LATW too, not even later in the MPh, since only Small
  * Arms, MG and IFE fire as Subsequent First Fire (ASLRB A8.3). A squad fires one weapon at no cost to its own FP.
+ * Prep Fire marks "the firing unit (and Weapon)" (SK4 3.2.2) and only units "which did not fire in the PFPh" fire in
+ * the AFPh (ASLRB A3.5), so one that fired its own FP in the PFPh fires its weapon in the AFPh no more than in the PFPh.
  */
-function ownFpSpent(env: QueryEnv, manner: Piece, what: string): string | null {
+function ownFpSpent(env: QueryEnv, manner: Piece, what: string, mode: FireMode): string | null {
   const kind = mmc(env, manner)?.kind;
-  if ((kind !== 'hs' && kind !== 'crew') || !firedOwnFpThisPhase(env, manner.id)) return null;
-  return `A ${kind === 'hs' ? 'half-squad' : 'crew'} that fired its own FP this phase may not also fire its ${what}`;
+  if (kind !== 'hs' && kind !== 'crew') return null;
+  const unit = kind === 'hs' ? 'half-squad' : 'crew';
+  if (firedOwnFpThisPhase(env, manner.id)) return `A ${unit} that fired its own FP this phase may not also fire its ${what}`;
+  if (mode === 'advancing' && fireMarker(manner) === 'prep') return `A ${unit} that fired its own FP in the PFPh may not fire its ${what} in the AFPh`;
+  return null;
 }
 
 /**
@@ -398,7 +406,7 @@ export function ordnanceWeaponIllegal(env: QueryEnv, weapon: PieceId, mode: Fire
   const manner = pieceOf(env, g.loc.by);
   if (!mmc(env, manner) && !(def.light && smc(env, manner))) return 'Only a MMC may fire a Gun';
   if (!isGoodOrder(env, manner)) return `The ${def.light ? 'possessing' : 'manning'} unit is not in Good Order`;
-  const spent = ownFpSpent(env, manner, what) ?? otherWeaponUsed(env, manner, g, !!def.light, what);
+  const spent = ownFpSpent(env, manner, what, mode) ?? otherWeaponUsed(env, manner, g, !!def.light, what);
   if (spent) return spent;
   if (isMalf(g)) return `The ${what} is malfunctioned`;
   const halved = isMgOrdnance(def) ? mgHalvedFp(env, manner, mode, side) : null;
@@ -446,7 +454,7 @@ function ordnanceIllegal(env: QueryEnv, shot: OrdnanceShot, mode: FireMode, side
     manner = pieceOf(env, g.loc.by);
     // A Light Mortar is fired by a squad, HS or SMC (SK4 4.5); a Gun by a MMC.
     if (!mmc(env, manner) && !(def.light && smc(env, manner))) return 'Only a MMC may fire a Gun';
-    const spent = ownFpSpent(env, manner, what) ?? otherWeaponUsed(env, manner, g, !!def.light, what);
+    const spent = ownFpSpent(env, manner, what, mode) ?? otherWeaponUsed(env, manner, g, !!def.light, what);
     if (spent) return spent;
     // A BAZ is fired by any unbroken Infantry MMC, or by two SMC; never by a single SMC (SK4 4.4.1). A PIAT
     // may be used by a SMC at full effect (4.4.5), a PF by a SMC that passes its PF check (+2, 4.4.2).
@@ -801,10 +809,14 @@ function fireOrdnance(ctx: Ctx, shot: OrdnanceShot, mode: FireMode, opts: { movi
     return { ...nothing, th: thn.th, dr: [white, colored], drm, noAmmo: true, ...(blind ? { blocked: blind } : {}) };
   }
 
-  // ROF (SK4 1.2.4.1, 3.2.4): kept when the colored dr is within the effective ROF.
+  // ROF (SK4 1.2.4.1, 3.2.4): kept when the colored dr is within the effective ROF, never in the AFPh ("may fire again
+  // in that phase (except the AFPh)", SK4 1.2.4.1).
   const rof = ctx.query('ordnance.rof', sc, 0);
   const manner = pieceOf(ctx, sc.firer);
-  const why = shot.intensive ? 'intensive' : malfunctioned || removed ? 'malfunction' : colored > rof ? 'exceeded' : isPinned(manner) ? 'pinned' : null;
+  // Fire on the Area Target Type by other than a Mortar consumes all of the Gun's ROF (SK4 3.2.4; ASLRB C3.33: Intensive
+  // Fire excepted): said as such, not as a colored dr above a ROF of 0.
+  const areaFire = shot.targetType === 'ATT' && sc.def.type !== 'MTR';
+  const why = shot.intensive ? 'intensive' : malfunctioned || removed ? 'malfunction' : mode === 'advancing' ? 'afph' : areaFire ? 'area' : colored > rof ? 'exceeded' : isPinned(manner) ? 'pinned' : null;
   const rofKept = why === null && rof > 0;
   if (sc.def.rof || shot.intensive) ctx.emit('sk2.ordnance.rof', { weapon: g.id, colored, rof, kept: rofKept, why });
 
@@ -975,7 +987,7 @@ function resolveHitBase(ctx: Ctx, sc: ShotCtx, h: HitInfo, targets: PieceId[], r
     // Full ASL: a HE or HEAT KIA on the Original DR may collapse a building Location into rubble before the attack reaches
     // its occupants (ASLRB B24.11); the base procedure never does.
     const by = ammo === 'HE' || ammo === 'HEAT' ? 'he' : 'other';
-    const rubbled = ctx.proc<BeforeApplyFn>(FP.beforeApply)(ctx, { target: grp.loc, by, column, originalDr: ift.total, caliber: sc.def.caliber, heat: ammo === 'HEAT', side, from: sc.hex });
+    const rubbled = ctx.proc<BeforeApplyFn>(FP.beforeApply)(ctx, { target: grp.loc, by, column, originalDr: ift.total, caliber: sc.def.caliber, heat: ammo === 'HEAT', side, from: sc.hex, ...(planned.length > 1 ? { group: planned.map((x) => x.grp.loc) } : {}) });
     if (!rubbled) ctx.proc<ApplyResultFn>(FP.applyResult)(ctx, attack, column, ift.total + iftDrm, results);
     ctx.proc<AttackResolvedFn>(FP.attackResolved)(ctx, {
       target: grp.loc,
@@ -1400,12 +1412,76 @@ export const ordnanceModule: RuleModule = {
           const a = acquisitionOf(g)!;
           if (a.units.includes(p.id)) {
             const gh = hexOf(ctx.state, g);
-            if (to && gh && hasLos(ctx, gh, to)) setTags(ctx, g.id, { [T2.acqHex]: to });
-            else setTags(ctx, g.id, { [T2.acqUnits]: a.units.filter((u) => u !== p.id).join(',') });
+            if (to && gh && hasLos(ctx, gh, to)) {
+              // An acquired stack that scatters into different hexes keeps one counter, on the target of the firer's
+              // choice (SK4 6.10; ASLRB C6.5): while some acquired units are still elsewhere the counter stays put, and
+              // the firer is asked once the move is done (below). A stack moving together is apart only for a moment
+              // (each unit's move is its own event), and the counter goes with the last of them.
+              const elsewhere = a.units.some((u) => u !== p.id && ctx.state.pieces[u] && hexOf(ctx.state, ctx.state.pieces[u]!) !== to);
+              setTags(ctx, g.id, { [T2.acqHex]: elsewhere ? a.hex : to });
+            } else setTags(ctx, g.id, { [T2.acqUnits]: a.units.filter((u) => u !== p.id).join(',') });
           } else if (a.type === 'ITT' && a.units.length === 0 && to === a.hex && p.side !== g.side && isPersonnelDef(defOf(ctx, p))) {
             setTags(ctx, g.id, { [T2.acqUnits]: p.id });
           }
         }
+      },
+    });
+    // The firer is asked which hex keeps a scattered acquisition as soon as the move that scattered it is done, before
+    // anything else that follows it (Defensive First Fire, the mover's next order): on top of the next decision pushed.
+    r.on<{ decision: { kind: string } }>({
+      id: 'sk2.ordnance.acq.ask',
+      event: 'decision.pushed',
+      handler(ctx, ev) {
+        if (ev.payload.decision.kind === ACQ_CHOICE_DECISION) return;
+        for (const g of gunsWithAcquisition(ctx).filter((x) => acqCandidates(ctx, x).length > 1)) {
+          const asked = ctx.state.decisions.find((d) => d.kind === ACQ_CHOICE_DECISION && d.data?.['gun'] === g.id);
+          if (asked) ctx.popDecision(asked.id);
+          ctx.pushDecision({ kind: ACQ_CHOICE_DECISION, owner: g.side, deadlineClass: 'turn', data: { gun: g.id } });
+        }
+      },
+    });
+    // The firer's choice of the hex that keeps a scattered acquisition (SK4 6.10).
+    r.event<{ weapon: PieceId; hex: HexId; units: PieceId[] }>({ type: 'sk2.acq.kept', apply() {} });
+    r.action<AcqChooseAction>({
+      type: 'acq.choose',
+      decisionKinds: [ACQ_CHOICE_DECISION],
+      legal(env, d) {
+        const g = env.state.pieces[d.data?.['gun'] as PieceId];
+        return g ? acqCandidates(env, g).map((hex) => ({ type: 'acq.choose' as const, gun: g.id, hex })) : [];
+      },
+      validate(env, a, d) {
+        if (a.gun !== d.data?.['gun']) return 'Not the Gun asked about';
+        const g = env.state.pieces[a.gun];
+        if (!g) return null;
+        const a0 = acquisitionOf(g);
+        // Nothing left to choose (they came together again, or one side of the split is gone): the counter stays.
+        if (acqCandidates(env, g).length < 2) return a0 === null || a.hex === a0.hex ? null : 'The acquisition is no longer split';
+        return acqCandidates(env, g).includes(a.hex) ? null : 'None of the acquired units is in that hex';
+      },
+      resolve(ctx, a, d) {
+        ctx.popDecision(d.id);
+        const g = ctx.state.pieces[a.gun];
+        const acq = g && acquisitionOf(g);
+        if (!g || !acq || acqCandidates(ctx, g).length < 2) return;
+        const units = acq.units.filter((u) => ctx.state.pieces[u] && hexOf(ctx.state, ctx.state.pieces[u]!) === a.hex);
+        setTags(ctx, g.id, { [T2.acqHex]: a.hex, [T2.acqUnits]: units.join(',') });
+        ctx.emit('sk2.acq.kept', { weapon: g.id, hex: a.hex, units });
+      },
+    });
+    r.autoResolver({
+      id: 'sk2.acq.choice.auto',
+      decisionKind: ACQ_CHOICE_DECISION,
+      resolve(env, d, reason) {
+        const g = env.state.pieces[d.data?.['gun'] as PieceId];
+        const a = g && acquisitionOf(g);
+        // Moot: the Gun or its acquisition is gone, or the units are together again (or a shot chose for him).
+        if (!g || !a || acqCandidates(env, g).length < 2) return { type: 'acq.choose', gun: d.data?.['gun'], hex: a?.hex ?? '' };
+        // Time ran out: the counter stays where it was if any acquired unit is still there.
+        if (reason === 'timeout') {
+          const c = acqCandidates(env, g);
+          return { type: 'acq.choose', gun: g.id, hex: c.includes(a.hex) ? a.hex : c[0]! };
+        }
+        return null;
       },
     });
     function gunsWithAcquisition(env: QueryEnv): Piece[] {
@@ -1482,34 +1558,41 @@ export const ordnanceModule: RuleModule = {
         if (!ms || !ms.hex) return [];
         const side = otherSide(env.state, env.state.attacker);
         const out: OrdnanceAction[] = [];
-        for (const shot of simpleShots(env, side, [moveLoc(ms)!], 'first', firstFireTargets(env, ms))) {
-          if (!defShotIllegal(env, shot, side)) out.push({ type: 'defFire.ordnance', shot } as OrdnanceAction);
+        // The moving stack, and (full ASL) units it left in Bypass of another hex (ASLRB A4.32, A4.33).
+        for (const target of firstFireLocations(env, ms)) {
+          const view = firstFireView(env, ms, target)!;
+          for (const shot of simpleShots(env, side, [target], 'first', firstFireTargets(env, view))) {
+            if (!defShotIllegal(env, shot, side)) out.push({ type: 'defFire.ordnance', shot } as OrdnanceAction);
+          }
         }
         return out;
       },
       validate(env, a) {
         const ms = moveState(env);
         if (!ms || !ms.hex) return 'Nothing is moving';
-        if (a.shot.target !== moveLoc(ms)) return 'Defensive First Fire must target the moving stack';
+        if (!firstFireView(env, ms, a.shot.target)) return 'Defensive First Fire must target the moving stack';
         return defShotIllegal(env, a.shot, a.side);
       },
       resolve(ctx, a) {
         const ms = moveState(ctx)!;
+        const view = firstFireView(ctx, ms, a.shot.target) ?? ms;
         const mode = gunFirstFireMode(ctx, a.shot);
-        const targets = firstFireTargets(ctx, ms);
-        const out = ctx.proc<OrdnanceFireFn>(OP.fire)(ctx, a.shot, mode, { moving: targets, movingInfo: movingInfo(ctx, ms) });
+        const targets = firstFireTargets(ctx, view);
+        const out = ctx.proc<OrdnanceFireFn>(OP.fire)(ctx, a.shot, mode, { moving: targets, movingInfo: movingInfo(ctx, view) });
         const g = ctx.state.pieces[a.shot.weapon];
         const firer = g && g.loc.kind === 'held' ? g.loc.by : a.shot.weapon;
         recordRofChoice(ctx, a.shot.target, [a.shot.weapon], out.rofResidual !== undefined ? [{ sws: [a.shot.weapon], residual: out.rofResidual }] : undefined);
         // A Gun that never had the Special Ammo has not fired (SK4 6.2), so the shot does not count
         // against this location: it may fire again here with other ammo.
-        finishDefensiveFire(ctx, out.noAmmo ? [] : [a.shot.weapon, firer, ...(a.shot.director !== undefined ? [a.shot.director] : [])]);
+        finishDefensiveFire(ctx, out.noAmmo ? [] : [a.shot.weapon, firer, ...(a.shot.director !== undefined ? [a.shot.director] : [])], view === ms ? undefined : a.shot.target);
       },
     });
 
     function defShotIllegal(env: QueryEnv, shot: OrdnanceShot, side: SideId): string | null {
-      const ms = moveState(env);
-      if (!ms || !ms.hex) return 'Nothing is moving';
+      const moving = moveState(env);
+      if (!moving || !moving.hex) return 'Nothing is moving';
+      // At units left in Bypass of another hex: that Location's MF and First Fire counts (ASLRB A4.32, A4.33).
+      const ms = firstFireView(env, moving, shot.target) ?? moving;
       const mode = gunFirstFireMode(env, shot);
       if (shot.targetType === 'IFE') {
         const sc = shotContext(env, shot, mode, side, { moving: firstFireTargets(env, ms) });

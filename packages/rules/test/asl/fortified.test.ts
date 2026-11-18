@@ -8,6 +8,7 @@ import {
   fortifiableLocations,
   fortifiedKnownTo,
   fortifiedModule,
+  fortifiedPossibleTo,
   fortifiedState,
   fortifiedView,
   isFortified,
@@ -238,6 +239,72 @@ describe('B23.922: no entry while an enemy squad holds the Location', () => {
     const s2 = playOn(engine, s, s.turn, 'ge', 'MPh');
     expect(engine.legalActions(s2, 'ge').some((a) => a.type === 'move.start' && (a['units'] as string[]).includes('g'))).toBe(true);
   });
+  it('a refused entry, moving or advancing, reveals what hides in that Location only: a hidden unit on level 1 stays hidden (A12.15)', () => {
+    const upstairs: PieceSpec = { id: 'r2', def: 'ru.447', side: 'ru', hex: 'uK4', level: 1, tags: { hip: true } };
+    const { engine, state } = game([german, russian({ tags: { hip: true } }), upstairs, { id: 'g2', def: 'ge.467', side: 'ge', hex: 'uY1' }], { startPhase: 'MPh', dice: [6, 6] });
+    let s = designate(engine, state, ['uK4']);
+    s = act(engine, s, { type: 'move.start', units: ['g'] }).state;
+    const t = act(engine, s, { type: 'move.step', to: 'uK4' });
+    expect(t.state.pieces['r']!.tags['hip']).toBeUndefined();
+    expect(t.state.pieces['r2']!.tags['hip']).toBe(true);
+    const a = game([german, russian({ tags: { hip: true } }), upstairs], { startPhase: 'APh' });
+    const u = act(a.engine, designate(a.engine, a.state, ['uK4']), advance);
+    expect(u.state.pieces['r']!.tags['hip']).toBeUndefined();
+    expect(u.state.pieces['r2']!.tags['hip']).toBe(true);
+  });
+});
+
+describe('A12.151: a unit that must end its MPh in Bypass of a fortified Location it cannot enter', () => {
+  const pass = (engine: Engine, s: GameState) => {
+    let x = s;
+    while (engine.currentDecision(x)?.owner === 'ru') x = act(engine, x, { type: 'defPass' }).state;
+    return x;
+  };
+  it('is forced back to the last Location it occupied, and the fortification and the hidden squad come to light; next turn it moves normally', () => {
+    // g bypasses K4 from J4 and is stranded there by a Smoke grenade dr of 6 (its MPh ends, A24.1); K4's ground is
+    // fortified and held by a hidden squad, so after its MPh it cannot be in the obstacle (B23.922).
+    const { engine, state } = game([{ id: 'g', def: 'ge.467', side: 'ge', hex: 'uJ4' }, { id: 'r', def: 'ru.447', side: 'ru', hex: 'uK4', tags: { hip: true } }, { id: 'g2', def: 'ge.467', side: 'ge', hex: 'uY1' }], { startPhase: 'MPh', dice: [6, ...new Array(40).fill(4)] });
+    let s = designate(engine, state, ['uK4']);
+    s = act(engine, s, { type: 'move.start', units: ['g'] }).state;
+    const round = engine.legalActions(s, 'ge').find((a) => a.type === 'move.step' && a['to'] === 'uK4' && a['bypass']);
+    expect(round).toBeDefined();
+    const by = act(engine, s, round as never);
+    // Going round the obstacle is not entering it: nothing is revealed yet (A4.3, B23.911).
+    expect(types(by)).not.toContain('sk1.fortified.revealed');
+    s = pass(engine, by.state);
+    expect(moveState(engine.env(s))!.bypass?.hex).toBe('uK4');
+    const t = act(engine, s, { type: 'move.smoke', unit: 'g', target: 'uK4' });
+    expect(types(t)).toEqual(expect.arrayContaining(['sk1.fortified.revealed', 'asl.fortified.refused']));
+    s = pass(engine, t.state);
+    expect(s.pieces['g']!.loc).toEqual({ kind: 'hex', hex: 'uJ4' });
+    expect(s.pieces['r']!.tags['hip']).toBeUndefined();
+    expect(moveState(engine.env(s))).toBeFalsy();
+    expect(s.hexMarkers['uK4']?.['cc']).toBeUndefined();
+    const s2 = playOn(engine, s, s.turn, 'ge', 'MPh');
+    expect(engine.legalActions(s2, 'ge').some((a) => a.type === 'move.start' && (a['units'] as string[]).includes('g'))).toBe(true);
+  });
+
+  it('concealment is lost in that Location only: a hidden unit on level 1 stays hidden', () => {
+    const { engine, state } = game([{ id: 'g', def: 'ge.467', side: 'ge', hex: 'uJ4' }, { id: 'r', def: 'ru.447', side: 'ru', hex: 'uK4', level: 1, tags: { hip: true } }, { id: 'g2', def: 'ge.467', side: 'ge', hex: 'uY1' }], { startPhase: 'MPh', dice: [6, ...new Array(40).fill(4)] });
+    let s = designate(engine, state, ['uK5']);
+    s = act(engine, s, { type: 'move.start', units: ['g'] }).state;
+    const round = engine.legalActions(s, 'ge').find((a) => a.type === 'move.step' && a['to'] === 'uK4' && a['bypass']);
+    s = pass(engine, act(engine, s, round as never).state);
+    const t = act(engine, s, { type: 'move.smoke', unit: 'g', target: 'uK4' });
+    expect(types(t)).not.toContain('sk2.hip.unitRevealed');
+    expect(pass(engine, t.state).pieces['r']!.tags['hip']).toBe(true);
+  });
+
+  it('not fortified: the stranded unit stays, in the obstacle with the squad found there', () => {
+    const { engine, state } = game([{ id: 'g', def: 'ge.467', side: 'ge', hex: 'uJ4' }, { id: 'r', def: 'ru.447', side: 'ru', hex: 'uK4', tags: { hip: true } }, { id: 'g2', def: 'ge.467', side: 'ge', hex: 'uY1' }], { startPhase: 'MPh', dice: [6, ...new Array(40).fill(4)] });
+    let s = designate(engine, state, ['uK5']);
+    s = act(engine, s, { type: 'move.start', units: ['g'] }).state;
+    const round = engine.legalActions(s, 'ge').find((a) => a.type === 'move.step' && a['to'] === 'uK4' && a['bypass']);
+    s = pass(engine, act(engine, s, round as never).state);
+    s = pass(engine, act(engine, s, { type: 'move.smoke', unit: 'g', target: 'uK4' }).state);
+    expect(s.pieces['g']!.loc).toEqual({ kind: 'hex', hex: 'uK4' });
+    expect(s.pieces['r']!.tags['hip']).toBeUndefined();
+  });
 });
 
 describe('B23.9221: Breach by a DC', () => {
@@ -342,6 +409,27 @@ describe('B23.9221: Breach by a DC', () => {
     expect(r!.events.filter((e) => e.type === 'sk1.fire.attack')).toHaveLength(1);
   });
 
+  it('an Original KIA of the Breach DC on its Area Fire column checks for rubble and then for a Flame in the Location (A23.41, B24.11, B25.13)', () => {
+    // Breach DR 2 (1+1): a KIA on the DC's Area Fire column (15 FP); the rubble dr 6 (+1 stone) does not rubble, so the
+    // units take the attack and the Flame DR follows.
+    const { engine, state } = game(pieces(), { startPhase: 'MPh', open: true, dice: [1, 1, 6, 6, 6, ...Array(20).fill(3)] });
+    let s = designate(engine, state, ['uK4']);
+    s = act(engine, s, { type: 'move.start', units: ['g'] }).state;
+    s = act(engine, s, { type: 'move.breach', dc: 'dc', target: 'uK4' }).state;
+    while (engine.currentDecision(s)?.kind === 'firstFire') s = act(engine, s, { type: 'defPass' }).state;
+    s = act(engine, s, { type: 'move.end' }).state;
+    const all: { type: string; payload: unknown }[] = [];
+    for (let i = 0; i < 20 && s.phase !== 'AFPh'; i++) {
+      const d = engine.currentDecision(s)!;
+      const r = act(engine, s, engine.legalActions(s, d.owner).find((x) => x.type === 'defPass' || x.type === 'move.end' || x.type === 'endPhase')!);
+      all.push(...r.events);
+      s = r.state;
+    }
+    expect(all.find((e) => e.type === 'asl.breach.attempt')?.payload).toMatchObject({ breached: true });
+    expect(all.find((e) => e.type === 'asl.rubble.check')?.payload).toMatchObject({ loc: 'uK4', dr: 6, rubbled: false });
+    expect(all.find((e) => e.type === 'asl.fire.attackFlame')?.payload).toMatchObject({ loc: 'uK4', source: 'dc' });
+  });
+
   it('a plain DC may still be Placed on the fortified Location at the building entry cost, held or not', () => {
     const { engine, state } = game(pieces(), { startPhase: 'MPh', open: true });
     let s = designate(engine, state, ['uK4']);
@@ -398,6 +486,91 @@ describe('B23.9221: Breach by a HE KIA', () => {
     const t = act(engine, state, fire);
     expect(t.events.find((e) => e.type === 'sk1.fire.result')?.payload).toMatchObject({ result: { kind: 'K' } });
     expect(breaches(engine.env(t.state))).toEqual([]);
+  });
+});
+
+describe('B23.9221 with B23.911: a HE KIA Breach of a Location the firer has not been shown', () => {
+  // The same 88 and Russians as above, the designation secret: K4 fortified in one game, K5 instead in the other. The
+  // German must not be able to tell the two apart from anything he is shown or asked.
+  const hiddenGame = (from: string, dice: number[], fortify: string[]) => {
+    const probe = game([{ id: 'c', def: 'ge.228c', side: 'ge', hex: from }, { id: 'r', def: 'ru.447', side: 'ru', hex: 'uK4' }]);
+    const map = statics(probe.engine.env(probe.state)).map;
+    const ca = inCoveredArc(map.hex(from)!.cube, 0, map.hex('uK4')!.cube) ? 0 : nearestSpine(map.hex(from)!.cube, 0, map.hex('uK4')!.cube)!;
+    const { engine, state } = game(
+      [
+        { id: 'c', def: 'ge.228c', side: 'ge', hex: from },
+        { id: 'g88', def: 'ge.AA88L', side: 'ge', heldBy: 'c', tags: { ca } },
+        { id: 'gs', def: 'ge.467', side: 'ge', hex: 'uJ4' },
+        { id: 'r', def: 'ru.447', side: 'ru', hex: 'uK4' },
+        { id: 'r2', def: 'ru.447', side: 'ru', hex: 'uK4' },
+        { id: 'far', def: 'ru.447', side: 'ru', hex: 'uA1' },
+      ],
+      { dice },
+    );
+    return { engine, state: designate(engine, state, fortify) };
+  };
+  const fire = { type: 'fire.ordnance', shot: { weapon: 'g88', target: 'uK4', targetType: 'ITT' } };
+  const streamFor = (engine: Engine, viewer: string, before: GameState, t: { events: unknown[] }) => engine.redactTransition(viewer, (s) => redactState(engine, s, viewer), before, t.events as never);
+
+  it('one hexside: Breached in secret; the German sees and is told exactly what he would of an unfortified Location', () => {
+    const forted = hiddenGame('uK3', [2, 2, 1, 2], ['uK4']);
+    const plain = hiddenGame('uK3', [2, 2, 1, 2], ['uK5']);
+    const t = act(forted.engine, forted.state, fire);
+    const tp = act(plain.engine, plain.state, fire);
+    expect(t.events.find((e) => e.type === 'sk1.fire.result')?.payload).toMatchObject({ result: { kind: 'KIA' } });
+    expect(fortifiedKnownTo(forted.engine.env(t.state), 'uK4', 'ge')).toBe(false);
+    expect(breaches(forted.engine.env(t.state))).toEqual([{ loc: 'uK4', toward: 'uK3', by: 'he' }]);
+    expect(breaches(plain.engine.env(tp.state))).toEqual([]);
+    // The German's stream and snapshot are the same in both games; the Russian's shows the Breach.
+    const ge = streamFor(forted.engine, 'ge', forted.state, t);
+    expect(ge).toEqual(streamFor(plain.engine, 'ge', plain.state, tp));
+    expect(ge.find((e) => e.type === 'asl.breach.he')?.payload).toEqual({ loc: 'uK4', toward: 'uK3', breached: false });
+    expect(redactState(forted.engine, t.state, 'ge').ext['asl.breach']).toEqual([]);
+    expect(redactState(forted.engine, t.state, null).ext['asl.breach']).toEqual([]);
+    expect(streamFor(forted.engine, 'ru', forted.state, t).find((e) => e.type === 'asl.breach.he')?.payload).toEqual({ loc: 'uK4', toward: 'uK3', breached: true });
+    expect(fortifiedView(forted.engine.env(t.state), 'ge')).toEqual([]);
+  });
+
+  it('along a hexspine the German is asked in both games alike, and the Breach shows once the Location is revealed', () => {
+    const forted = hiddenGame('uL2', [2, 2, 1, 2], ['uK4']);
+    const plain = hiddenGame('uL2', [2, 2, 1, 2], ['uK5']);
+    const t = act(forted.engine, forted.state, fire);
+    const tp = act(plain.engine, plain.state, fire);
+    for (const [g, x] of [[forted, t], [plain, tp]] as const) {
+      expect(g.engine.currentDecision(x.state)).toMatchObject({ kind: BREACH_SIDE_DECISION, owner: 'ge', data: { loc: 'uK4', options: ['uK3', 'uL3'], known: false } });
+    }
+    expect(streamFor(forted.engine, 'ge', forted.state, t)).toEqual(streamFor(plain.engine, 'ge', plain.state, tp));
+    const c = act(forted.engine, t.state, { type: 'breach.choose', toward: 'uL3' });
+    const cp = act(plain.engine, tp.state, { type: 'breach.choose', toward: 'uL3' });
+    expect(breaches(forted.engine.env(c.state))).toEqual([{ loc: 'uK4', toward: 'uL3', by: 'he' }]);
+    expect(breaches(plain.engine.env(cp.state))).toEqual([]);
+    expect(streamFor(forted.engine, 'ge', t.state, c)).toEqual(streamFor(plain.engine, 'ge', tp.state, cp));
+    expect(redactState(forted.engine, c.state, 'ge').ext['asl.breach']).toEqual([]);
+    // The German's squad enters the now empty K4: the entry reveals it (B23.911), and with it the Breach.
+    let s = c.state;
+    for (let i = 0; i < 20 && s.phase !== 'MPh'; i++) s = act(forted.engine, s, forted.engine.legalActions(s, forted.engine.currentDecision(s)!.owner).find((a) => a.type === 'defPass' || a.type === 'endPhase')!).state;
+    s = act(forted.engine, s, { type: 'move.start', units: ['gs'] }).state;
+    const before = s;
+    const entered = act(forted.engine, s, { type: 'move.step', to: 'uK4' });
+    expect(fortifiedKnownTo(forted.engine.env(entered.state), 'uK4', 'ge')).toBe(true);
+    expect(redactState(forted.engine, entered.state, 'ge').ext['asl.breach']).toEqual([{ loc: 'uK4', toward: 'uL3', by: 'he' }]);
+    // The stream that reveals it folds into that snapshot.
+    const folded = forted.engine.applyEvents(redactState(forted.engine, before, 'ge'), streamFor(forted.engine, 'ge', before, entered));
+    expect(folded.ext['asl.breach']).toEqual([{ loc: 'uK4', toward: 'uL3', by: 'he' }]);
+  });
+
+  it('the firer may suspect only the unrevealed fortifiable Locations while some designation is still unshown', () => {
+    const pieces: PieceSpec[] = [{ id: 'g', def: 'ge.467', side: 'ge', hex: 'uY1' }, { id: 'r', def: 'ru.447', side: 'ru', hex: 'uA1' }];
+    const hidden = game(pieces);
+    const env = hidden.engine.env(designate(hidden.engine, hidden.state, ['uK5']));
+    expect(fortifiedPossibleTo(env, 'uK4', 'ge')).toBe(true);
+    expect(fortifiedPossibleTo(env, 'uK4', 'ru')).toBe(false);
+    expect(fortifiedPossibleTo(env, 'uL3', 'ge')).toBe(false);
+    // One Location, designated openly: K5 is known, and K4 can no longer be fortified, so its KIA asks nothing.
+    const open = game(pieces, { count: 1, open: true });
+    const env2 = open.engine.env(designate(open.engine, open.state, ['uK5']));
+    expect(fortifiedPossibleTo(env2, 'uK5', 'ge')).toBe(true);
+    expect(fortifiedPossibleTo(env2, 'uK4', 'ge')).toBe(false);
   });
 });
 

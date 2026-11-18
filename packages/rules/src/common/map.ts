@@ -774,15 +774,15 @@ export class HexGridMap implements GameMap {
 
 /**
  * An orchard hex's effect on a LOS between `lo` ≤ `hi` (ASLRB B14.2, B14.21): a +1 Hindrance between same-level ends at
- * its base level; between a Location above its base and one at or below it, a one-level obstacle in season, else a +1
- * Hindrance (from more than one level above, only an orchard adjacent to the lower end counts). Two ends above its
- * base see over it either way (B10.22). `nextToLow`: the orchard hex is adjacent to the lower end's hex.
+ * its base level. In season, between a Location above its base and one at or below it, a one-level obstacle; two ends
+ * above its base see over it (B10.22). Out of season, a +1 Hindrance "to any LOS drawn through it to/from a Location
+ * higher than the base level", two ends above it included; but to/from a Location more than one level above, only an
+ * orchard adjacent to the ground-level end counts (`nextToLow`: the orchard hex is adjacent to the lower end's hex).
  */
 export function orchardHinders(base: number, lo: number, hi: number, inSeason: boolean, nextToLow: boolean): boolean | 'obstacle' {
-  if (hi === lo) return lo === base;
-  if (lo > base || hi <= base) return false;
-  if (inSeason) return 'obstacle';
-  return hi > base + 1 ? nextToLow : true;
+  if (hi <= base) return hi === lo && lo === base;
+  if (inSeason) return lo > base ? false : 'obstacle';
+  return hi > base + 1 ? lo <= base && nextToLow : true;
 }
 
 /**

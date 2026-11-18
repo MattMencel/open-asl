@@ -1,8 +1,9 @@
 import type { Ctx, HexId, QueryEnv, RuleModule, SideId } from '@asl/engine';
-import { hexOfLoc, type LocId } from '../common/location';
-import { statics } from '../common/pieces';
+import { hexOfLoc, locOf, type LocId } from '../common/location';
+import { defOf, statics } from '../common/pieces';
 import type { Ec } from '../common/statics';
 import { mod6, sideToward } from '../common/hexCorners';
+import { interiorBuildingHex } from './levels';
 import { SMOKE58, smoke58Counters, smoke58Markers, smokeGrenades, terrainOf } from '../sk1/terrain';
 
 /*
@@ -87,6 +88,11 @@ export function ecDrm(env: QueryEnv, loc?: LocId): number {
 
 export const windOf = (env: QueryEnv): WindState => (env.state.ext[WIND_EXT] as WindState | undefined) ?? { force: 'none' };
 
+/** "No Wind" is always in effect in the non-rooftop Locations of an Interior Building hex (B25.63, A24.61); there are no rooftops yet. */
+export const noWindHex = (env: QueryEnv, hex: HexId): boolean => interiorBuildingHex(env, hexOfLoc(hex));
+/** The wind in effect in a Location (or a hex's Locations): the scenario's, or No Wind in an Interior Building hex (B25.63). */
+export const windAt = (env: QueryEnv, loc: LocId): WindState => (noWindHex(env, hexOfLoc(loc)) ? { force: 'none' } : windOf(env));
+
 /** The hexside a Random Direction dr names (B.8): 1 the top hexside of a board placed the usual way, clockwise. */
 export const hexsideForDr = (dr: number): number => mod6(dr + 3);
 
@@ -114,7 +120,8 @@ function setWind(ctx: Ctx, next: WindState, reason: string, extra: Record<string
 
 /** Every Smoke counter on the board goes (Heavy Winds, A24.6). */
 function clearSmoke(ctx: Ctx, reason: 'heavy') {
-  const hexes = Object.keys(ctx.state.hexMarkers).sort();
+  // Not in an Interior Building hex, where there is No Wind (B25.63).
+  const hexes = Object.keys(ctx.state.hexMarkers).filter((h) => !noWindHex(ctx, h)).sort();
   let any = false;
   for (const hex of hexes) {
     const m = ctx.state.hexMarkers[hex];
@@ -133,7 +140,8 @@ function clearSmoke(ctx: Ctx, reason: 'heavy') {
 
 /** A Gust disperses the SMOKE on the board: Dispersed counters go, the rest flip (A24.62). Grenade Smoke is the lesser kind and goes. */
 export function gustSmoke(ctx: Ctx, when: 'RPh' | 'AFPh') {
-  const hexes = Object.keys(ctx.state.hexMarkers).sort();
+  // Not in an Interior Building hex, where there is No Wind (B25.63).
+  const hexes = Object.keys(ctx.state.hexMarkers).filter((h) => !noWindHex(ctx, h)).sort();
   let any = false;
   for (const hex of hexes) {
     const m = ctx.state.hexMarkers[hex];
@@ -249,6 +257,34 @@ export const aslWindModule: RuleModule = {
       },
     });
 
+    // ---------------------------------------------------------------- B25.63: no FT Long Range FP in Heavy Winds
+    // "A FT has no Long Range FP (A22.1) during Heavy Winds [EXC: if being fired directly 'with the wind']": read as a
+    // target straight downwind of the FT, along the hex grain the wind blows toward.
+    r.contribute({
+      id: 'asl.wind.ftLongRange',
+      query: 'fire.illegal',
+      ref: 'ASLRB B25.63, A22.1',
+      apply(v, { decl }, env) {
+        if (v) return v;
+        const map = statics(env).map;
+        for (const id of decl.sw) {
+          const p = env.state.pieces[id];
+          const d = p && (defOf(env, p) as { type?: string; range?: number });
+          if (!p || d?.type !== 'FT') continue;
+          const at = locOf(env.state, p);
+          if (!at) continue;
+          const wind = windAt(env, at);
+          const from = hexOfLoc(at);
+          const to = hexOfLoc(decl.target);
+          if (wind.force !== 'heavy' || map.distance(from, to) <= (d.range ?? 1)) continue;
+          let h: HexId | undefined = from;
+          for (let n = 0; n < map.distance(from, to) && h; n++) h = wind.dir === undefined ? undefined : downwind(env, h, wind.dir);
+          if (h !== to) return `${id}: a FT has no Long Range FP in Heavy Winds unless fired directly with the wind (ASLRB B25.63)`;
+        }
+        return null;
+      },
+    });
+
     // ---------------------------------------------------------------- B25.63, A24.6: no Smoke in Heavy Winds
     r.contribute({
       id: 'asl.wind.noSmokeGrenades',
@@ -297,8 +333,17 @@ export function applyChange(wind: WindState, dr: number): WindState {
     }
     case 5:
       return { ...base, force: base.force === 'none' ? 'breeze' : base.force === 'breeze' ? 'heavy' : 'breeze' };
-    default:
-      return { ...base, force: base.force === 'heavy' ? 'breeze' : base.force === 'breeze' ? 'none' : 'breeze' };
+    default: {
+      const force: WindForce = base.force === 'heavy' ? 'breeze' : base.force === 'breeze' ? 'none' : 'breeze';
+      // The direction lasts "until there is no wind" (B25.64): a drop to No Wind loses it, so a new wind (or a Gust under
+      // No Wind, B25.651) rolls a new one.
+      if (force === 'none') {
+        const { dir: _gone, ...still } = base;
+        void _gone;
+        return { ...still, force };
+      }
+      return { ...base, force };
+    }
   }
 }
 

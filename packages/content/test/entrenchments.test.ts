@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { Action, GameState, LoggedEvent } from '@asl/engine';
+import { deepEqual, type Action, type GameState, type LoggedEvent } from '@asl/engine';
 import { entrenchers, fortCounters, fortificationView, moveState, parseLabor, redactState, type FortRecord } from '@asl/rules';
 import { ASL_TESTBED_SCENARIO, FixtureBuilder, fixtureActions, newGame } from '../src';
 
@@ -141,7 +141,7 @@ describe('Foxholes and trenches in the Movement Phase', () => {
 });
 
 describe('What the other seat sees', () => {
-  it('a unit beneath a hidden foxhole shows no position, its 0-MF moves in and out show nothing, and the reveal by a claimed TEM shows both', () => {
+  it('at setup: a unit beneath a hidden foxhole shows no position, and the German setup stream names none of the counters still hidden', () => {
     const f = fixture('fort-owner');
     const ru = (def: string, n = 1) => f.unit('ru', def, n);
     // The Russians in their counters; the Germans far from the O6 foxhole's woods-less Open Ground... which any Good
@@ -166,5 +166,71 @@ describe('What the other seat sees', () => {
     const theirs = (redactState(f.engine, t.state, 'ge').ext['asl.fortifications'] as { counters: FortRecord[] }).counters;
     expect(theirs.every((c) => !c.hidden || c.revealed)).toBe(true);
     expect(fortificationView(f.engine.env(t.state), 'ge').map((c) => c.id)).not.toEqual(expect.arrayContaining(hidden));
+  });
+
+  it('a hidden foxhole out of German LOS, through the Russian Player Turn into the next: its 0-MF moves out and back in show the German nothing, and the squad moves on normally next turn (A12.33)', () => {
+    const f = fixture('foxhole-hidden');
+    const sq = f.unit('ru', 'ru.447', 3);
+    const fox = fortCounters(f.engine.env(f.state)).find((c) => c.hex === 'uC2')!;
+    expect(fox).toMatchObject({ kind: 'foxhole', hidden: true });
+    expect(locOf(f.state, sq).pos).toEqual({ ent: 'foxhole' });
+    const viewers: (string | null)[] = ['ge', null];
+    const views = new Map(viewers.map((v) => [v, redactState(f.engine, f.state, v)]));
+    const told: LoggedEvent[] = [];
+    // Every action goes through the two-seat invariant: the stream folds into the snapshot, and neither names the counter,
+    // shows the squad beneath it, the moving stack beneath it, or a move in or out of it.
+    const submit = (a: Record<string, unknown>) => {
+      const d = f.decision;
+      const full = { ...a, side: d.owner, decisionId: d.id } as Action;
+      expect(f.engine.validate(f.state, full), `${a.type} in ${f.state.phase}`).toBeNull();
+      const t = f.engine.submit(f.state, full);
+      for (const viewer of viewers) {
+        const redact = (x: GameState) => redactState(f.engine, x, viewer);
+        const stream = f.engine.redactTransition(viewer, redact, f.state, t.events as LoggedEvent[]);
+        const snapshot = redact(t.state);
+        expect(deepEqual(f.engine.applyEvents(views.get(viewer)!, stream), snapshot), `${viewer}: fold after ${a.type}`).toBe(true);
+        const json = JSON.stringify(stream) + JSON.stringify(snapshot);
+        expect(json, `${viewer} sees the counter`).not.toContain(`"${fox.id}"`);
+        expect(stream.some((e) => e.type === 'asl.entrench.move'), `${viewer} sees a move beneath`).toBe(false);
+        const p = snapshot.pieces[sq];
+        if (p?.loc.kind === 'hex' && p.loc.hex === 'uC2') expect(p.loc.pos?.ent, `${viewer} sees the squad beneath`).toBeUndefined();
+        expect((snapshot.ext['sk1.move'] as { ent?: true } | undefined)?.ent, `${viewer} sees the stack beneath`).toBeUndefined();
+        views.set(viewer, snapshot);
+      }
+      told.push(...(t.events as LoggedEvent[]));
+      f.state = t.state;
+    };
+    const PASS = ['defPass', 'defRofDecline', 'move.end', 'cc.arranged', 'blaze.stay', 'rout.stay', 'endPhase'];
+    const passUntil = (phase: string, turn: number, attacker: string) => {
+      for (let guard = 0; guard < 400 && !(f.state.phase === phase && f.state.turn === turn && f.state.attacker === attacker); guard++) {
+        const legal = f.engine.legalActions(f.state, f.decision.owner);
+        const pick = PASS.map((t) => legal.find((x) => x.type === t)).find(Boolean) ?? legal.find((x) => x.type === 'cc.declare' && (x['attacks'] as unknown[]).length === 0);
+        const { side: _s, decisionId: _d, ...rest } = pick!;
+        submit(rest);
+      }
+      expect(f.state).toMatchObject({ phase, turn, attacker });
+    };
+    passUntil('MPh', 1, 'ru');
+    submit({ type: 'move.start', units: [sq] });
+    // Out of the hidden foxhole and back beneath it: no MF either way (A12.33).
+    submit({ type: 'move.entrenchment', beneath: false });
+    expect(locOf(f.state, sq).pos).toBeUndefined();
+    submit({ type: 'move.entrenchment', beneath: true });
+    expect(locOf(f.state, sq).pos).toEqual({ ent: 'foxhole' });
+    expect(moveState(f.engine.env(f.state))?.spent[sq] ?? 0).toBe(0);
+    submit({ type: 'move.end' });
+    // The rest of the Russian Player Turn, the German one, and into the next Russian MPh.
+    passUntil('MPh', 2, 'ru');
+    expect(fortCounters(f.engine.env(f.state)).find((c) => c.id === fox.id)).toMatchObject({ hidden: true });
+    expect(fortCounters(f.engine.env(f.state)).find((c) => c.id === fox.id)?.revealed).toBeFalsy();
+    expect(Object.values(f.state.pieces[sq]!.tags).filter(Boolean)).toEqual([]);
+    // The squad moves on normally, out of the foxhole and away.
+    submit({ type: 'move.start', units: [sq] });
+    const out = f.engine.legalActions(f.state, 'ru').find((a) => a.type === 'move.step');
+    expect(out).toBeDefined();
+    const { side: _s, decisionId: _d, ...step } = out!;
+    submit(step);
+    expect(locOf(f.state, sq).hex).not.toBe('uC2');
+    expect(told.length).toBeGreaterThan(0);
   });
 });

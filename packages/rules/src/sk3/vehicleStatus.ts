@@ -235,7 +235,8 @@ export const vehicleStatusModule: RuleModule = {
         }
         ctx.emit('sk3.vehicle.repair', { vehicle: a.vehicle, weapon: a.weapon, dr, result });
         ctx.popDecision();
-        askPhaseOwner(ctx, a.side);
+        // Back to the same side's half of the RPh: its decision names the side, as every rally action's does.
+        askPhaseOwner(ctx, a.side, { side: a.side });
       },
     });
     r.on<{ phase: string }>({

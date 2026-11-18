@@ -17,9 +17,14 @@ export const PURGE_MS = 15 * 60_000;
 /** How often the reader re-applies the staleness cut without a new snapshot. */
 export const RECHECK_MS = 30_000;
 
+/** Where a member's tab is: the lobby pages, a match, or a page outside the app (a profile, a report). */
+export type PresenceArea = 'lobby' | 'match' | 'away';
+
+export const areaOf = (pathname: string): PresenceArea => (!pathname.startsWith('/app') ? 'away' : pathname.includes('/match/') ? 'match' : 'lobby');
+
 export interface PresenceConnection {
   at?: number;
-  area?: 'lobby' | 'match';
+  area?: PresenceArea;
   active?: boolean;
 }
 
@@ -27,7 +32,7 @@ export type PresenceTree = Record<string, Record<string, PresenceConnection | nu
 
 /** Whether one connection puts its owner in the Lobby right now, by the server clock. */
 export function connectionPresent(connection: PresenceConnection | null | undefined, serverNow: number): boolean {
-  if (!connection || connection.area === 'match') return false;
+  if (!connection || (connection.area !== undefined && connection.area !== 'lobby')) return false;
   if (connection.active === false) return false;
   return typeof connection.at === 'number' && serverNow - connection.at <= STALE_MS;
 }

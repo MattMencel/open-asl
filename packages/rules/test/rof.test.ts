@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Action, Ctx, Engine, GameState, RuleModule } from '@asl/engine';
 import { FP, fireMarker, moveState, rofChoices, rofDeclineResidual, shownFireMarker, type FireDeclaration, type FireMode, type ResolveFireFn } from '../src';
-import { RU_VS_GE, act, makeEngine } from './fixtures';
+import { GE_VS_BR, RU_VS_GE, act, makeEngine } from './fixtures';
 
 /** Test-only action: resolve a fire declaration in a given mode. */
 const testFire: RuleModule = {
@@ -131,6 +131,20 @@ describe('Rate of Fire (SK1 1.2.4, 3.2, 3.4)', () => {
 
 // SK1 3.3.1: "a SW that malfunctions or chooses to retain ROF leaves no Residual FP" — so the ROF is a
 // choice. A weapon that kept it in Defensive First Fire may give it up for the Residual FP instead.
+describe('ROF kept again in the DFPh (SK1 1.2.4)', () => {
+  it('a MG that keeps ROF firing alone after its squad fired in the DFPh stays unmarked, the squad being marked Final already', () => {
+    // DR 1+2 then 1+2: colored 2 within the MMG's ROF 2 both times; then 4+5 loses it.
+    const { engine, state } = makeEngine({ terrain, extra: [testFire], pieces, dice: [1, 2, 1, 2, 4, 5, 6, 6], startPhase: 'DFPh' });
+    const t = act(engine, state, { type: 'test.fire', mode: 'final', decl: { units: ['g1'], sw: ['gMMG'], target: 'yN5' } });
+    expect(t.state.pieces['g1']!.tags['fire']).toBe('final');
+    const t2 = act(engine, t.state, { type: 'fire', decl: { units: [], sw: ['gMMG'], target: 'yN5' } });
+    expect(rofEvent(t2)).toEqual({ colored: 2, kept: [{ sw: 'gMMG', rof: 2 }], lost: [] });
+    expect(t2.state.pieces['gMMG']!.tags['fire']).toBeUndefined();
+    const t3 = act(engine, t2.state, { type: 'fire', decl: { units: [], sw: ['gMMG'], target: 'yN5' } });
+    expect(t3.state.pieces['gMMG']!.tags['fire']).toBe('final');
+  });
+});
+
 describe('Keeping ROF or leaving Residual FP (SK1 3.3.1)', () => {
   const terrain = { zJ3: { terrain: 'building-stone' }, zK5: { terrain: 'building-stone' } };
   const setup = (dice: number[]) =>
@@ -360,3 +374,25 @@ describe('leader direction of ROF shots', () => {
     expect(marks(s)).toEqual({ gL: undefined, hs: undefined, lmg: undefined });
   });
 });
+
+describe('no Rate of Fire in the AFPh (SK4 1.2.4.1 "except the AFPh")', () => {
+  it('a MG firing in the AFPh loses ROF on any colored dr and is marked; it may not fire again that phase', () => {
+    // German AFPh: a squad with a MMG (ROF 2) fires at a British squad two hexes away. DR 1+2: colored 2 ≤ ROF 2.
+    const { engine, state } = makeEngine({
+      scenario: GE_VS_BR,
+      terrain,
+      startPhase: 'AFPh',
+      dice: [1, 2, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
+      pieces: [
+        { id: 'g1', def: 'ge.467', side: 'ge', hex: 'yP5' },
+        { id: 'gMMG', def: 'ge.MMG', side: 'ge', heldBy: 'g1' },
+        { id: 'b1', def: 'br.457', side: 'br', hex: 'yN5' },
+      ],
+    });
+    const t = act(engine, state, { type: 'fire', decl: { units: ['g1'], sw: ['gMMG'], target: 'yN5' } });
+    expect(rofEvent(t)).toEqual({ colored: 2, kept: [], lost: [{ sw: 'gMMG', rof: 2, why: 'afph' }] });
+    expect(t.state.pieces['gMMG']!.tags['fire']).toBe('adv');
+    expect(() => act(engine, t.state, { type: 'fire', decl: { units: [], sw: ['gMMG'], target: 'yN5' } })).toThrow();
+  });
+});
+

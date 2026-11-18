@@ -1,13 +1,16 @@
 import type { Ctx, HexId, PieceId, QueryEnv, RuleModule } from '@asl/engine';
 import { hexOfLoc, levelOfLoc, locId, locOf, locationsOf, parseLoc, type LocId } from '../common/location';
 import { sideToward } from '../common/hexCorners';
-import { personnelAt, personnelInHex, statics, unpossessedWeaponsAt, unpossessedWeaponsInHex } from '../common/pieces';
+import { defOf, personnelAt, personnelInHex, statics, unpossessedWeaponsAt, unpossessedWeaponsInHex } from '../common/pieces';
 import { fortifiedState } from '../sk1/fortified';
+import { pieceOf } from '../sk1/status';
+import { terrainOf } from '../sk1/terrain';
 import { FP, type BeforeApplyFn, type BeforeApplyInfo } from '../sk1/fire';
 import { P as MP, eliminate, type FlushFn, type RandomSelectFn } from '../sk1/morale';
 import { updateControl, type ControlState } from '../sk1/scenario';
 import { blazeAt, blazeLocations, flamesAt, placeBlaze, removeFlames } from './fire';
 import { hexsideForDr } from './wind';
+import { vehicle } from '../sk3/status';
 
 /*
  * Rubble in full ASL (ASLRB B24.1–B24.6, B24.11, B24.12, B24.121, B25.66).
@@ -19,8 +22,8 @@ import { hexsideForDr } from './wind';
  * - **Creation by HE** (B24.11): a HE attack of 70mm or more (or HEAT) whose Original IFT DR is a KIA on the column fired
  *   rolls a dr (+1 stone): ≤ the KIA number rubbles that level and every level above it, eliminating the unarmored
  *   occupants and their SW instead of the IFT result; a level above ground rubbled may bring the whole hex down (dr +1
- *   per level above it ≥ 6). An Area or Indirect Fire hit on several levels picks the one by Random Selection. The DC
- *   (A23.41) reaches here through the same procedure point when it is given its caliber.
+ *   per level above it ≥ 6). An Area or Indirect Fire hit on several levels picks the one by Random Selection. A DC
+ *   (A23.41), Placed or a Breach attempt, reaches here through the same procedure point.
  * - **Falling rubble** (B24.12, B24.121): a hex with an upper level rubbled by any means rolls a DR: colored dr +1 per
  *   non-rooftop level above ground rubbled ≥ 7 and the rubble falls across the hexside the white dr names (B.8) into the
  *   next hex: its terrain becomes ground rubble of the fallen building's kind, its Infantry and unpossessed SW are
@@ -30,8 +33,8 @@ import { hexsideForDr } from './wind';
  * - **Collapse** (B25.66): on an Original Wind Change DR of 12 a building Location holding a Blaze (Random Selection,
  *   every tie) collapses into burning rubble, and all levels above it.
  *
- * Vehicles, fortifications and TB in the way of falling rubble (B24.121), rubble clearance (B24.7, B24.71) and printed
- * rubble (B24.55) wait for their rules. The Starter Kit has no rubble creation: nothing here runs there.
+ * Fortifications under falling rubble are removed by `asl.fortifications` and `asl.entrenchments` (B24.121). Vehicles and TB in
+ * the way of falling rubble (B24.121), rubble clearance (B24.7, B24.71) and printed rubble (B24.55) wait for their rules. The Starter Kit has no rubble creation: nothing here runs there.
  */
 
 export const RUBBLE_EXT = 'asl.rubble';
@@ -105,9 +108,11 @@ export function rubbleLocation(ctx: Ctx, loc: LocId, opts: { by: 'he' | 'dc' | '
     if (blaze && !blaze.rubble) ctx.emit('asl.fire.blaze', { loc, blaze: { ...blaze, rubble: true }, source: 'rubble' });
     else placeBlaze(ctx, loc, { kindledBy: blaze?.kindledBy ?? null, source: 'rubble', rubble: true });
   }
-  // Falling rubble (B24.12): only a hex that had an upper level, +1 per such level rubbled by this.
+  // Falling rubble (B24.12): only a hex that had an upper level, +1 per non-rooftop upper level "rubbled by that
+  // shot" — a level already rubble from an earlier one does not count again.
   const upper = upperLevels(ctx, hex);
-  if (upper > 0 && !wasRubble) fallingRubble(ctx, hex, Math.max(0, upper - Math.max(from, 1) + 1), kind, burning);
+  const top = existing ? Math.min(upper, existing.from - 1) : upper;
+  if (upper > 0 && !wasRubble) fallingRubble(ctx, hex, Math.max(0, top - Math.max(from, 1) + 1), kind, burning);
 }
 
 /** The falling rubble DR of a hex just rubbled (B24.12): colored dr + `drm` ≥ 7, the white dr the direction (B.8). */
@@ -155,15 +160,55 @@ function rubbleFallsInto(ctx: Ctx, hex: HexId, kind: 'stone' | 'wood', burning: 
   }
 }
 
-/** The B24.11 check for a HE/HEAT (or DC) KIA on a building Location; true when the Location was rubbled (the IFT result is then void). */
+/**
+ * One Original DR against several levels of a building hex (Indirect Fire, B23.32): "The level affected in an Area-Target-
+ * Type/OBA attack vs a multi-level building is determined via Random Selection among those levels hit" (B24.11). The
+ * selection and the rubble dr are made at the first of the levels; which Locations collapsed is kept in
+ * `ext['asl.rubble.pick']` for the rest of the levels of that attack, and cleared at its last.
+ */
+const PICK_EXT = 'asl.rubble.pick';
+interface RubblePick {
+  key: string;
+  rubbled: LocId[];
+}
+
 function rubbleCheck(ctx: Ctx, info: BeforeApplyInfo): boolean {
-  if (info.by === 'other') return false;
-  if (info.by === 'he' && !info.heat && (info.caliber ?? 0) < 70) return false;
-  if (info.by === 'dc' && info.caliber === undefined) return false;
-  if (!isBuildingLoc(ctx, info.target)) return false;
+  const group = info.group ?? [];
+  if (group.length > 1 && group.includes(info.target)) {
+    if (kiaOf(ctx, info) === null) return false;
+    const key = `${group.join(',')}|${info.originalDr}|${info.column}`;
+    let pick = ctx.state.ext[PICK_EXT] as RubblePick | undefined;
+    if (!pick || pick.key !== key || info.target === group[0]) {
+      const levels = group.filter((l) => isBuildingLoc(ctx, l));
+      if (levels.length < 2) return singleCheck(ctx, info);
+      const [chosen] = ctx.proc<RandomSelectFn>(MP.randomSelect)(ctx, levels, 1, 'Rubble: the building level hit');
+      const before = new Set(levels.filter((l) => isRubbled(ctx, l)));
+      singleCheck(ctx, { ...info, target: chosen! });
+      pick = { key, rubbled: levels.filter((l) => isRubbled(ctx, l) && !before.has(l)) };
+      ctx.emit('asl.rubble.pick', { pick });
+    }
+    const out = pick.rubbled.includes(info.target);
+    if (info.target === group[group.length - 1]) ctx.emit('asl.rubble.pick', { pick: null });
+    return out;
+  }
+  return singleCheck(ctx, info);
+}
+
+/**
+ * The KIA# of an attack that can rubble a building, or null: HE ≥ 70mm or HEAT (B24.11), or a DC (A23.41 "may ... cause a
+ * Building to rubble (B24.11)"; A23.1 sets the column it is judged on).
+ */
+function kiaOf(ctx: Ctx, info: BeforeApplyInfo): number | null {
+  if (info.by === 'other') return null;
+  if (info.by === 'he' && !info.heat && (info.caliber ?? 0) < 70) return null;
   const res = statics(ctx).tables.ift(info.column, info.originalDr);
-  if (res.kind !== 'KIA') return false;
-  const kia = res.n ?? 1;
+  return res.kind === 'KIA' ? (res.n ?? 1) : null;
+}
+
+function singleCheck(ctx: Ctx, info: BeforeApplyInfo): boolean {
+  if (!isBuildingLoc(ctx, info.target)) return false;
+  const kia = kiaOf(ctx, info);
+  if (kia === null) return false;
   const stone = buildingKind(ctx, hexOfLoc(info.target)) === 'stone';
   const dr = ctx.roll(`Rubble dr for ${info.target}`, 1).total;
   const rubbled = dr + (stone ? 1 : 0) <= kia;
@@ -200,6 +245,13 @@ export const aslRubbleModule: RuleModule = {
       },
     });
     r.event<{ loc: LocId; dr: number; drm: number; kia: number; rubbled: boolean }>({ type: 'asl.rubble.check', apply() {} });
+    r.event<{ pick: RubblePick | null }>({
+      type: 'asl.rubble.pick',
+      apply(d, p) {
+        if (p.pick) d.ext[PICK_EXT] = p.pick;
+        else delete d.ext[PICK_EXT];
+      },
+    });
     r.event<{ hex: HexId; dr: number; drm: number; rubbled: boolean }>({ type: 'asl.rubble.whole', apply() {} });
     r.event<{ hex: HexId; dr: [number, number]; drm: number; falls: boolean; hexside: number; to?: HexId }>({ type: 'asl.rubble.falling', apply() {} });
     r.event<{ hex: HexId; loc: LocId; units: PieceId[]; weapons: PieceId[]; falling?: boolean }>({ type: 'asl.rubble.eliminated', apply() {} });
@@ -217,6 +269,40 @@ export const aslRubbleModule: RuleModule = {
         return !!rb && (loc ? levelOfLoc(loc) >= rb.from : rb.from === 0);
       },
       apply: (_v, { hex }, env) => `rubble-${rubbleAt(env, hex)!.kind}`,
+    });
+    // B24.2: the ground level of a hex holding upper level rubble is covered with rubble throughout: entering it costs the
+    // rubble's MF, except across a connecting (non-rubble) building hexside, at the building's rate (EX: I2 to H2 three MF,
+    // G3/H3/I3 to H2 two). Infantry only; vehicles and rubble are their own rules.
+    r.contribute({
+      id: 'asl.rubble.ground-under',
+      query: 'move.cost',
+      layer: 2,
+      ref: 'ASLRB B24.2',
+      label: 'rubble-covered ground (B24.2)',
+      when: ({ unit, from, to, loc }, env) => {
+        if (loc || defOf(env, pieceOf(env, unit)).kind === 'vehicle') return false;
+        const rb = rubbleAt(env, to);
+        if (!rb || rb.from === 0) return false;
+        const map = statics(env).map;
+        const b = map.hex(to)?.buildingId;
+        const connecting = !!from && !!b && map.hex(from)?.buildingId === b && !isRubbled(env, from);
+        return !connecting;
+      },
+      apply: (_v, { to }, env) => terrainOf(env, locId(to, rubbleAt(env, to)!.from)).mf,
+    });
+    // B24.4: "Vehicles may not enter a rubble Location unless they are fully-tracked" (half their MP and a Bog Check +3
+    // are the vehicle movement rules', `sk3/vehicleMove.ts`).
+    r.contribute({
+      id: 'asl.rubble.vehicle-tracked',
+      query: 'vehicle.stepIllegal',
+      layer: 10,
+      ref: 'ASLRB B24.4',
+      apply(v, { ms, to }, env) {
+        if (v || !rubbleAt(env, to) || rubbleAt(env, to)!.from !== 0) return v;
+        const p = env.state.pieces[ms.units[0]!];
+        const d = p ? vehicle(env, p) : null;
+        return d && !d.tracked ? 'Only a fully tracked vehicle may enter rubble (ASLRB B24.4)' : null;
+      },
     });
     // B24.4: the stairwell to or from a rubble level costs three MF, not one.
     r.contribute({

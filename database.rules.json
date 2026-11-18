@@ -7,7 +7,7 @@
       "$uid": {
         "$connectionId": {
           ".write": "auth != null && auth.token.member == true && auth.uid == $uid",
-          ".validate": "newData.hasChildren(['at', 'area']) && newData.child('at').isNumber() && (newData.child('area').val() == 'lobby' || newData.child('area').val() == 'match') && (!newData.hasChild('active') || newData.child('active').isBoolean())"
+          ".validate": "newData.hasChildren(['at', 'area']) && newData.child('at').isNumber() && (newData.child('area').val() == 'lobby' || newData.child('area').val() == 'match' || newData.child('area').val() == 'away') && (!newData.hasChild('active') || newData.child('active').isBoolean())"
         }
       }
     }

@@ -3,7 +3,7 @@ import type { Action, Engine, GameState, Piece, PieceId } from '@asl/engine';
 import { ALL_SCENARIOS, DEMO_VEHICLES_SCENARIO, newGame, newSk1Game } from '@asl/content';
 import { defOf } from '@asl/rules';
 import { act, makeEngine } from '../../../packages/rules/test/fixtures';
-import { fireLeaders, fireSelectable } from '../src/game/fireSelection';
+import { aimsAt, fireLeaders, fireSelectable } from '../src/game/fireSelection';
 
 /** The click selection the game screen makes on `side`'s stack in `hex` (GameScreen selectableAt, fire phases). */
 const selection = (engine: Engine, state: GameState, side: string, hex: string): PieceId[] => {
@@ -156,5 +156,33 @@ describe('fire selection (what a click on an own stack picks up)', () => {
     // Alone in its hex, the tank is picked up with its MGs (its MA's IFE and MGs fire together, SK4 7.8).
     const alone = { ...state, pieces: Object.fromEntries(Object.entries(state.pieces).filter(([id]) => !['crew', 'mmg', 'ldr'].includes(id))) };
     expect(selection(engine, alone, 'am', 'yP5').sort()).toEqual(['tank', 'tank.bmg', 'tank.cmg']);
+  });
+});
+
+describe('what a click aims the declared fire at (aimsAt)', () => {
+  // An American squad in yP5; a lone German AFV in yN5 (Crew Exposed or not), a wreck in yM5, an empty hex yO5.
+  const game = (ce: boolean) =>
+    makeEngine({
+      pieces: [
+        { id: 'a1', def: 'am.666', side: 'am', hex: 'yP5' },
+        { id: 'v', def: 'ge.pzivf2', side: 'ge', hex: 'yN5', tags: { vca: 0, ca: 0, ...(ce ? { ce: true } : {}) } },
+        { id: 'w', def: 'ge.pzivf2', side: 'ge', hex: 'yM5', tags: { wreck: true } },
+      ],
+    });
+
+  it('Infantry fire aims at a lone enemy AFV: a CE crew is attacked on the IFT (SK4 7.7), a BU one is not harmed but may be shot at', () => {
+    for (const ce of [true, false]) {
+      const { engine, state } = game(ce);
+      expect(aimsAt(engine.env(state), 'yN5', 'am', null)).toBe(true);
+    }
+  });
+
+  it('a Gun or PF aims at a lone AFV only on the Vehicle Target Type, never at a wreck or an empty hex', () => {
+    const { engine, state } = game(true);
+    const env = engine.env(state);
+    expect(aimsAt(env, 'yN5', 'am', { targetType: 'VTT' })).toBe(true);
+    expect(aimsAt(env, 'yN5', 'am', { targetType: 'ITT' })).toBe(false);
+    expect(aimsAt(env, 'yM5', 'am', null)).toBe(false);
+    expect(aimsAt(env, 'yO5', 'am', null)).toBe(false);
   });
 });

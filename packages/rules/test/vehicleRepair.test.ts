@@ -54,6 +54,20 @@ describe('Vehicle weapon repair (SK4 3.1 c)', () => {
     expect(r.state.pieces['tiger']!.tags['malf']).toBeUndefined();
   });
 
+  it("the DEFENDER's repair keeps his half of the RPh: his leader may still rally a broken squad after it", () => {
+    const ge: PieceSpec[] = [tiger({ malf: true }), { id: 'l', def: 'ge.L91', side: 'ge', hex: 'yM4' }, { id: 'sq', def: 'ge.467', side: 'ge', hex: 'yM4', tags: { broken: true } }];
+    // Repair dr 4 (no change), then the rally DR 2+2.
+    const { engine, state } = game([t34(), ...ge], [4, 2, 2]);
+    let s = act(engine, state, { type: 'endPhase' }).state;
+    const rallies = (st: typeof s) => engine.legalActions(st, 'ge').filter((a) => a.type === 'rally.rally' || a.type === 'rally.rallyAll').length;
+    expect(rallies(s)).toBeGreaterThan(0);
+    s = act(engine, s, { type: 'vehicle.repair', vehicle: 'tiger', weapon: 'ma' }).state;
+    expect(engine.currentDecision(s)?.owner).toBe('ge');
+    expect(rallies(s)).toBeGreaterThan(0);
+    s = act(engine, s, { type: 'rally.rally', leader: 'l', unit: 'sq' }).state;
+    expect(s.pieces['sq']!.tags['broken']).toBeUndefined();
+  });
+
   it('a Shocked crew cannot repair', () => {
     // The RPh opens with the recuperation dr (SK4 3.1 g): a 5 leaves the crew Shocked (Unconfirmed Kill), so no repair.
     const { engine, state } = game([t34({ malf: true, [T3.shock]: 'shock' }), tiger()], [5, 1]);

@@ -111,7 +111,8 @@ export const elevationModule: RuleModule = {
       ref: 'SK4 1.1.1',
       layer: Layer.Base + 50,
       label: 'x2 crossing a Crest Line uphill',
-      when: ({ from, to }, env) => !!from && levelOf(env, to) > levelOf(env, from),
+      // From offboard too: an offboard hex is at level 0 (ASLRB A2.51), so entering a hill hex from it climbs.
+      when: ({ from, off, to }, env) => !!(from ?? off) && levelOf(env, to) > levelOf(env, (from ?? off)!),
       apply: (v) => v * 2,
     });
 

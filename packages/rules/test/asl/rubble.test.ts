@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import type { Action, Engine, GameState, RuleModule } from '@asl/engine';
+import type { Action, Engine, GameState, LoggedEvent, RuleModule } from '@asl/engine';
 import {
   FORTIFIED_MODULE,
   aslCoreModules,
   blazeAt,
   controlState,
+  fortCounters,
+  redactState,
   fortifiedModule,
   hexsideForDr,
   isFortified,
@@ -24,6 +26,8 @@ import { sk1CoreModules } from '../../src/sk1';
 import { sk2CoreModules } from '../../src/sk2';
 import { sk3CoreModules } from '../../src/sk3';
 import { act, makeEngine, type PieceSpec } from '../fixtures';
+import { FP, type BeforeApplyFn } from '../../src/sk1/fire';
+import { vehicleEntryCost } from '../../src/sk3/vehicleMove';
 
 /*
  * Rubble in full ASL (ASLRB B24): a HE KIA of 70mm or more rubbles a building Location on a dr ≤ the KIA number (+1
@@ -44,6 +48,16 @@ const ASL: RuleModule[] = [...SK, ...aslCoreModules];
 const testFires: RuleModule = {
   id: 'test.fires',
   install(r) {
+    // One Original DR against several Locations, as Indirect Fire attacks every level of a building hex (B23.32).
+    r.action<Action & { type: 'test.beforeApply'; group: string[]; dr: number; column: number; by?: 'he' | 'dc' }>({
+      type: 'test.beforeApply',
+      decisionKinds: ['phase'],
+      resolve(ctx, a) {
+        const out = a.group.map((target) => ctx.proc<BeforeApplyFn>(FP.beforeApply)(ctx, a.by === 'dc' ? { target, by: 'dc', column: a.column, originalDr: a.dr } : { target, by: 'he', column: a.column, originalDr: a.dr, caliber: 81, group: a.group }));
+        ctx.emit('test.rubbled', { out });
+      },
+    });
+    r.event({ type: 'test.rubbled', apply() {} });
     r.action<Action & { type: 'test.blaze'; loc: string }>({
       type: 'test.blaze',
       decisionKinds: ['phase'],
@@ -124,6 +138,31 @@ describe('Rubble creation by HE (B24.11)', () => {
     expect(events(t, 'asl.fire.attackFlame')).toHaveLength(0);
   });
 
+  it('one Original DR against both levels of a house: one rubble dr, for the level picked by Random Selection (B24.11)', () => {
+    // Random Selection: a dr per level (A.9). Then the rubble dr 1 (+1 stone) ≤ 2KIA.
+    // Ground picked: the whole hex is rubble, both attacks void. Falling rubble DR 1+1: stays.
+    const far: PieceSpec[] = [{ id: 'gf', def: 'ge.467', side: 'ge', hex: 'uY10' }, { id: 'rf', def: 'ru.447', side: 'ru', hex: 'uA1' }];
+    const a = game(far, { dice: [5, 2, 1, 1, 1] });
+    const t = act(a.engine, a.state, { type: 'test.beforeApply', group: ['uK4:1', 'uK4'], dr: 2, column: 16 });
+    expect(events(t, 'asl.rubble.check')).toEqual([expect.objectContaining({ loc: 'uK4', rubbled: true })]);
+    expect(events(t, 'test.rubbled')[0]).toEqual({ out: [true, true] });
+    // Level 1 picked: it alone is rubble (whole-hex dr 5), the ground's attack goes ahead.
+    const b = game(far, { dice: [2, 5, 1, 5, 1, 1] });
+    const u = act(b.engine, b.state, { type: 'test.beforeApply', group: ['uK4:1', 'uK4'], dr: 2, column: 16 });
+    expect(events(u, 'asl.rubble.check')).toEqual([expect.objectContaining({ loc: 'uK4:1', rubbled: true })]);
+    expect(events(u, 'test.rubbled')[0]).toEqual({ out: [true, false] });
+    expect(rubbleAt(b.engine.env(u.state), 'uK4')).toEqual({ from: 1, kind: 'stone' });
+  });
+
+  it('a DC may rubble a building as HE does: a KIA on its Original DR and a rubble dr within the KIA number (A23.41, B24.11)', () => {
+    const far: PieceSpec[] = [{ id: 'gf', def: 'ge.467', side: 'ge', hex: 'uY10' }, { id: 'rf', def: 'ru.447', side: 'ru', hex: 'uA1' }];
+    // 30 FP column, Original DR 2: a KIA; rubble dr 1 +1 stone; falling DR 1+1 stays.
+    const { engine, state } = game(far, { dice: [1, 1, 1] });
+    const t = act(engine, state, { type: 'test.beforeApply', group: ['uK5'], dr: 2, column: 30, by: 'dc' });
+    expect(events(t, 'asl.rubble.check')).toEqual([expect.objectContaining({ loc: 'uK5', rubbled: true })]);
+    expect(rubbleAt(engine.env(t.state), 'uK5')).toMatchObject({ from: 0 });
+  });
+
   it('a rubble dr beyond the KIA number leaves the building, and the attack is resolved on the occupants', () => {
     const p = probe();
     const { engine, state } = game(pieces(p.engine, p.state), { dice: [2, 1, 1, 1, 3, 3, 4] });
@@ -133,6 +172,8 @@ describe('Rubble creation by HE (B24.11)', () => {
     expect(rubbleAt(engine.env(t.state), 'uK4')).toBeUndefined();
     expect(t.state.pieces['r1']!.loc.kind).toBe('eliminated');
     expect(events(t, 'sk1.fire.result').length).toBeGreaterThan(0);
+    // The building stands, so the HE Original KIA makes its Flame DR there, with no EC DRM in a building (B25.13).
+    expect(events(t, 'asl.fire.attackFlame')).toEqual([expect.objectContaining({ loc: 'uK4', source: 'he', drm: 0 })]);
   });
 
   it('a KIA at level 1 rubbles that level; the whole-hex dr may bring the ground down too, else the ground stays a building and the stairs cost three MF', () => {
@@ -150,6 +191,12 @@ describe('Rubble creation by HE (B24.11)', () => {
     expect(rubbledHeights(env)).toEqual({ uK4: { hex: 0.5, art: 1.5 } });
     expect(t.state.pieces['r1']!.loc.kind).toBe('eliminated');
     expect(t.state.pieces['mg']!.loc.kind).toBe('hex');
+    // B24.2: the ground under the rubbled level is rubble-covered: 3 MF to enter, but 2 across the connecting building
+    // hexside from K5 (the B24.2 EX: I2 to H2 three MF, I3 to H2 two).
+    const mf = (from: string) => env.query('move.cost', { unit: 'r2', from, to: 'uK4', viaRoad: false }, 0);
+    expect(mf('uK5')).toBe(2);
+    expect(mf('uJ4')).toBe(3);
+    expect(mf('uL4')).toBe(3);
     // A dr of 6 brings the whole hex down.
     const p2 = probe();
     const g2 = game(pieces(p2.engine, p2.state, 1), { dice: [2, 1, 1, 1, 1, 6, 1, 1] });
@@ -178,6 +225,19 @@ describe('Rubble creation by HE (B24.11)', () => {
 });
 
 describe('Falling rubble (B24.12, B24.121) and Collapse (B25.66)', () => {
+  it('the falling rubble dr counts only the upper levels rubbled by that shot, not one rubbled earlier (B24.12)', () => {
+    const far: PieceSpec[] = [{ id: 'gf', def: 'ge.467', side: 'ge', hex: 'uY10' }, { id: 'rf', def: 'ru.447', side: 'ru', hex: 'uA1' }];
+    const { engine, state } = game(far, { dice: [1, 5, 1, 1, 1, 1, 1] });
+    // Level 1 first: rubble dr 1, whole-hex dr 5 (the ground stands), falling DR +1 for level 1.
+    let t = act(engine, state, { type: 'test.beforeApply', group: ['uK4:1'], dr: 2, column: 16 });
+    expect(rubbleAt(engine.env(t.state), 'uK4')).toEqual({ from: 1, kind: 'stone' });
+    expect(events(t, 'asl.rubble.falling')[0]).toMatchObject({ drm: 1 });
+    // Then the ground: level 1 is already rubble, so this shot rubbled no upper level: +0.
+    t = act(engine, t.state, { type: 'test.beforeApply', group: ['uK4'], dr: 2, column: 16 });
+    expect(rubbleAt(engine.env(t.state), 'uK4')).toEqual({ from: 0, kind: 'stone' });
+    expect(events(t, 'asl.rubble.falling')[0]).toMatchObject({ drm: 0 });
+  });
+
   it('rubble falling into another building hex rubbles it whole, in a chain, and burning rubble sets what it falls on ablaze', () => {
     const p = probe();
     const map = statics(p.engine.env(p.state)).map;
@@ -198,6 +258,60 @@ describe('Falling rubble (B24.12, B24.121) and Collapse (B25.66)', () => {
     expect(blazeAt(env, 'uK5')).toMatchObject({ rubble: true });
     expect(s.pieces['r2']!.loc.kind).toBe('eliminated');
     expect(controlState(env).buildings['u-B16']).toBeUndefined();
+  });
+
+  it('falling rubble eliminates every Fortification in the hex it falls on: Wire, a pillbox, a roadblock, a foxhole; a hidden one goes unseen by the enemy (B24.121, A12.33)', () => {
+    const p = probe();
+    const map = statics(p.engine.env(p.state)).map;
+    const under = map.neighbors('uK4').find((n) => sideToward(map, 'uK4', n) === hexsideForDr(3))!;
+    // As in the HE rubble test: a 2KIA rubbles K4 and its rubble falls across the hexside the white 3 names.
+    const { engine, state } = game(pieces(p.engine, p.state), { dice: [2, 1, 1, 1, 1, 3, 6] });
+    const counters = [
+      { id: 'ru.fort1', side: 'ru', kind: 'wire', hex: under, hidden: false },
+      { id: 'ru.fort2', side: 'ru', kind: 'pillbox', hex: under, hidden: true, ca: 0, pillbox: { capacity: 1, ca: 3, nca: 5 } },
+      { id: 'ru.fort3', side: 'ru', kind: 'roadblock', hex: under, hidden: false, hexside: 0 },
+      { id: 'ru.fort4', side: 'ru', kind: 'foxhole', hex: under, hidden: false, capacity: 1 },
+      { id: 'ru.fort5', side: 'ru', kind: 'wire', hex: 'uY10', hidden: false },
+    ];
+    const s0 = { ...state, ext: { ...state.ext, 'asl.fortifications': { counters } } };
+    const t = act(engine, s0, shot('uK4'));
+    expect(events(t, 'asl.rubble.falling')[0]).toMatchObject({ falls: true, to: under });
+    expect(fortCounters(engine.env(t.state)).map((c) => c.id)).toEqual(['ru.fort5']);
+    const removed = (viewer: string) =>
+      engine
+        .redactTransition(viewer, (x) => redactState(engine, x, viewer), s0, t.events as LoggedEvent[])
+        .filter((e) => e.type === 'asl.fort.removed')
+        .map((e) => (e.payload as { id: string }).id)
+        .sort();
+    expect(removed('ru')).toEqual(['ru.fort1', 'ru.fort2', 'ru.fort3', 'ru.fort4']);
+    expect(removed('ge')).toEqual(['ru.fort1', 'ru.fort3', 'ru.fort4']);
+  });
+
+  it('a fully tracked vehicle enters a rubbled building hex at half its MP, CE or not, with +3 to its Bog Check; an Armored Car may not (B24.4)', () => {
+    const vehicles: PieceSpec[] = [
+      { id: 't', def: 'ru.T34M43', side: 'ru', hex: 'uK3', tags: { vca: 3, ca: 3, ce: true } },
+    ];
+    const { engine, state } = game([...vehicles, { id: 'gf', def: 'ge.467', side: 'ge', hex: 'uY10' }], { startPhase: 'MPh', scenario: { firstSide: 'ru' } });
+    const s: GameState = { ...state, ext: { ...state.ext, 'asl.rubble': { uK4: { from: 0, kind: 'stone' } } } };
+    const env = engine.env(s);
+    expect(terrainOf(env, 'uK4').id).toBe('rubble-stone');
+    // The T-34 has 16 MP: 8 to enter, Crew Exposed or not (a building would need it Buttoned Up).
+    expect(vehicleEntryCost(env, s.pieces['t']!, 'uK3', 'uK4', { viaRoad: false })).toBe(8);
+    const bog = env.explain('vehicle.bogDrm', { vehicle: 't', hex: 'uK4', halfMp: true }, 0).trace.filter((x) => !x.suppressedBy).map((x) => x.id);
+    expect(bog).toContain('sk3.bog.rubble');
+    expect(bog).not.toContain('sk3.bog.half-mp');
+    let m = act(engine, s, { type: 'vmove.start', vehicle: 't' }).state;
+    while (engine.currentDecision(m)?.kind === 'firstFire') m = act(engine, m, { type: 'defPass' }).state;
+    expect(engine.legalActions(m, 'ru').some((a) => a.type === 'move.step' && a['to'] === 'uK4')).toBe(true);
+    // The standing house next door is still a building: no entry while CE.
+    expect(vehicleEntryCost(env, s.pieces['t']!, 'uK4', 'uK5', { viaRoad: false })).toBe(Infinity);
+    // An Armored Car in the same place is refused the rubble.
+    const g2 = game([{ id: 'ac', def: 'ge.psw2341', side: 'ge', hex: 'uK3', tags: { vca: 3, ca: 3 } }, { id: 'rf', def: 'ru.447', side: 'ru', hex: 'uA1' }], { startPhase: 'MPh' });
+    let a: GameState = { ...g2.state, ext: { ...g2.state.ext, 'asl.rubble': { uK4: { from: 0, kind: 'stone' } } } };
+    a = act(g2.engine, a, { type: 'vmove.start', vehicle: 'ac' }).state;
+    while (g2.engine.currentDecision(a)?.kind === 'firstFire') a = act(g2.engine, a, { type: 'defPass' }).state;
+    expect(g2.engine.validate(a, { type: 'move.step', to: 'uK4', side: 'ge', decisionId: g2.engine.currentDecision(a)!.id } as never)).toMatch(/fully tracked.*B24.4/);
+    expect(g2.engine.legalActions(a, 'ge').some((x) => x.type === 'move.step' && x['to'] === 'uK4')).toBe(false);
   });
 
   it('a Single Story House never drops rubble', () => {

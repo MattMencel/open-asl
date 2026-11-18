@@ -267,6 +267,23 @@ describe('Fire at a Location (ASLRB A2.8, A7.212)', () => {
     expect(illegal('up', 'uK6')).toBeNull();
   });
 
+  it('A7.212 EXC: an unarmed, unarmored enemy vehicle alone in the Location confines nobody; the Starter Kit has no exception (SK4 3.2.2.1)', () => {
+    const pieces: PieceSpec[] = [
+      { id: 'down', def: 'ru.447', side: 'ru', hex: 'uK4' },
+      { id: 'truck', def: 'ge.truck', side: 'ge', hex: 'uK4' },
+      { id: 'g', def: 'ge.467', side: 'ge', hex: 'uK6' },
+    ];
+    const illegalIn = (asl: boolean) => {
+      const { engine, state } = game(pieces, { asl });
+      return engine.env(state).query('fire.illegal', { decl: { units: ['down'], sw: [], target: 'uK6' }, mode: 'prep', side: 'ru' }, null);
+    };
+    expect(illegalIn(true)).toBeNull();
+    expect(illegalIn(false)).toMatch(/enemy unit is in its hex/);
+    // An armed (or armored) vehicle beside the truck still confines the squad.
+    const { engine, state } = game([...pieces, { id: 'tank', def: 'ge.pzivf2', side: 'ge', hex: 'uK4' }]);
+    expect(engine.env(state).query('fire.illegal', { decl: { units: ['down'], sw: [], target: 'uK6' }, mode: 'prep', side: 'ru' }, null)).toMatch(/enemy unit is in its hex/);
+  });
+
   it('Residual FP lies in a Location: a stack entering the ground level does not take the Residual FP left at level 1', () => {
     const run = (key: string) => {
       const { engine, state } = game(

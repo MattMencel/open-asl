@@ -212,3 +212,29 @@ describe('Rally Phase (SK1 3.1)', () => {
     expect(() => act(engine, passed.state, { type: 'rally.repair', unit: 'a2', sw: 'aMMG' })).toThrow(/already attempted/);
   });
 });
+
+describe('a leader rallied by another leader (ASLRB A10.71)', () => {
+  it('may then rally the other broken units of his Location in the same RPh', () => {
+    // American RPh: a Good Order 9-1 with a broken 9-1 and two broken 7-4-7s. DR 1+1 rallies the broken leader.
+    const { engine, state } = makeEngine({
+      startPhase: 'RPh',
+      dice: [1, 1, 1, 1, 1, 1],
+      pieces: [
+        { id: 'l81', def: 'am.L91', side: 'am', hex: 'yN5' },
+        { id: 'l91', def: 'am.L91', side: 'am', hex: 'yN5', tags: { broken: true } },
+        { id: 's1', def: 'am.747', side: 'am', hex: 'yN5', tags: { broken: true } },
+        { id: 's2', def: 'am.747', side: 'am', hex: 'yN5', tags: { broken: true } },
+      ],
+    });
+    // The Good Order leader may rally the broken one alone, not only all of them at once.
+    expect(engine.legalActions(state, 'am').some((a) => a.type === 'rally.rally' && a['leader'] === 'l81' && a['unit'] === 'l91')).toBe(true);
+    const t = act(engine, state, { type: 'rally.rally', leader: 'l81', unit: 'l91' });
+    expect(t.state.pieces['l91']!.tags['broken']).toBeUndefined();
+    // Now the rallied leader may rally the squads himself, as either leader may.
+    const all = engine.legalActions(t.state, 'am').filter((a) => a.type === 'rally.rallyAll').map((a) => a['leader']);
+    expect(all).toContain('l91');
+    const u = act(engine, t.state, { type: 'rally.rallyAll', leader: 'l91' });
+    expect(u.state.pieces['s1']!.tags['broken']).toBeUndefined();
+    expect(u.state.pieces['s2']!.tags['broken']).toBeUndefined();
+  });
+});

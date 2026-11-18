@@ -5,12 +5,12 @@ import { hexPixel } from '../common/map';
 import { byId, otherSide, personnelAt, statics } from '../common/pieces';
 import { PHASE_DECISION, askPhaseOwner } from '../common/turn';
 import { AP, type AdvanceEnterFn } from '../sk1/advance';
-import { FP, iftColumn, type ApplyResultFn, type AttackResolvedFn, type FireAttackCtx } from '../sk1/fire';
+import { FP, iftColumn, type ApplyResultFn, type AttackResolvedFn, type BeforeApplyFn, type FireAttackCtx } from '../sk1/fire';
 import { FPP, type ResolveDcFn } from '../sk1/firePhases';
-import { fortifiedKnownTo, fortifiedState, isFortified, revealFortified } from '../sk1/fortified';
+import { fortifiableBuildings, fortifiableLocations, fortifiedKnownTo, fortifiedParams, fortifiedState, isFortified, revealFortified } from '../sk1/fortified';
 import { knownEnemyAt } from '../sk1/known';
 import { P as MP, type FlushFn } from '../sk1/morale';
-import { MOVE_ENTER, moveInternals, moveLoc, moveState, type MoveEnterFn, type MoveState } from '../sk1/movement';
+import { MOVE_ENTER, MOVE_FINISH, leftUnits, moveInternals, moveLoc, moveState, type MoveEnterFn, type MoveFinishFn, type MoveState } from '../sk1/movement';
 import { drmNotes, gun, isGoodOrder, isPinned, mmc, pieceOf, setTags, squadEquivalents, sw } from '../sk1/status';
 import { revealHex } from '../sk2/hip';
 import { T4 } from '../sk4/status';
@@ -32,16 +32,24 @@ import { T4 } from '../sk4/status';
  *   Area Fire with the same DR, against the units inside (the A23.3 example). A NMC or better Breaches the hexside;
  *   an Original 12 (10 captured) does neither. A hexside is also Breached by the line of fire of a HE attack whose
  *   Final IFT DR is a KIA (ordnance and on-board mortar HE; the firer chooses one of the two hexsides along a
- *   hexspine). A Breach lasts the game and lets either side through that hexside at that level; every other
+ *   hexspine). A Breach of a Location the firer has not been shown to be fortified stays secret with it (B23.911): the
+ *   firer is asked along a hexspine whenever the Location might be fortified, as far as he knows, and the record and
+ *   its event show the other side a Breach only once the Location is revealed. A Breach lasts the game and lets either
+ *   side through that hexside at that level; every other
  *   benefit of the fortification remains. A plain DC may still be Placed on a Fortified Location at the building's
  *   entry cost, whether or not the placer could enter it.
  * - B23.93 GUNS: any Gun may set up in a fortified ground Location; ART/AT/INF Guns of at most 76mm may set up at a
  *   fortified upper level of a stone multi-level building, and never move from it; no Gun may be moved into a
  *   Fortified Building Location during play. A mortar there has no Indirect Fire, which the shared rule that a
  *   mortar may not fire from a building already covers.
- * - Not here: B23.94 (a Flame in a fortified Location, -1 DRM: with Fire and Kindling), the reveal by Searching,
- *   Mopping Up and Snipers (A12.152, A12.153, A14.21: with those rules), a berserk unit's charge (A15.43), and the
- *   TEM of rubble from a fortified building (B24.3: with Rubble).
+ * - A12.151 BYPASS: going round a fortified hex in Bypass is not entering it. A unit forced to end its MPh in Bypass
+ *   there (broken, pinned, stranded) is in the obstacle after its MPh (A4.32, A4.33); if that Location is fortified and
+ *   held by an enemy squad it cannot enter, it is forced back to the last Location it previously occupied that it may
+ *   enter (A12.151 "e.g., a Fortified Building Location containing an enemy squad"), and the Location is revealed.
+ * - Elsewhere: B23.94 (a Flame in a fortified Location, -1 DRM) is in `asl/fire.ts`; B24.3/B24.5 (the rubble of a
+ *   fortified building has no fortification) in `asl/rubble.ts`.
+ * - Not here: the reveal by Searching, Mopping Up and Snipers (A12.152, A12.153, A14.21: with those rules) and a
+ *   berserk unit's charge (A15.43).
  */
 
 declare module '@asl/engine' {
@@ -65,6 +73,24 @@ export const BREACH_SIDE_DECISION = 'breachSide';
 
 export const breaches = (env: QueryEnv): Breach[] => (env.state.ext[EXT] as Breach[] | undefined) ?? [];
 
+/** The Breaches `viewer` may know of: those of Locations it knows are fortified (B23.911). */
+export const breachesKnownTo = (env: QueryEnv, viewer: SideId | null): Breach[] => breaches(env).filter((b) => fortifiedKnownTo(env, b.loc, viewer));
+
+/**
+ * Whether `side` may believe `loc` is fortified, judged only on what it may know: a Location it has been shown, or one
+ * of the fortifying side's that it cannot rule out (the designation is secret, B23.911, until all of them are shown).
+ */
+export function fortifiedPossibleTo(env: QueryEnv, loc: LocId, side: SideId): boolean {
+  const st = fortifiedState(env);
+  if (!st) return false;
+  if (fortifiedKnownTo(env, loc, side)) return true;
+  if (side === st.side) return false;
+  const count = fortifiedParams(env)?.count ?? 0;
+  if (st.locations) return (st.revealedLocs ?? []).length < count && fortifiableLocations(env, st.side).includes(loc);
+  const b = statics(env).map.hex(hexOfLoc(loc))?.buildingId;
+  return !!b && st.revealed.length < count && fortifiableBuildings(env, st.side).includes(b);
+}
+
 /** Whether the hexside between `loc` and the adjacent hex `from` has been Breached. */
 export const breachedToward = (env: QueryEnv, loc: LocId, from: HexId): boolean => breaches(env).some((b) => b.loc === loc && b.toward === from);
 
@@ -72,6 +98,35 @@ export const breachedToward = (env: QueryEnv, loc: LocId, from: HexId): boolean 
 function entryHexes(env: QueryEnv, ms: MoveState, to: LocId): HexId[] {
   if (ms.bypass && ms.bypass.hex === hexOfLoc(to)) return cornerHexes(statics(env).map, ms.bypass.hex, ms.bypass.at);
   return ms.hex ? [ms.hex] : [];
+}
+
+/**
+ * A12.151: units whose MPh ends in Bypass of a fortified hex are then in the obstacle (A4.32, A4.33); if that Location
+ * cannot be entered (B23.922: held by an enemy squad, no Breach on a hexside they went along) they are "forced back to
+ * the last previously occupied Location it may enter". The attempt reveals the Location and what hides in it (B23.911,
+ * A12.15), as an entry attempt does.
+ */
+function forceBackFromBypass(ctx: Ctx, ms: MoveState, units: PieceId[]) {
+  const hex = ms.hex!;
+  const side = ctx.state.attacker;
+  const here = units.filter((u) => ctx.state.pieces[u]?.loc.kind === 'hex' && locKey(ctx.state.pieces[u]!.loc as never) === hex);
+  if (here.length === 0 || !fortifiedState(ctx) || fortifiedState(ctx)!.side === side || !isFortified(ctx, hex)) return;
+  const map = statics(ctx).map;
+  const sides = new Set<number>([...(ms.bypass && ms.bypass.hex === hex ? ms.bypass.sides : []), ...here.flatMap((u) => ms.stoppedBypass?.[u] ?? [])]);
+  const along = [...sides].map((k) => acrossSide(map, hex, k)).filter((h): h is HexId => !!h);
+  if (fortifiedEntryBarred(ctx, hex, side, along, false) === null) {
+    // In the obstacle after its MPh (A4.32, A4.33): the Location has been entered (B23.911).
+    revealFortified(ctx, hex, 'entered');
+    return;
+  }
+  revealFortified(ctx, hex, 'attempt');
+  revealHex(ctx, hex, side, 'entered', hex);
+  // The last Location occupied before this hex that the units may enter: back along the hexes of the move.
+  const before = [ms.from, ...[...(ms.trail ?? [])].reverse().map((t) => t.hex)].filter((h): h is HexId => !!h && h !== hex && !!map.hex(h));
+  const back = [...new Set(before)].find((h) => knownEnemyAt(ctx, h, side).length === 0 && fortifiedEntryBarred(ctx, h, side, [hex], false) === null);
+  ctx.emit('asl.fortified.refused', { units: here, loc: hex, phase: 'MPh', side, reason: 'held' });
+  if (!back) return;
+  for (const u of here) ctx.emit('piece.moved', { id: u, loc: { kind: 'hex', hex: back } });
 }
 
 /** Unpinned, Good Order, armed enemy MMC in `loc` totalling at least a squad (B23.922 "a squad (or its equivalent)"). */
@@ -124,6 +179,26 @@ export const aslFortifiedModule: RuleModule = {
         if (!list.some((b) => b.loc === p.breach.loc && b.toward === p.breach.toward)) d.ext[EXT] = [...list, p.breach];
       },
     });
+    // A HE KIA's Breach (B23.9221), recorded whether or not the Location is fortified so that the other side cannot tell
+    // the two apart: `breached` only when it is.
+    r.event<{ loc: LocId; toward: HexId; breached: boolean }>({
+      type: 'asl.breach.he',
+      apply(d, p) {
+        const list = (d.ext[EXT] as Breach[] | undefined) ?? [];
+        d.ext[EXT] = p.breached && !list.some((b) => b.loc === p.loc && b.toward === p.toward) ? [...list, { loc: p.loc, toward: p.toward, by: 'he' }] : list;
+      },
+    });
+    // What a viewer may see of the Breaches: those of the Locations it knows are fortified (B23.911).
+    r.redact({
+      id: 'asl.breach.redact',
+      ext: EXT,
+      redactExt: (slice, viewer, env) => (slice as Breach[]).filter((b) => fortifiedKnownTo(env, b.loc, viewer)),
+      events: ['asl.breach.he'],
+      redactEvent(ev, viewer, env) {
+        const p = ev.payload as { loc: LocId; breached: boolean };
+        return p.breached && !fortifiedKnownTo(env, p.loc, viewer) ? { ...ev, payload: { ...p, breached: false } } : ev;
+      },
+    });
     r.event<{ dc: PieceId; placer: PieceId; loc: LocId; toward: HexId }>({ type: 'asl.breach.declared', apply() {} });
     r.event<{ dc: PieceId; loc: LocId; toward: HexId; dr: [number, number]; drm: number; result: string | null; breached: boolean; malfunctioned: boolean }>({ type: 'asl.breach.attempt', apply() {} });
     r.event<{ units: PieceId[]; loc: LocId; phase: 'MPh' | 'APh'; side: SideId; reason: 'held' | 'gun' }>({ type: 'asl.fortified.refused', apply() {} });
@@ -149,7 +224,7 @@ export const aslFortifiedModule: RuleModule = {
       // The attempt reveals the Location (B23.911) and what hides in it (A12.15); the MF are spent in the present
       // hex, where Residual FP, Defensive First Fire, SFF and FPF may attack the stack, and then its MPh is over.
       revealFortified(ctx, to, 'attempt');
-      revealHex(ctx, hexOfLoc(to), side, 'entered');
+      revealHex(ctx, hexOfLoc(to), side, 'entered', to);
       ctx.emit('asl.fortified.refused', { units: ms.units, loc: to, phase: 'MPh', side, reason: gunPush ? 'gun' : 'held' });
       moveInternals.spendInPlace(ctx, moveState(ctx) ?? ms, cost, { halted: true, residualDrmHere: null });
       moveInternals.afterMfExpenditure(ctx);
@@ -158,6 +233,19 @@ export const aslFortifiedModule: RuleModule = {
         moveInternals.finishStack(ctx);
         moveInternals.reAskMover(ctx);
       }
+    });
+
+    // A12.151: the end of the MPh of units still in Bypass (stranded with the stack, or broken or pinned there).
+    r.procedure<MoveFinishFn>(MOVE_FINISH, (next) => (ctx) => {
+      const ms = moveState(ctx);
+      // Units left in Bypass of a hex the stack moved on from stay in its open part until the end of their MPh (A4.32,
+      // A4.33): now, each in the hex it was left in, with the hexes the stack had come by up to there.
+      for (const r of ms?.leftBypass ?? []) {
+        const units = leftUnits(ctx, r);
+        if (units.length) forceBackFromBypass(ctx, { ...ms!, hex: r.hex, bypass: undefined, stoppedBypass: r.units, from: r.from, trail: (ms!.trail ?? []).slice(0, r.trailAt) }, units.sort());
+      }
+      if (ms?.hex && !ms.vehicle) forceBackFromBypass(ctx, ms, [...(ms.bypass ? ms.units : []), ...Object.keys(ms.stoppedBypass ?? {})].sort());
+      next?.(ctx);
     });
 
     // ---------------------------------------------------------------- B23.922: entry in the APh
@@ -181,7 +269,7 @@ export const aslFortifiedModule: RuleModule = {
       if (fortifiedEntryBarred(ctx, a.to, a.side, from, false) === null) return next?.(ctx, a);
       // "loses that APh capability for that turn and must remain in its present hex": every unit of the attempt.
       revealFortified(ctx, a.to, 'attempt');
-      revealHex(ctx, hexOfLoc(a.to), a.side, 'advanced');
+      revealHex(ctx, hexOfLoc(a.to), a.side, 'advanced', a.to);
       ctx.emit('asl.fortified.refused', { units: [...a.units].sort(), loc: a.to, phase: 'APh', side: a.side, reason: 'held' });
       for (const id of [...a.units].sort()) setTags(ctx, id, { advanced: true });
       ctx.popDecision();
@@ -245,14 +333,17 @@ export const aslFortifiedModule: RuleModule = {
     // ---------------------------------------------------------------- B23.9221: a Breach by a HE KIA
     r.procedure<AttackResolvedFn>(FP.attackResolved, (next) => (ctx, info) => {
       next?.(ctx, info);
-      if (info.by !== 'he' || info.result !== 'KIA' || !info.from || !info.side || !fortifiedState(ctx) || !isFortified(ctx, info.target)) return;
+      // Everything up to the event is decided on what the firer may know, so that nothing it is shown or asked tells
+      // it whether a Location it has not been shown is fortified (B23.911).
+      if (info.by !== 'he' || info.result !== 'KIA' || !info.from || !info.side || !fortifiedPossibleTo(ctx, info.target, info.side)) return;
       const map = statics(ctx).map;
       const target = hexOfLoc(info.target);
       const sides = lofSides(target, info.from, map);
-      const options = sides.map((k) => acrossSide(map, target, k)).filter((h): h is HexId => !!h && !!map.hex(h) && !breachedToward(ctx, info.target, h));
+      const known = breachesKnownTo(ctx, info.side);
+      const options = sides.map((k) => acrossSide(map, target, k)).filter((h): h is HexId => !!h && !!map.hex(h) && !known.some((b) => b.loc === info.target && b.toward === h));
       if (options.length === 0) return;
       if (options.length === 1) {
-        ctx.emit('asl.breach', { breach: { loc: info.target, toward: options[0]!, by: 'he' } });
+        ctx.emit('asl.breach.he', { loc: info.target, toward: options[0]!, breached: isFortified(ctx, info.target) });
         return;
       }
       // Along a hexspine: the firer chooses which of the two hexsides at that corner is Breached. The choice is asked once
@@ -274,7 +365,8 @@ export const aslFortifiedModule: RuleModule = {
         const pending = ctx.state.ext[PENDING] as { loc: LocId; options: HexId[]; owner: SideId } | undefined;
         if (!pending || ev.payload.decision.kind === BREACH_SIDE_DECISION) return;
         ctx.emit('asl.breach.pending', { pending: null });
-        ctx.pushDecision({ kind: BREACH_SIDE_DECISION, owner: pending.owner, deadlineClass: 'interrupt', data: { loc: pending.loc, options: pending.options } });
+        // `known`: the firer knows the Location is fortified; else it is asked as for any Location that might be.
+        ctx.pushDecision({ kind: BREACH_SIDE_DECISION, owner: pending.owner, deadlineClass: 'interrupt', data: { loc: pending.loc, options: pending.options, known: fortifiedKnownTo(ctx, pending.loc, pending.owner) } });
       },
     });
     r.action<Action & { type: 'breach.choose'; toward: HexId }>({
@@ -285,7 +377,8 @@ export const aslFortifiedModule: RuleModule = {
       },
       validate: (_env, a, d) => (((d.data?.['options'] as HexId[] | undefined) ?? []).includes(a.toward) ? null : 'Not one of the hexsides the line of fire crossed'),
       resolve(ctx, a, d: Decision) {
-        ctx.emit('asl.breach', { breach: { loc: d.data!['loc'] as LocId, toward: a.toward, by: 'he' } });
+        const loc = d.data!['loc'] as LocId;
+        ctx.emit('asl.breach.he', { loc, toward: a.toward, breached: isFortified(ctx, loc) });
         ctx.popDecision(d.id);
       },
     });
@@ -379,8 +472,12 @@ function resolveBreachDc(ctx: Ctx, dc: { id: PieceId; loc: { kind: string }; tag
   });
   ctx.emit('asl.breach.attempt', { dc: dc.id, loc, toward, dr: roll.dice as [number, number], drm, result: wall?.kind ?? null, breached, malfunctioned: !detonated });
   if (breached) ctx.emit('asl.breach', { breach: { loc, toward, by: 'dc' } });
+  // The DC explodes in the Location: an Original KIA on the column of its Area Fire attack there may rubble it first
+  // (A23.41, B24.11; the concealment halving does not count for rubble, A23.1), its occupants then eliminated instead.
+  const area = iftColumn(ctx, d.fp / 2);
+  const rubbled = detonated && area !== null && ctx.proc<BeforeApplyFn>(FP.beforeApply)(ctx, { target: loc, by: 'dc', column: area, originalDr: roll.total, side: ctx.state.attacker });
   // The same DR attacks the units inside as Area Fire (halved again if they were concealed when the DC was Placed).
-  if (detonated && targets.length) {
+  if (detonated && !rubbled && targets.length) {
     const fp = d.fp / 2 / (dc.tags[T4.dcVsConcealed] ? 2 : 1);
     const half = iftColumn(ctx, fp);
     ctx.emit('sk1.fire.attack', {
@@ -397,7 +494,17 @@ function resolveBreachDc(ctx: Ctx, dc: { id: PieceId; loc: { kind: string }; tag
       ctx.proc<FlushFn>(MP.flushLeaderLoss)(ctx);
     }
   }
-  ctx.proc<AttackResolvedFn>(FP.attackResolved)(ctx, { target: loc, by: 'dc', result: wall?.kind ?? null, malfunctioned: !detonated });
+  // Its Original KIA there may Flame the Location (A23.41, B25.13).
+  ctx.proc<AttackResolvedFn>(FP.attackResolved)(ctx, {
+    target: loc,
+    by: 'dc',
+    result: wall?.kind ?? null,
+    malfunctioned: !detonated,
+    originalResult: detonated && area !== null ? statics(ctx).tables.ift(area, roll.total).kind : null,
+    originalDr: roll.total,
+    side: ctx.state.attacker,
+    ...(rubbled ? { rubbled: true } : {}),
+  });
   ctx.emit('piece.eliminated', { id: dc.id, reason: detonated ? 'DC detonated' : 'DC malfunctioned' });
 }
 
@@ -410,7 +517,7 @@ export function fortifiedView(env: QueryEnv, viewer: SideId | null): { loc: LocI
   for (const loc of st.locations ?? []) {
     if (!fortifiedKnownTo(env, loc, viewer) || seen.has(loc)) continue;
     seen.add(loc);
-    out.push({ loc, breached: breaches(env).filter((b) => b.loc === loc).map((b) => b.toward) });
+    out.push({ loc, breached: breachesKnownTo(env, viewer).filter((b) => b.loc === loc).map((b) => b.toward) });
   }
   return out;
 }

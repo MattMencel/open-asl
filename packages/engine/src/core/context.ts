@@ -1,5 +1,5 @@
 import type { QueryEnv } from './query';
-import type { Decision, GameResult } from './types';
+import type { Decision, GameResult, SideId } from './types';
 
 export interface DiceRoll {
   label: string;
@@ -14,8 +14,11 @@ export interface DiceRoll {
  */
 export interface Ctx extends QueryEnv {
   emit<P>(type: string, payload: P, source?: string): void;
-  /** Roll `count` d6 (1 = dr, 2 = DR). Recorded as a `dice.rolled` event. */
-  roll(label: string, count?: number): DiceRoll;
+  /**
+   * Roll `count` d6 (1 = dr, 2 = DR). Recorded as a `dice.rolled` event. `secret` names the one side allowed to see a
+   * roll made in secret (ASLRB B28.47's Secret dr): every other viewer's stream carries no trace of its dice.
+   */
+  roll(label: string, count?: number, opts?: { secret?: SideId }): DiceRoll;
   pushDecision(decision: Omit<Decision, 'id'>): Decision;
   /** Remove a decision (the top one if no id given). */
   popDecision(id?: string): void;

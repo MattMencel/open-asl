@@ -102,7 +102,11 @@ function advanceIllegal(env: QueryEnv, a: { units: PieceId[]; to: LocId; side: s
     const from = hexOf(env.state, p);
     // Up or down the stairs of its own hex: one MF (full ASL, ASLRB B23.4; never in the Starter Kit).
     const cost = locOf(env.state, p) === a.to ? 0 : from === toHex ? LEVEL_CHANGE_MF : env.query('move.cost', { unit: id, from, to: toHex, viaRoad: false, ...(isGroundLoc(a.to) ? {} : { loc: a.to }) }, 1);
-    if (cost >= mf && isCx(p)) return `${id} is CX and cannot advance into a hex costing all its MF`;
+    // An advance enters a Location the unit could enter in the MPh (ASLRB A4.7): never one no MF can pay for (flooded
+    // terrain, an uncrossable hexside).
+    // A module's own reason (a river SSR) is the better message.
+    if (!Number.isFinite(cost)) return env.query('advance.illegal', { units: a.units, to: a.to, side: a.side, ...(a.beneath !== undefined ? { beneath: a.beneath } : {}) }, null) ?? `${id} cannot enter that hex`;
+    if (cost >= mf && isCx(p))return `${id} is CX and cannot advance into a hex costing all its MF`;
   }
   // Stacking limits.
   const here = personnelAt(env, a.to, a.side).filter((p) => !a.units.includes(p.id));

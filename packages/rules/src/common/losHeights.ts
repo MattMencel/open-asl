@@ -46,12 +46,15 @@ const advantageOver = (top: number, hi: number) => Math.max(0, Math.floor(hi) - 
 
 /**
  * How many hexes behind a terrain obstacle are Blind Hexes to a viewer at height `hi` (ASLRB A6.4, A6.41, A6.42),
- * before the A6.43 adjustment for the hex judged: one, plus one per full five hexes of range to it, less one per full
- * level of elevation advantage over its full-level height beyond the first, never below one. The A6.42 EX: a 1½-level
- * obstacle 12 hexes away makes three from level 2, two from level 3, one from level 4.
+ * before the A6.43 adjustment for the hex judged: the obstacle's own full-level height ("equal to the full level height
+ * equivalent (i.e., ignoring any half-level) of that obstacle", A6.4: one for woods or a 1½-level house, two for a
+ * 2½-level building; `top` less `hexLevel`, the level of its hex), plus one per full five hexes of range to it, less one
+ * per full level of elevation advantage over it beyond the first, never below one. The A6.42 EX: a 1½-level obstacle 12
+ * hexes away makes three from level 2, two from level 3, one from level 4.
  */
-export function blindHexCount(o: Pick<HeightObstacle, 'top' | 'range'>, hi: number): number {
-  return Math.max(1, 1 + Math.floor(o.range / 5) - advantageOver(o.top, hi));
+export function blindHexCount(o: Pick<HeightObstacle, 'top' | 'range'> & { hexLevel?: number }, hi: number): number {
+  const own = Math.max(1, Math.floor(o.top - (o.hexLevel ?? 0)));
+  return Math.max(1, own + Math.floor(o.range / 5) - advantageOver(o.top, hi));
 }
 
 /**

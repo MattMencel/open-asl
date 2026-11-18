@@ -5,8 +5,10 @@ import { smoke58Counters } from '@asl/rules';
  * full Smoke +3, Dispersed Smoke +2, WP +2, Dispersed WP +1.
  */
 export function smoke58Chits(m: Record<string, unknown> | undefined): { marker: string; label: string }[] {
-  return smoke58Counters(m).map(({ kind, dispersed }) => {
+  return smoke58Counters(m).map(({ kind, dispersed, side }) => {
     if (kind === 'wp') return dispersed ? { marker: 'WP1', label: 'Dispersed WP (+1)' } : { marker: 'WP2', label: 'WP (+2)' };
+    // Full ASL: Dispersed SMOKE drifting from a Blaze in a Mild Breeze (ASLRB A24.61).
+    if (side.startsWith('drift~')) return { marker: 'Smk2', label: 'Drifting Smoke from a Blaze (+2)' };
     return dispersed ? { marker: 'Smk2', label: 'Dispersed Smoke (+2)' } : { marker: 'Smk3', label: 'Smoke (+3)' };
   });
 }

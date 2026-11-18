@@ -62,6 +62,8 @@ function firestoreProblems(doc: unknown): string[] {
 
 describe('buildAar', () => {
   it('folds a whole LMA6 game into a consistent report', { timeout: 180_000 }, () => {
+    // The seeded games must break down some weapon between them, or the highlight check above tests nothing.
+    let malfunctions = 0;
     for (const seed of ['aar-1', 'aar-2']) {
       const g = play(seed);
       expect(g.state.result).toBeTruthy();
@@ -113,7 +115,7 @@ describe('buildAar', () => {
       expect(shots('none')).toBeGreaterThan(0);
       // Each weapon that broke down is a highlight (a MMG/HMG or Gun weighs more), while the eight places last.
       if (doc.highlights.length < 8) expect(doc.highlights.filter((h) => /breaks down/.test(h.title)).length).toBe(truth.malfunctions);
-      expect(truth.malfunctions).toBeGreaterThan(0);
+      malfunctions += truth.malfunctions;
       for (const c of doc.casualties) {
         expect(c.label).not.toMatch(/^(br|ge)\./);
         expect(c.cause).not.toMatch(/\b(br|ge)\.\d/);
@@ -127,6 +129,7 @@ describe('buildAar', () => {
       expect(doc.victory.length).toBe(1);
       expect(doc.victory[0]!.text).toMatch(/No Good Order Germans/);
     }
+    expect(malfunctions).toBeGreaterThan(0);
   });
 
   it('samples building Control at the end of every Game Turn of a Control scenario', { timeout: 120_000 }, () => {

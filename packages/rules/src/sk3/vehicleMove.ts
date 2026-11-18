@@ -96,8 +96,9 @@ export function vehicleEntryCost(env: QueryEnv, p: Piece, from: HexId | null, to
   const map = statics(env).map;
   if (map.offboardHex(to) && !map.hex(to)) return d.tracked ? 1 : 3;
   const t = terrainOf(env, to).id;
-  // A hut is a building the vehicle enters at its own rate (the PTO module's `vehicle.terrainMp`), not at half its MP.
-  const building = isBuildingHex(env, to) && !isHutHex(env, to);
+  // A hut is a building the vehicle enters at its own rate (the PTO module's `vehicle.terrainMp`), not at half its MP. A
+  // building hex rubbled at ground level (full ASL) is rubble, not a building (ASLRB B24.4).
+  const building = isBuildingHex(env, to) && !isHutHex(env, to) && !isRubbleHex(env, to);
   const alongRoad = opts.viaRoad && (isRoadHex(env, to) || isWoodsRoad(env, to));
   // Roads a rule treats as Open Ground (SSR): along one, the vehicle pays the Open Ground rate, also through woods.
   const roadRate = env.query('move.roadRate', {}, true);
@@ -115,7 +116,8 @@ export function vehicleEntryCost(env: QueryEnv, p: Piece, from: HexId | null, to
   else cost = Infinity;
   if (!alongRoad && !building) cost = env.query('vehicle.terrainMp', { vehicle: p.id, hex: to }, cost);
   if (!Number.isFinite(cost)) return cost;
-  if (from && map.hex(from) && levelOf(env, to) > levelOf(env, from)) cost += opts.viaRoad && roadRate ? 2 : 4;
+  // From offboard too: an offboard hex is at level 0 (ASLRB A2.51).
+  if (from && (map.hex(from) || map.offboardHex(from)) && levelOf(env, to) > levelOf(env, from)) cost += opts.viaRoad && roadRate ? 2 : 4;
   const others = vehiclesInHex(env, to).filter((v) => v.id !== p.id).length;
   if (others) cost += others * (road ? 2 : 1) * (t === 'woods' ? 2 : 1);
   if (smokeIn(env, to)) cost += 1;
@@ -131,8 +133,10 @@ function vehicleStepCost(env: QueryEnv, ms: MoveState & { vehicle: VehicleMoveSt
   const from = ms.hex ?? null;
   const left = remaining(ms);
   const viaRoad = !!(from ?? ms.off) && moveInternals.roadSideTo(env, ms, to);
+  // Onto the map from offboard: the step comes from the vehicle's offboard hex (its Crest Line, SK4 1.1.1).
+  const fromHex = from ?? ms.off ?? null;
   const all = declared !== undefined && declared >= left;
-  let cost = vehicleEntryCost(env, p, from, to, { viaRoad, all, remaining: left });
+  let cost = vehicleEntryCost(env, p, fromHex, to, { viaRoad, all, remaining: left });
   // The minimum move: one hex at all its MP, no VCA change made (SK4 3.3.2).
   if (Number.isFinite(cost) && cost > left && ms.hexesEntered === 0 && !ms.vehicle.turned && left > 0 && !bogTerrain(env, to)) cost = left;
   if (declared !== undefined && declared > cost) cost = declared;
@@ -155,7 +159,8 @@ function vehicleStepIllegal(env: QueryEnv, ms: MoveState & { vehicle: VehicleMov
     if (!front.some((c) => cubeEquals(c, toHex.cube))) return map.hex(at.id) ? 'A vehicle moves within its Vehicle Covered Arc: turn first' : 'A vehicle enters within its Vehicle Covered Arc: turn first';
   }
   if (map.hex(to)) {
-    if (isBuildingHex(env, to) && !isHutHex(env, to)) {
+    // A building hex rubbled at ground level (full ASL) is rubble, which a CE vehicle may enter (ASLRB B24.4).
+    if (isBuildingHex(env, to) && !isHutHex(env, to) && !isRubbleHex(env, to)) {
       if (!d.tracked) return 'An Armored Car may not enter a building';
       if (isCe(p)) return 'A Crew Exposed AFV may not enter a building: Button Up first';
     }
@@ -337,7 +342,7 @@ export const vehicleMoveModule: RuleModule = {
       query: 'move.cost',
       layer: 5,
       when: ({ unit }, env) => !!vehicle(env, pieceOf(env, unit)),
-      apply: (_v, { unit, from, to, viaRoad }, env) => vehicleEntryCost(env, pieceOf(env, unit), from ?? null, to, { viaRoad }),
+      apply: (_v, { unit, from, off, to, viaRoad }, env) => vehicleEntryCost(env, pieceOf(env, unit), from ?? off ?? null, to, { viaRoad }),
     });
     r.contribute({
       id: 'sk3.move.stepCost.vehicle',
@@ -358,7 +363,8 @@ export const vehicleMoveModule: RuleModule = {
     bog('ground-pressure', (c, env) => (vehicle(env, pieceOf(env, c.vehicle))!.groundPressure === 'high' ? '+2 high ground pressure' : '+1 normal ground pressure'), (c, env) => vehicle(env, pieceOf(env, c.vehicle))!.groundPressure !== 'low', (c, env) => (vehicle(env, pieceOf(env, c.vehicle))!.groundPressure === 'high' ? 2 : 1));
     bog('tracked', '+1 not Fully Tracked', (c, env) => !vehicle(env, pieceOf(env, c.vehicle))!.tracked, () => 1);
     bog('half-mp', (c, env) => (isBuildingHex(env, c.hex) && terrainOf(env, c.hex).id === 'building-stone' ? '+4 entering a stone building at half MP' : `+3 entering ${isBuildingHex(env, c.hex) ? 'a wooden building' : 'woods'} at half MP`), (c, env) => c.halfMp && !isRubbleHex(env, c.hex), (c, env) => (isBuildingHex(env, c.hex) && terrainOf(env, c.hex).id === 'building-stone' ? 4 : 3));
-    bog('rubble', '+3 entering rubble', (c, env) => isRubbleHex(env, c.hex) && !isBuildingHex(env, c.hex), () => 3);
+    // A building rubbled at ground level (full ASL) is a rubble hex too (ASLRB B24.4).
+    bog('rubble', '+3 entering rubble', (c, env) => isRubbleHex(env, c.hex), () => 3);
     bog('elevation', '+1 gaining elevation into woods', (c, env) => {
       const ms = moveState(env);
       return isWoodsHex(env, c.hex) && !!ms?.from && levelOf(env, c.hex) > levelOf(env, ms.from);

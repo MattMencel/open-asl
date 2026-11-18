@@ -81,7 +81,10 @@ export function FortTray({ env, side, params, placed, locked, picked, onPick, on
     tiles.push(tile({ kind: 'mines', mines: { ap: (picked?.kind === 'mines' && !picked.mines?.known && picked.mines?.ap && picked.mines.ap <= left.factors ? picked.mines.ap : ap) as 6 | 8 | 12 } }, `${left.factors} f`, `A-P minefield factors: ${left.factors} of ${params.mines.factors} left, 6, 8 or 12 per hex, recorded (ASLRB B28.1)${left.at ? '; or A-T mines, three factors each (B28.5)' : ''}; the strength is chosen on the placed counter`, left.factors < (left.at ? 3 : 6), 'ap'));
   }
   if (params.mines?.known) tiles.push(tile({ kind: 'mines', mines: { ap: ([...AP].reverse().find((a) => a! <= left.known) ?? 6) as 6 | 8 | 12, known: true } }, `Kn ${left.known}`, `Known minefield factors: ${left.known} of ${params.mines.known} left, on the board with the strength down (ASLRB B28.45)`, left.known < 6, 'known'));
-  if (left.dummies > 0 || params.mines?.dummies) tiles.push(tile({ kind: 'mines', mines: { known: true, dummy: true } }, `${left.dummies}`, `Dummy Minefield counters: ${left.dummies} left (ASLRB B28.47); looks like a Known minefield to the enemy`, left.dummies <= 0, 'dummy'));
+  // B28.47: with no Dummy allotted, one free Dummy for every 24 Known minefield factors set up.
+  const freeDummies = !params.mines?.dummies && !!params.mines?.known;
+  if (left.dummies > 0 || params.mines?.dummies || freeDummies)
+    tiles.push(tile({ kind: 'mines', mines: { known: true, dummy: true } }, `${left.dummies}`, `Dummy Minefield counters: ${left.dummies} left (ASLRB B28.47)${freeDummies ? ', one for every 24 Known minefield factors set up' : ''}; looks like a Known minefield to the enemy`, left.dummies <= 0, 'dummy'));
   if (params.roadblocks) tiles.push(tile({ kind: 'roadblock' }, `${left.roadblocks}`, `Roadblocks: ${left.roadblocks} of ${params.roadblocks} left; in a road hex, across a road hexside chosen on the map (ASLRB B29.1)`, left.roadblocks <= 0, 'rb'));
   for (const pb of [...new Map((params.pillboxes ?? []).map((p) => [pillKey(p), p])).values()]) {
     const n = left.pillboxes.filter((x) => pillKey(x) === pillKey(pb)).length;

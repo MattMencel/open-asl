@@ -15,6 +15,27 @@ const stepTargets = (engine: Engine, s: GameState, side: string, unit: string, l
 
 /** Board y, American (attacker) routs first. */
 describe('Rout Phase', () => {
+  it('only a broken unit under DM may rout (SK1 3.6): one without DM is listed as staying, and its rout is refused', () => {
+    const { engine, state } = makeEngine({
+      startPhase: 'RtPh',
+      terrain: { yA1: { terrain: 'woods' }, yA3: { terrain: 'woods' } },
+      pieces: [
+        // In woods far from the enemy: no need to rout; with and without DM.
+        { id: 'dm', def: 'am.747', side: 'am', hex: 'yA1', tags: { broken: true, dm: true } },
+        { id: 'nodm', def: 'am.747', side: 'am', hex: 'yA3', tags: { broken: true } },
+        { id: 'g1', def: 'ge.467', side: 'ge', hex: 'yZ10' },
+      ],
+    });
+    const listed = Object.fromEntries(pendingRouts(engine.env(state)).map((r) => [r.unit, r]));
+    expect(listed['dm']).toMatchObject({ must: false, cannot: null });
+    expect(listed['nodm']).toMatchObject({ must: false, cannot: 'noDm' });
+    expect(stepTargets(engine, state, 'am', 'nodm')).toEqual([]);
+    expect(stepTargets(engine, state, 'am', 'dm').length).toBeGreaterThan(0);
+    // It stays put, and the phase ends without it.
+    const s = act(engine, state, { type: 'endPhase' }).state;
+    expect(s.pieces['nodm']!.loc).toEqual({ kind: 'hex', hex: 'yA3' });
+  });
+
   it('a broken unit in Open Ground where an enemy could Interdict it must rout (SK1 3.6)', () => {
     const { engine, state } = makeEngine({
       startPhase: 'RtPh',
@@ -27,7 +48,7 @@ describe('Rout Phase', () => {
       ],
     });
     const env = engine.env(state);
-    expect(pendingRouts(env)).toEqual([{ unit: 'a1', must: true, reason: { kind: 'openGround', enemy: 'g1', hex: 'yP5' }, done: false }]);
+    expect(pendingRouts(env)).toEqual([{ unit: 'a1', must: true, reason: { kind: 'openGround', enemy: 'g1', hex: 'yP5' }, done: false, cannot: null }]);
     expect(state.pieces['a1']!.tags['dm']).toBe(true);
     // Neither staying put nor ending the phase is allowed while it has not routed.
     expect(() => act(engine, state, { type: 'rout.stay', unit: 'a1' })).toThrow(/must rout/);

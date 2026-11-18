@@ -1,5 +1,5 @@
 import type { GameState, LoggedEvent, QueryEnv, SideId } from '@asl/engine';
-import { SKY_NAME, chartLabel, defOf, hexOfLoc, levelOfLoc, entryAfterFireParams, entryGroupsParams, secretLengthParams, fortifiedParams, fortKindName, hexOf, shownCounter, type FortRecord, scatterParams, isVisibleTo, isWeaponDef, statics, weatherLabel, type CounterDef, type IftResult, type VariableReinforcementsEvent, type EntryOrderDrEvent, type EntryLossesEvent, entryOrderDrParams, entryOrderLabel, type ForceChartEvent, type ScatterState, type ScatterLanding, type EntryGroupsState, type Weather, NATION, PHASE_NAME, defLabel, hexLabel, humanize, nameIds, nationName, pieceLabel, sideNameOf, entryStretchParams, type LeaderReliefEvent, type OnceDrEvent, type OnceDrNmcEvent, type OnceDrRallyEvent, type LeaderPtcEvent, type RoutStep } from '@asl/rules';
+import { SKY_NAME, chartLabel, entrenchmentAt, fortifiedKnownTo, defOf, hexOfLoc, levelOfLoc, entryAfterFireParams, entryGroupsParams, secretLengthParams, fortifiedParams, fortKindName, hexOf, shownCounter, type FortRecord, scatterParams, isVisibleTo, isWeaponDef, statics, weatherLabel, type CounterDef, type IftResult, type VariableReinforcementsEvent, type EntryOrderDrEvent, type EntryLossesEvent, entryOrderDrParams, entryOrderLabel, type ForceChartEvent, type ScatterState, type ScatterLanding, type EntryGroupsState, type Weather, NATION, PHASE_NAME, defLabel, hexLabel, humanize, nameIds, nationName, pieceLabel, sideNameOf, entryStretchParams, type LeaderReliefEvent, type OnceDrEvent, type OnceDrNmcEvent, type OnceDrRallyEvent, type LeaderPtcEvent, type RoutStep } from '@asl/rules';
 
 // The naming helpers live in @asl/rules (labels.ts) so the server can name units too; re-exported for the many callers here.
 export { NATION, PHASE_NAME, defLabel, hexLabel, humanize, nameIds, nationName, pieceLabel, sideNameOf };
@@ -15,6 +15,7 @@ const ROF_LOSS: Record<string, string> = {
   cowered: 'the attack cowered (original doubles, no leader directing), so every firer is marked',
   pinned: 'a pinned unit\'s SW cannot retain ROF',
   fpf: 'Final Protective Fire never retains ROF',
+  afph: 'no Rate of Fire in the Advancing Fire Phase',
 };
 
 export interface LogLine {
@@ -141,7 +142,8 @@ export function describeEvents(env: QueryEnv, events: LoggedEvent[], viewer: Sid
     for (let j = at - 1; j >= Math.max(0, at - 80); j--) {
       const f = events[j]!;
       if (f.type !== 'dice.rolled') continue;
-      const q = f.payload as { label: string; dice: number[] };
+      const q = f.payload as { label: string; dice: number[]; secret?: string };
+      if (q.secret !== undefined && q.secret !== viewer) continue;
       if (q.dice.length !== 2 || q.dice[0]! + q.dice[1]! !== total) continue;
       if (!mention || q.label.includes(mention)) return drText(q.dice);
       any ??= q.dice;
@@ -220,10 +222,12 @@ export function describeEvents(env: QueryEnv, events: LoggedEvent[], viewer: Sid
           break;
         }
         // A PTC rolls nothing for a unit already pinned or broken (SK1 3.2.2: it affects unbroken, unpinned units), so no
-        // check line follows; say so, or the pins of an earlier attack read as this PTC's.
+        // check line follows; say so, or the pins of an earlier attack read as this PTC's. A CE crew's check is the
+        // vehicle's own (SK4 7.7).
+        const checks = (x: (typeof events)[number]) =>
+          (x.type === 'sk1.check' && (x.payload as { unit: string }).unit === p['unit']) || (x.type === 'sk3.vehicle.check' && (x.payload as { vehicle: string }).vehicle === p['unit']);
         const noCheck =
-          (p['result'] as IftResult).kind === 'PTC' &&
-          !events.slice(at + 1).some((x, k, rest) => x.type === 'sk1.check' && (x.payload as { unit: string }).unit === p['unit'] && !rest.slice(0, k).some((y) => y.type === 'sk1.fire.attack'));
+          (p['result'] as IftResult).kind === 'PTC' && !events.slice(at + 1).some((x, k, rest) => checks(x) && !rest.slice(0, k).some((y) => y.type === 'sk1.fire.attack'));
         out.push({ seq: e.seq, kind: 'fire', text: `  ${name(p['unit'] as string)}: ${resultText(p['result'] as IftResult)} (final DR ${p['finalDr']}${own ? `: ${own}` : ''})${noCheck ? ' — no effect: already pinned or broken (a PTC affects only unbroken, unpinned units)' : ''}` });
         break;
       }
@@ -404,8 +408,11 @@ export function describeEvents(env: QueryEnv, events: LoggedEvent[], viewer: Sid
         out.push({ seq: e.seq, kind: 'fire', text });
         break;
       }
+      case 'asl.breach.he':
       case 'asl.breach': {
-        const b = p['breach'] as { loc: string; toward: string; by: string };
+        const b = (e.type === 'asl.breach.he' ? { loc: p['loc'], toward: p['toward'], by: 'he' } : p['breach']) as { loc: string; toward: string; by: string };
+        // A HE KIA's Breach is told only where it Breached, and only to a viewer who knows the Location is fortified (B23.911).
+        if (e.type === 'asl.breach.he' && (!p['breached'] || !fortifiedKnownTo(env, b.loc, viewer))) break;
         out.push({ seq: e.seq, kind: 'info', text: `  ⟋ Breach: the ${hexLabel(hexOfLoc(b.loc))}/${hexLabel(b.toward)} hexside${levelOfLoc(b.loc) ? ` at level ${levelOfLoc(b.loc)}` : ''} is open${b.by === 'he' ? ' (a HE KIA)' : ''}: Infantry may enter through it (ASLRB B23.9221)` });
         break;
       }
@@ -443,7 +450,15 @@ export function describeEvents(env: QueryEnv, events: LoggedEvent[], viewer: Sid
         out.push({ seq: e.seq, kind: 'check', text: `  ⛏ ${name(p['unit'] as string)}${p['director'] ? ` (directed by ${name(p['director'] as string)})` : ''} tries to entrench in ${hexLabel(hexOfLoc(p['loc'] as string))}: DR ${drText(p['dr'] as number[])}${drm ? ` ${drm > 0 ? '+' : ''}${drm}` : ''}${ex ? ` (${ex})` : ''} ≤ 5? ${p['success'] ? `yes: a foxhole ${p['capacity']}S, beneath it` : `no${p['labor'] !== undefined ? `; Labor ${p['labor']} next time` : ''}`}; TI for the Player Turn (ASLRB B27.11, A4.8)` });
         break;
       }
+      case 'asl.entrench.thMissed': {
+        const units = (p['units'] as string[]).map(name).join(', ');
+        out.push({ seq: e.seq, kind: 'info', text: `  ${units} beneath the entrenchment not hit: To Hit DR ${p['final']} +${p['extra']} entrenchment TEM > ${p['th']} (ASLRB C3.32, B27.3)` });
+        break;
+      }
       case 'asl.entrench.move': {
+        // A move in or out of a hidden entrenchment is free and unseen (A12.33): told only to a viewer shown the counter.
+        const ent = entrenchmentAt(env, p['hex'] as string);
+        if (ent && !shownCounter(ent, viewer)) break;
         const units = (p['units'] as string[]).map(name).join(', ');
         const mf = p['mf'] as number;
         out.push({ seq: e.seq, kind: 'move', text: `  ${units} ${p['beneath'] ? 'go beneath' : 'climb out of'} the entrenchment in ${hexLabel(p['hex'] as string)}${p['phase'] === 'MPh' ? ` (${mf ? `${mf} MF` : 'no MF: hidden'})` : p['phase'] === 'RtPh' ? ` (+${mf} MF, no Interdiction there)` : ''} (ASLRB ${p['phase'] === 'RtPh' ? 'B27.41' : p['phase'] === 'APh' ? 'B27.44' : 'B27.4'})` });
@@ -475,6 +490,9 @@ export function describeEvents(env: QueryEnv, events: LoggedEvent[], viewer: Sid
       case 'asl.fire.blaze':
         out.push({ seq: e.seq, kind: 'info', text: `  🔥 BLAZE in ${locText(p['loc'] as string)}${p['source'] === 'rubble' ? ': burning rubble' : p['source'] === 'ssr' ? ' (scenario)' : ''} — no entry; its units must leave by the end of the next RtPh; +3 smoke (ASLRB B25.2, B25.4)` });
         break;
+      case 'asl.fire.drift':
+        out.push({ seq: e.seq, kind: 'info', text: `  💨 Smoke drifts downwind from the Blaze in ${locText(p['source'] as string)}: Dispersed Smoke (+2) in ${(p['hexes'] as string[]).map((h) => hexLabel(h)).join(', ')} (ASLRB A24.61)` });
+        break;
       case 'asl.fire.flameGone': {
         const why = p['reason'] as string;
         out.push({ seq: e.seq, kind: 'info', text: `  The Flame in ${locText(p['loc'] as string)} ${why === 'extinguished' ? 'is put out' : why === 'rubble' ? 'is smothered by the rubble' : 'goes out'}` });
@@ -505,7 +523,7 @@ export function describeEvents(env: QueryEnv, events: LoggedEvent[], viewer: Sid
         break;
       case 'asl.fire.escape': {
         const c = p['choice'] as string;
-        out.push({ seq: e.seq, kind: 'move', text: `  ${name(p['unit'] as string)} ${c === 'break' ? 'breaks voluntarily to rout out of the Blaze' : c === 'move' ? `moves out of the Blaze to ${hexLabel(hexOfLoc(p['to'] as string))}` : 'stays in the Blaze'} (ASLRB B25.4)` });
+        out.push({ seq: e.seq, kind: 'move', text: `  ${name(p['unit'] as string)} ${c === 'break' ? 'breaks voluntarily to rout out of the Blaze' : c === 'move' ? `moves out of the Blaze to ${hexLabel(hexOfLoc(p['to'] as string))}${p['interdicted'] ? ', subject to Interdiction' : ''}` : 'stays in the Blaze'} (ASLRB B25.4)` });
         break;
       }
       case 'asl.fire.extinguish': {
@@ -743,7 +761,7 @@ export function describeEvents(env: QueryEnv, events: LoggedEvent[], viewer: Sid
       }
       case 'asl.fort.revealed': {
         const c = shownCounter(p['counter'] as FortRecord, viewer) ?? (p['counter'] as FortRecord);
-        const how = { los: 'a Good Order enemy unit in LOS', tem: 'its TEM being claimed', concealment: 'a unit in it losing concealment', entry: 'a unit entering it', attack: 'its attack', search: 'a Search' }[p['reason'] as string] ?? String(p['reason']);
+        const how = { los: 'a Good Order enemy unit in LOS', tem: 'its TEM being claimed', concealment: 'a unit in it losing concealment', entry: 'a unit entering it', attack: 'its attack', search: 'a Search', grown: 'a new foxhole dug there replacing its counter (ASLRB B27.12)', rout: 'a routing unit going beneath it, out of reach of Interdiction (ASLRB B27.41)', strength: 'a Good Order enemy unit in LOS: its A-T mine factors are shown (ASLRB B28.53)' }[p['reason'] as string] ?? String(p['reason']);
         out.push({ seq: e.seq, kind: 'info', text: `  ▣ ${fortKindName(c)} in ${hexLabel(c.hex)} revealed by ${how} (ASLRB A12.33)` });
         break;
       }
@@ -772,7 +790,10 @@ export function describeEvents(env: QueryEnv, events: LoggedEvent[], viewer: Sid
           return xs.length > 1 ? `${each} = ${total}` : each;
         };
         const strength = fp ? `${side(fp.attack)} vs ${side(fp.defense)} → ` : '';
-        out.push({ seq: e.seq, kind: 'cc', text: `CC in ${p['hex']} (${sideNameOf(env, p['side'] as string)}): ${strength}${p['odds']}, DR ${dr2(p['dr'], `CC ${p['side']} in`)}${(p['drm'] as number) ? ` ${(p['drm'] as number) > 0 ? '+' : ''}${p['drm']}` : ''} vs kill ${p['kill']} — ${p['result']}` });
+        // A DRM for some targets only (ASLRB A4.8 EX: the -1 for TI defenders applies to the TI units alone).
+        const per = Object.entries((p['targetDrm'] as Record<string, number> | undefined) ?? {});
+        const perText = per.length ? ` (${per.map(([id, v]) => `${v > 0 ? '+' : ''}${v} vs ${hiddenFrom(id) ? '?' : name(id)}`).join(', ')})` : '';
+        out.push({ seq: e.seq, kind: 'cc', text: `CC in ${p['hex']} (${sideNameOf(env, p['side'] as string)}): ${strength}${p['odds']}, DR ${dr2(p['dr'], `CC ${p['side']} in`)}${(p['drm'] as number) ? ` ${(p['drm'] as number) > 0 ? '+' : ''}${p['drm']}` : ''}${perText} vs kill ${p['kill']} — ${p['result']}` });
         break;
       }
       case 'dice.rolled': {
@@ -922,7 +943,7 @@ export function describeEvents(env: QueryEnv, events: LoggedEvent[], viewer: Sid
       case 'sk2.ordnance.rof': {
         const kept = p['kept'] as boolean;
         const why = p['why'] as string | null;
-        const ROF_WHY: Record<string, string> = { intensive: 'Intensive Fire never retains ROF', malfunction: 'the Gun malfunctioned', pinned: 'a pinned crew\'s Gun cannot retain ROF' };
+        const ROF_WHY: Record<string, string> = { intensive: 'Intensive Fire never retains ROF', malfunction: 'the Gun malfunctioned', pinned: 'a pinned crew\'s Gun cannot retain ROF', afph: 'no Rate of Fire in the Advancing Fire Phase', area: 'fire on the Area Target Type uses up all of a Gun\'s ROF (it may still Intensive Fire)' };
         // A Defensive First Fire hit leaves Residual FP, but not from a Weapon that uses Intensive Fire or
         // malfunctions (SK4 3.3.5): said here, since no counter appears.
         let shot: Record<string, unknown> | undefined;
@@ -935,6 +956,12 @@ export function describeEvents(env: QueryEnv, events: LoggedEvent[], viewer: Sid
         const units = (p['units'] as string[] | undefined) ?? [];
         const what = p['type'] === 'ATT' || units.length === 0 ? `hex ${hexLabel(p['hex'] as string)}` : `${units.map(name).join(', ')} in ${hexLabel(p['hex'] as string)}`;
         out.push({ seq: e.seq, kind: 'fire', text: `  ◎ ${name(p['weapon'] as string)} acquires ${what}: -${p['level']} Acquired Target counter placed${p['level'] === 2 ? ' (flipped)' : ''}` });
+        break;
+      }
+      case 'sk2.acq.kept': {
+        // The acquired stack scattered; the firer chose where the counter stays (SK4 6.10).
+        const units = (p['units'] as string[] | undefined) ?? [];
+        out.push({ seq: e.seq, kind: 'info', text: `◎ ${name(p['weapon'] as string)} keeps its Acquired Target counter on ${units.length ? `${units.map(name).join(', ')} in ` : ''}${hexLabel(p['hex'] as string)} (the acquired units split up)` });
         break;
       }
       case 'sk2.gun.malf':

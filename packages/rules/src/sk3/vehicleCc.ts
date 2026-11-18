@@ -25,8 +25,13 @@ import { applyVehicleEffect } from './vehicleStatus';
  *    unit in its hex may only fire at that hex; vehicles are Known Enemy Units for Interdiction.
  */
 
+/** The enemy units in `loc` that confine a firer there to that Location (SK4 3.2.2.1, ASLRB A7.212). */
+export const confiningEnemies = (env: QueryEnv, loc: string, enemy: SideId): Piece[] => unitsAt(env, loc, enemy).filter((p) => env.query('fire.confinesFire', { unit: p.id }, true));
+
 declare module '@asl/engine' {
   interface QueryCatalog {
+    /** Whether an enemy unit in a firer's Location confines its fire to that Location (SK4 3.2.2.1: any; ASLRB A7.212: not an unarmed, unarmored vehicle). */
+    'fire.confinesFire': { ctx: { unit: PieceId }; value: boolean };
     /** Close Combat Value of a unit attacking a vehicle (SK4 3.8). */
     'cc.ccv': { ctx: { unit: PieceId; combined: boolean }; value: number };
   }
@@ -370,7 +375,7 @@ export const vehicleCcModule: RuleModule = {
           const p = env.state.pieces[id];
           const loc = p && locOf(env.state, p);
           if (!loc || loc === decl.target) continue;
-          if (unitsAt(env, loc, enemy).length) return `${id}: an enemy unit is in its hex, it may only fire at that hex`;
+          if (confiningEnemies(env, loc, enemy).length) return `${id}: an enemy unit is in its hex, it may only fire at that hex`;
         }
         return null;
       },

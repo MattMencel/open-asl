@@ -1,8 +1,8 @@
 import type { Ctx, HexId, Piece, PieceId, QueryEnv, RuleModule } from '@asl/engine';
-import { byId, hexOf, isVehicleDef, defOf, otherSide, statics, swHeldBy, unitsAt } from '../common/pieces';
+import { byId, hexOf, isVehicleDef, defOf, otherSide, statics, swHeldBy } from '../common/pieces';
 import type { IftResult } from '../common/statics';
 import { locOf } from '../common/location';
-import { FP, type ApplyResultFn, type FireAttackCtx, type FireMode } from '../sk1/fire';
+import { FP, attackFp, iftColumn, type ApplyResultFn, type FireAttackCtx, type FireMode } from '../sk1/fire';
 import { hasLos } from '../sk1/known';
 import { moveState } from '../sk1/movement';
 import { fireMarker, inMelee, pieceOf, setTags } from '../sk1/status';
@@ -15,12 +15,32 @@ import { closeTerrain, turnRiskingBog } from './vehicleMove';
 import { T2, caTurnedIllegal } from '../sk2/status';
 import { hitLocation } from './facing';
 import { installVehicleFacing } from './vehicleFacing';
+import { confiningEnemies } from './vehicleCc';
 
-/** A Buttoned Up Open-Topped AFV fired on only from its own hex: its crew is still vulnerable (SK4 7.13; ASLRB A7.211). */
-const otOwnHex = (env: QueryEnv, attack: FireAttackCtx, unit: PieceId) => {
+declare module '@asl/engine' {
+  interface QueryCatalog {
+    /**
+     * The parts of an IFT attack a Buttoned Up Open-Topped crew is vulnerable to (SK4 7.13 "fire from its own hex"): by
+     * default all of them when every part fires from its hex, else none; full ASL takes the parts that do (A7.211).
+     */
+    'fire.otExposedParts': { ctx: { attack: FireAttackCtx; unit: PieceId }; value: PieceId[] };
+  }
+}
+
+/** The parts (their pieces) of `attack` a BU Open-Topped AFV's crew is vulnerable to (SK4 7.13; ASLRB A7.211). */
+export function otExposedParts(env: QueryEnv, attack: FireAttackCtx, unit: PieceId): PieceId[] {
   const p = pieceOf(env, unit);
-  return !isCe(p) && !!vehicle(env, p)?.openTopped && attack.parts.length > 0 && attack.parts.every((part) => part.dist === 0);
-};
+  if (isCe(p) || !vehicle(env, p)?.openTopped || attack.parts.length === 0) return [];
+  const all = attack.parts.every((part) => part.dist === 0) ? attack.parts.map((part) => part.piece) : [];
+  return env.query('fire.otExposedParts', { attack, unit }, all);
+}
+
+/** A Buttoned Up Open-Topped AFV fired on from its own hex: its crew is still vulnerable (SK4 7.13; ASLRB A7.211). */
+const otOwnHex = (env: QueryEnv, attack: FireAttackCtx, unit: PieceId) => otExposedParts(env, attack, unit).length > 0;
+
+/** Whether an IFT attack on a vehicle's crew takes the CE DRM (SK4 7.7, 7.13): CE, or BU Open-Topped fired on from its own hex, not vs the ATT, never on top of a positive hex TEM (a Snap Shot ignores that TEM, ASLRB A8.15; so does fire at a unit in Bypass, B23.31, when `noHexTem`). */
+export const ceDrmApplies = (env: QueryEnv, attack: FireAttackCtx, unit: PieceId, noHexTem = false): boolean =>
+  !!vehicle(env, pieceOf(env, unit)) && (isCe(pieceOf(env, unit)) || otOwnHex(env, attack, unit)) && attack.ordnance?.targetType !== 'ATT' && (noHexTem || !!attack.snap || env.query('hex.tem', { hex: attack.target }, 0) <= 0);
 
 /*
  * Fire by and at vehicles (SK4 3.2.4, 7.2, 7.7, 7.11, 7.12; To Hit cases 10, 13, 15, 22, 24, 25).
@@ -54,7 +74,7 @@ export function maIllegal(env: QueryEnv, shot: OrdnanceShot, mode: FireMode): st
   // With an enemy unit in its Location (or in Melee) the vehicle fires into that Location only (SK4 3.2.2.1, 3.8;
   // ASLRB A7.212).
   const at = locOf(env.state, p);
-  if (at && shot.target !== at && (inMelee(env, at) || unitsAt(env, at, otherSide(env.state, p.side)).length > 0)) return 'An enemy unit is in its hex: the Main Armament may only fire at that hex';
+  if (at && shot.target !== at && (inMelee(env, at) || confiningEnemies(env, at, otherSide(env.state, p.side)).length > 0)) return 'An enemy unit is in its hex: the Main Armament may only fire at that hex';
   if (mode === 'advancing' && p.tags[T3.bff] && !p.tags[T3.bffRof]) return 'The vehicle fired Bounding First Fire this MPh (and lost ROF or fired another weapon)';
   // A vehicle fires in both the MPh and the AFPh only if it fired just its MA in the MPh and kept ROF (SK4 3.3.2.2): MGs
   // that fired first and an MA that kept ROF after them do not qualify.
@@ -232,7 +252,7 @@ export const vehicleFireModule: RuleModule = {
       label: ({ unit }, env) => `+${vehicle(env, pieceOf(env, unit))!.ceDrm} Crew Exposed`,
       // A Buttoned Up Open-Topped crew fired on from its own hex is vulnerable with the same DRM (SK4 7.13 "normal CE DRM
       // applies"; ASLRB A7.211). A full ASL Snap Shot ignores the hex's TEM (ASLRB A8.15), so the CE DRM is not on top of it.
-      when: ({ unit, attack }, env) => !!vehicle(env, pieceOf(env, unit)) && (isCe(pieceOf(env, unit)) || otOwnHex(env, attack, unit)) && attack.ordnance?.targetType !== 'ATT' && (!!attack.snap || env.query('hex.tem', { hex: attack.target }, 0) <= 0),
+      when: ({ unit, attack }, env) => ceDrmApplies(env, attack, unit),
       apply: (v, { unit }, env) => v + vehicle(env, pieceOf(env, unit))!.ceDrm,
     });
     // Area Target Type vs an AFV (7.11): -1 when all its Armor Factors are ≤ 4, +1 when all are ≥ 8.
@@ -281,21 +301,33 @@ export const vehicleFireModule: RuleModule = {
         }
         // Infantry fire, MG fire and the Infantry Target Type: no effect on a BU AFV; a CE crew takes the result (3.2.3, 7.7).
         // A BU Open-Topped crew is still vulnerable to fire from its own hex (7.13).
-        const sameHex = attack.parts.length > 0 && attack.parts.every((part) => part.dist === 0);
-        const otExposed = !isCe(v) && !!vehicle(ctx, v)?.openTopped && sameHex;
-        if (!isCe(v) && !otExposed) {
+        const exposedParts = otExposedParts(ctx, attack, v.id);
+        const otExposed = exposedParts.length > 0;
+        // Only the FP of the parts it is vulnerable to attacks the BU Open-Topped crew (ASLRB A7.211): the column those
+        // parts alone reach, any column shift the attack took (cowering) kept.
+        const partial = otExposed && exposedParts.length < attack.parts.length;
+        const crewColumn = partial ? partsColumn(ctx, attack, column, exposedParts) : column;
+        if ((!isCe(v) && !otExposed) || crewColumn === null) {
           out[v.id] = { kind: 'none' };
-          ctx.emit('sk1.fire.result', { unit: v.id, result: { kind: 'none' }, finalDr: final, explain: [{ id: 'sk3.bu', label: 'Buttoned Up: no effect' }] });
+          ctx.emit('sk1.fire.result', { unit: v.id, result: { kind: 'none' }, finalDr: final, explain: [{ id: 'sk3.bu', label: crewColumn === null ? 'Buttoned Up: the FP from its own hex is below the first column' : 'Buttoned Up: no effect' }] });
           continue;
         }
-        const res = tables.ift(column, final);
+        const res = tables.ift(crewColumn, final);
         out[v.id] = res;
-        ctx.emit('sk1.fire.result', { unit: v.id, result: res, finalDr: final, ...(extra.value ? { drm: extra.value, explain: extra.trace.filter((t) => !t.suppressedBy && t.label).map((t) => ({ id: t.id, label: t.label! })) } : {}) });
+        const notes = [...(partial ? [{ id: 'sk3.ot-own-hex', label: `only the FP fired from its own hex (${crewColumn} column)` }] : []), ...extra.trace.filter((t) => !t.suppressedBy && t.label).map((t) => ({ id: t.id, label: t.label! }))];
+        ctx.emit('sk1.fire.result', { unit: v.id, result: res, finalDr: final, ...(extra.value || partial ? { drm: extra.value, explain: notes } : {}) });
         crewTakesResult(ctx, v.id, res, otExposed ? 'fire from its own hex on the Open-Topped crew' : 'fire on the CE crew', otExposed);
       }
       const rest = attack.targets.filter((u) => !vs.some((v) => v.id === u));
       if (rest.length) next?.(ctx, { ...attack, targets: rest }, column, baseFinal, out);
     });
+    /** The IFT column the `pieces` among an attack's parts reach alone, any column shift the attack took kept. */
+    function partsColumn(env: QueryEnv, attack: FireAttackCtx, column: number, pieces: PieceId[]): number | null {
+      const cols = statics(env).tables.iftColumns;
+      const base = iftColumn(env, attackFp(env, attack));
+      const shift = base === null ? 0 : Math.max(0, cols.indexOf(base) - cols.indexOf(column));
+      return iftColumn(env, attackFp(env, attack, attack.parts.filter((p) => !pieces.includes(p.piece)).map((p) => p.piece)), shift);
+    }
     /** The highest final DR that is still a K (or KIA) result on a column, or null when the column has none. */
     function kResultDr(tables: { ift(column: number, dr: number): IftResult }, column: number): number | null {
       let best: number | null = null;

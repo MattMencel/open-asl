@@ -233,6 +233,18 @@ export function acquisitionOf(g: Piece): { type: 'ITT' | 'ATT'; hex: HexId; unit
   return { type, hex, units, level: (g.tags[T2.acqLevel] as number | undefined) ?? 1 };
 }
 
+/**
+ * The hexes a scattered acquisition's units are in, the firer's choices of where the ½" counter stays (SK4 6.10:
+ * "the firer may retain a ½" Acquired Target counter of his choice on one of the previously Acquired Targets"); empty
+ * unless they are in more than one hex.
+ */
+export function acqCandidates(env: QueryEnv, g: Piece): HexId[] {
+  const a = acquisitionOf(g);
+  if (!a || a.type !== 'ITT') return [];
+  const hexes = [...new Set(a.units.map((u) => env.state.pieces[u]).filter((p): p is Piece => !!p).map((p) => hexOf(env.state, p)).filter((h): h is HexId => !!h))].sort();
+  return hexes.length > 1 ? hexes : [];
+}
+
 /** The Acquired Target counters lying in a hex, by the Guns that placed them. */
 export function acquisitionsAt(env: QueryEnv, hex: HexId): { gun: Piece; type: 'ITT' | 'ATT'; units: PieceId[]; level: number }[] {
   const out: { gun: Piece; type: 'ITT' | 'ATT'; units: PieceId[]; level: number }[] = [];

@@ -5,6 +5,7 @@ import { sk1CoreModules } from '../../src/sk1';
 import { sk2CoreModules } from '../../src/sk2';
 import { sk3CoreModules } from '../../src/sk3';
 import { act, makeEngine, type PieceSpec } from '../fixtures';
+import { vehicleEntryCost } from '../../src/sk3/vehicleMove';
 
 /*
  * The board-u Chapter B pass, in the full ASL ruleset: board u's hexes as the real board data gives them
@@ -118,5 +119,110 @@ describe('B1, B12, B13, B14 TEM and Open Ground on board u (full ASL)', () => {
     const a = buildAttack(env, { units: ['r1'], sw: [], target: 'uDD4' }, 'first', 'ru', ['g1'], { assault: false, viaRoadIntoWoodsRoad: true, from: 'uDD3' });
     const drm = env.explain('fire.drm', { attack: a }, 0).trace.filter((t) => !t.suppressedBy).map((t) => t.id);
     expect(drm).toEqual(expect.arrayContaining(['sk1.drm.ffmo', 'sk1.drm.woods-road']));
+  });
+});
+
+describe('B10.31: no Height Advantage for a unit receiving a CE DRM (full ASL)', () => {
+  // A CE T-34 and a Russian squad on the level 1 hill D8; a German squad below in D6 Prep Fires at them.
+  const pieces: PieceSpec[] = [
+    { id: 't', def: 'ru.T34M43', side: 'ru', hex: 'uD8', tags: { ce: true } },
+    { id: 'r1', def: 'ru.447', side: 'ru', hex: 'uD8' },
+    { id: 'g1', def: 'ge.467', side: 'ge', hex: 'uD6' },
+  ];
+  const ids = (t: { id: string; suppressedBy?: string }[]) => t.filter((x) => !x.suppressedBy).map((x) => x.id);
+  it('the CE crew keeps its CE DRM and gets no +1 Height Advantage; the squad beside it does; the Starter Kit gives both', () => {
+    for (const asl of [true, false]) {
+      const { engine, state } = game(pieces, { startPhase: 'PFPh', asl });
+      const env = engine.env(state);
+      const attack = buildAttack(env, { units: ['g1'], sw: [], target: 'uD8' }, 'prep', 'ge');
+      const crew = ids(env.explain('fire.unitDrm', { attack, unit: 't' }, 0).trace);
+      expect(crew).toContain('sk3.drm.ce');
+      if (asl) expect(crew).not.toContain('sk2.drm.height-advantage');
+      else expect(crew).toContain('sk2.drm.height-advantage');
+      expect(ids(env.explain('fire.unitDrm', { attack, unit: 'r1' }, 0).trace)).toContain('sk2.drm.height-advantage');
+    }
+  });
+  it('a Snap Shot at the CE tank entering the hill keeps the CE DRM and takes back the Height Advantage (A8.15 EX, B10.31)', () => {
+    const { engine, state } = game(pieces, { startPhase: 'PFPh' });
+    const env = engine.env(state);
+    const attack = buildAttack(env, { units: ['g1'], sw: [], target: 'uD8', snap: ['uD8', 'uC8'] }, 'first', 'ge', ['t'], { assault: false, viaRoadIntoWoodsRoad: false, from: 'uC8' });
+    expect(ids(env.explain('fire.drm', { attack }, 0).trace)).toContain('asl.snap.height-advantage');
+    const crew = env.explain('fire.unitDrm', { attack, unit: 't' }, 0);
+    expect(ids(crew.trace)).toEqual(expect.arrayContaining(['sk3.drm.ce', 'asl.snap.height-advantage.ce']));
+  });
+});
+
+describe('A4.12: the leader MF bonus only from a leader of the same nationality (full ASL)', () => {
+  const pieces: PieceSpec[] = [
+    { id: 'l', def: 'ge.L91', side: 'ge', hex: 'uD6' },
+    { id: 'g', def: 'ge.467', side: 'ge', hex: 'uD6' },
+    { id: 'i', def: 'ru.447', side: 'ge', hex: 'uD6' },
+  ];
+  it('a German leader gives the German squad 6 MF, not an allied squad of another nationality stacked with them; the Starter Kit gives both', () => {
+    const { engine, state } = game(pieces);
+    const ms = moveState(engine.env(act(engine, state, { type: 'move.start', units: ['l', 'g', 'i'] }).state))!;
+    expect(ms.allowance['g']).toBe(6);
+    expect(ms.allowance['i']).toBe(4);
+    expect(ms.leaderBonus).toEqual(['g']);
+    const sk = game(pieces, { asl: false });
+    const msk = moveState(sk.engine.env(act(sk.engine, sk.state, { type: 'move.start', units: ['l', 'g', 'i'] }).state))!;
+    expect(msk.allowance['i']).toBe(6);
+  });
+});
+
+describe('B3 roads and B1.17 Artificial Terrain with vehicles (full ASL)', () => {
+  // The J road (paved) with J6 on a level 1 hill and a dirt road K1-K2 beside it; a T-34 drives along it.
+  const ROADS: Record<string, HexTerrainSpec> = {
+    ...MAP,
+    uJ6: { terrain: 'open', features: ['road:paved'], elevation: 1 },
+    uK1: { terrain: 'open', features: ['road:dirt'] },
+    uK2: { terrain: 'open', features: ['road:dirt'] },
+  };
+  const at = (pieces: PieceSpec[], startPhase = 'MPh', first = 'ru') =>
+    makeEngine({ board: 'u', terrain: ROADS, roadHexsides: [...roadHexsides, ['uK1', 'uK2']], scenario: { ...GE_FIRST, firstSide: first }, modules: ASL, startPhase, pieces });
+  const t34 = (hex: string, tags: Record<string, boolean | number> = {}): PieceSpec => ({ id: 't', def: 'ru.T34M43', side: 'ru', hex, tags: { vca: 0, ca: 0, ...tags } });
+  const wreck = (id: string, hex: string): PieceSpec => ({ id, def: 'ge.pzivf2', side: 'ge', hex, tags: { vca: 0, ca: 0, wreck: true } });
+  const cost = (pieces: PieceSpec[], from: string, to: string, viaRoad: boolean) => {
+    const { engine, state } = at(pieces);
+    const env = engine.env(state);
+    return vehicleEntryCost(env, state.pieces['t']!, from, to, { viaRoad });
+  };
+
+  it('paved and dirt road alike are Open Ground, one MF for Infantry and ½ MP for a CE vehicle along them (B3.1, B3.4, B3.41)', () => {
+    const { engine, state } = at([{ id: 'g', def: 'ge.467', side: 'ge', hex: 'uY10' }, t34('uA1')]);
+    const env = engine.env(state);
+    for (const hex of ['uJ2', 'uK2']) {
+      expect(env.query('hex.openGround', { hex }, false)).toBe(true);
+      expect(env.query('move.cost', { unit: 'g' as PieceId, from: hex === 'uJ2' ? 'uJ1' : 'uK1', to: hex, viaRoad: true }, 0)).toBe(1);
+    }
+    expect(cost([t34('uJ1', { ce: true })], 'uJ1', 'uJ2', true)).toBe(0.5);
+    expect(cost([t34('uK1', { ce: true })], 'uK1', 'uK2', true)).toBe(0.5);
+  });
+
+  it('a vehicle along a road: ½ MP (1 Buttoned Up, D5.2), the uphill surcharge halved to 2, and 2 MP per vehicle or wreck in the hex (B3.41, B3.42)', () => {
+    expect(cost([t34('uJ1', { ce: true })], 'uJ1', 'uJ2', true)).toBe(0.5);
+    expect(cost([t34('uJ1')], 'uJ1', 'uJ2', true)).toBe(1);
+    expect(cost([t34('uJ1')], 'uJ1', 'uJ2', false)).toBe(1);
+    // Up onto the hill: +2 along the road, +4 otherwise.
+    expect(cost([t34('uJ5', { ce: true })], 'uJ5', 'uJ6', true)).toBe(2.5);
+    expect(cost([t34('uJ5', { ce: true })], 'uJ5', 'uJ6', false)).toBe(5);
+    // A wreck in the road hex entered: +2 at the road rate, +1 otherwise.
+    expect(cost([t34('uJ1', { ce: true }), wreck('w', 'uJ2')], 'uJ1', 'uJ2', true)).toBe(2.5);
+    expect(cost([t34('uJ1', { ce: true }), wreck('w', 'uJ2')], 'uJ1', 'uJ2', false)).toBe(2);
+    expect(cost([t34('uJ1', { ce: true }), wreck('w', 'uJ2'), wreck('w2', 'uJ2')], 'uJ1', 'uJ2', true)).toBe(4.5);
+  });
+
+  it('a wreck in an Open Ground road hex negates FFMO for a squad entering it at the road rate, and is its +1 TEM (B1.17 EX)', () => {
+    const { engine, state } = at([{ id: 'g', def: 'ge.467', side: 'ge', hex: 'uJ3' }, { id: 'r', def: 'ru.447', side: 'ru', hex: 'uJ1' }, wreck('w', 'uJ4')], 'MPh', 'ge');
+    let s = act(engine, state, { type: 'move.start', units: ['g'] }).state;
+    s = act(engine, s, { type: 'move.step', to: 'uJ4' }).state;
+    expect(engine.currentDecision(s)).toMatchObject({ kind: 'firstFire', owner: 'ru' });
+    const r = act(engine, s, { type: 'defFire', decl: { units: ['r'], sw: [], target: 'uJ4' } });
+    const attack = r.events.find((e) => e.type === 'sk1.fire.attack')!.payload as { explain: { label?: string }[] };
+    const labels = attack.explain.map((n) => n.label ?? '');
+    expect(labels).toContain('-1 FFNAM');
+    expect(labels.some((l) => /FFMO/.test(l))).toBe(false);
+    const res = r.events.find((e) => e.type === 'sk1.fire.result' && (e.payload as { unit: string }).unit === 'g')!.payload as { explain?: { label?: string }[] };
+    expect((res.explain ?? []).map((n) => n.label)).toContain('+1 behind a vehicle or wreck');
   });
 });

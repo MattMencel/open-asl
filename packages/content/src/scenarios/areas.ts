@@ -168,6 +168,15 @@ export function hexMasses(board: string, hexes: string[]): string[][] {
 }
 
 /**
+ * Every hex of a map of several boards, board by board: "setup anywhere" on boards that meet. Where two boards' half
+ * hexes join, the hex has the first board's name; the other board's whole hexes along that edge keep their own (a
+ * board turned 180° against another meets it half hex to half hex in alternate hexrows only).
+ */
+export function mapHexes(boards: Parameters<typeof buildMap>[0]): string[] {
+  return [...buildMap(boards, { los: 'grid' }).hexes()].map((h) => h.id);
+}
+
+/**
  * The two sides of a line of hexes across a map of several boards (S70: "the mA6-mG5-mJ7-nV6-nA6 road", listed hex by
  * hex): `north` is every hex reached from `from` without crossing the line, `south` the rest; the line's own hexes are
  * in neither. A flood fill, not a hexrow comparison, so a road that loops back (mH5-mI6-mJ6-mJ7-mJ8-mI9) leaves the

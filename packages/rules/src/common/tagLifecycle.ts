@@ -106,6 +106,8 @@ export const TAG_LIFECYCLE: Record<string, 'playerTurn' | 'lasting'> = {
   dcBreach: 'playerTurn',
   // Full ASL (asl/fire): Task Indicator for the Player Turn (ASLRB B24.7: Flame clearance; no fire, movement or advance).
   ti: 'playerTurn',
+  // Full ASL (asl/fire): the Location and the Flames a unit has fought there this Player Turn (ASLRB B24.72); off at the CCPh end.
+  flameClear: 'playerTurn',
   // Full ASL (asl/fire): Labor Status (ASLRB B24.8): { task, drm } until the Task is achieved or the unit leaves the Location.
   labor: 'lasting',
   hipFired: 'playerTurn',
