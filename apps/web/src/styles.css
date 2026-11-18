@@ -303,12 +303,19 @@ input[type='checkbox'] { accent-color: var(--brass); width: 16px; height: 16px; 
 .turn-track .lbl { font-family: var(--font-head); font-size: 11px; letter-spacing: 0.18em; color: var(--muted); }
 .turn-track .pips { display: flex; gap: 5px; }
 .turn-track .pip {
-  width: 22px; height: 22px; border-radius: 3px; display: grid; place-items: center;
+  position: relative; width: 22px; height: 22px; border-radius: 3px; display: grid; place-items: center;
   font: 700 12px var(--font-head); color: #6b7360; background: #1e241e; border: 1px solid var(--line);
 }
 .turn-track .pip.done { color: #a5ad94; background: #2b322b; }
 .turn-track .pip.now { color: var(--brass-ink); background: var(--brass); border-color: var(--brass-hi); box-shadow: 0 0 12px rgba(201, 162, 74, 0.6); }
-.turn-track .pip.half { opacity: 0.6; }
+/* A final half turn (the card's Turn Record Chart): a triangle in the corner of its box, as in the briefing. */
+.turn-track .pip.half::after,
+.brief-turn.half::after {
+  content: ''; position: absolute; right: -1px; bottom: -1px; width: 9px; height: 9px;
+  background: var(--brass); clip-path: polygon(100% 0, 100% 100%, 0 100%); border-bottom-right-radius: 3px;
+}
+.brief-turn.half::after { width: 14px; height: 14px; }
+.turn-track .pip.now.half::after { background: var(--brass-ink); }
 .sides { display: flex; align-items: center; gap: 10px; padding: 0 18px; }
 .side-chip {
   display: flex; align-items: center; gap: 8px; padding: 5px 10px 5px 6px; border-radius: 3px;

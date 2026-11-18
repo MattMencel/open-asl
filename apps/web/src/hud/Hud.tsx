@@ -223,7 +223,11 @@ export function Hud({ scenario, length, phases, phase, turn, attacker, acting, s
           <span className="lbl">TURN</span>
           <div className="pips">
             {Array.from({ length: (length ?? scenario).turns }, (_, i) => i + 1).map((t) => (
-              <span key={t} className={`pip ${!setup && t === turn ? 'now' : !setup && t < turn ? 'done' : ''} ${(length ?? scenario).halfFinalTurn && t === (length ?? scenario).turns ? 'half' : ''}`}>
+              <span
+                key={t}
+                className={`pip ${!setup && t === turn ? 'now' : !setup && t < turn ? 'done' : ''} ${(length ?? scenario).halfFinalTurn && t === (length ?? scenario).turns ? 'half' : ''}`}
+                title={(length ?? scenario).halfFinalTurn && t === (length ?? scenario).turns ? `Turn ${t} is a half turn: only the side moving first plays it` : undefined}
+              >
                 {t}
               </span>
             ))}

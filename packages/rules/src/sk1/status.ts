@@ -212,6 +212,24 @@ export const wounds = (p: Piece) => (p.tags[T.wounds] as number | undefined) ?? 
 export const isMalf = (p: Piece) => p.tags[T.malf] === true;
 export const fireMarker = (p: Piece) => p.tags[T.fire] as 'prep' | 'adv' | 'first' | 'final' | 'bff' | undefined;
 /**
+ * The First or Final Fire marker a weapon fires under in the DFPh (Final Fire): its own, else its holder's where the two
+ * fire as one. "A unit marked with First Fire has its and its Weapon's FP halved" and a Gun marked First Fire "may
+ * Intensive Fire at units in an adjacent (or same) hex" (SK4 3.3.3); a crew or HS fires one weapon "but forfeits its own
+ * FP" (SK4 4.0), so its weapon's fire and its own are one fire, and a Gun is fired by its manning unit (SK4 3.3.1 flips
+ * the counter "for the manning unit and all its Weapons"). A squad's SW is the exception: the squad fires one SW at no
+ * cost to its own FP (SK1 4.0), and its MMG fires unmarked after the squad First Fired (SK4 "Movement Phase and Defensive First Fire Example"; ASLRB A8.41).
+ */
+export function finalFireMarker(env: QueryEnv, w: Piece): 'prep' | 'adv' | 'first' | 'final' | 'bff' | undefined {
+  const own = fireMarker(w);
+  if (own || w.loc.kind !== 'held') return own;
+  const h = env.state.pieces[w.loc.by];
+  const hm = h ? fireMarker(h) : undefined;
+  if (!h || (hm !== 'first' && hm !== 'final')) return own;
+  const kind = mmc(env, h)?.kind;
+  return gun(env, w) || kind === 'hs' || kind === 'crew' || smc(env, h) ? hm : own;
+}
+
+/**
  * The fire marker drawn on a piece: its own, else the Prep or Advancing Fire its SW fire earned it (SK1 3.2.2
  * marks "the firing unit (and SW)"). Defensive fire marks only "any unit or SW that has fired" (SK1 3.3.1), and
  * a squad fires one SW "at no cost to its own FP" (SK1 4.0), so a holder whose MG alone fired wears nothing.

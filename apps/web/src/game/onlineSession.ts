@@ -37,9 +37,11 @@ interface View {
  * shows the snapshot, checks an order's legality against it for instant feedback, and sends the order to the
  * server, whose answer carries the viewer's next snapshot. A spectator reads the `public` view.
  */
-export function useOnlineGame(matchId: string, scenario: ScenarioDef, mySide: string | null): OnlineSession {
+export function useOnlineGame(matchId: string, scenario: ScenarioDef, mySide: string | null, viewAs: string | null = mySide): OnlineSession {
   const engine = useMemo(() => engineFor(scenario), [scenario]);
-  const viewer = mySide ?? PUBLIC_VIEWER;
+  // A player whose match has ended no longer acts (`mySide` null) but keeps reading their own view: switching to the
+  // public one as the last action lands would empty the board mid-reveal and load another position.
+  const viewer = viewAs ?? PUBLIC_VIEWER;
   const [view, setView] = useState<View | null>(null);
   const [steps, setSteps] = useState<Map<number, { side: string; events: LoggedEvent[] }>>(new Map());
   const [loadError, setLoadError] = useState<string | null>(null);

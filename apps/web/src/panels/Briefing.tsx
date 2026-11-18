@@ -773,7 +773,7 @@ export function Briefing({ scenario: sc, balance, onBalance, children }: Props) 
           </div>
           <div className="brief-track">
             {Array.from({ length: sc.turns }, (_, i) => i + 1).map((t) => (
-              <span key={t} className={`brief-turn ${sc.halfFinalTurn && t === sc.turns ? 'half' : ''}`} title={enteringOn(t).length ? `Reinforcements: ${enteringOn(t).map(sideName).join(', ')}` : undefined}>
+              <span key={t} className={`brief-turn ${sc.halfFinalTurn && t === sc.turns ? 'half' : ''}`} title={[sc.halfFinalTurn && t === sc.turns ? `Turn ${t} is a half turn: only the side moving first plays it` : '', enteringOn(t).length ? `Reinforcements: ${enteringOn(t).map(sideName).join(', ')}` : ''].filter(Boolean).join('\n') || undefined}>
                 <span className="brief-turn-marks">
                   {enteringOn(t).map((s) => (
                     <i key={s} className={`sw side-${s}`} title={`${sideName(s)} reinforcements`} />

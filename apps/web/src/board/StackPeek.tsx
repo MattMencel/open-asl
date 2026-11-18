@@ -1,5 +1,6 @@
 import { useLayoutEffect, useRef, useState } from 'react';
 import type { HexId, Piece, PieceId, QueryEnv } from '@asl/engine';
+import { entrenchmentAt, entrenchmentName, haltedUnits, isEntrenched } from '@asl/rules';
 import { AMMO_NAME, acquisitionsAt, ammoOut, defOf, fireAt, fireMarker, fireNumbers, fortCounters, fortKindName, gunIdent, isWeaponDef, locationsOf, moveState, parseLabor, rubbleAt, shownFireMarker, smokeDrm, smokeGrenades, stackOrder, swHeldBy, terrainOf, windOf, type Statics, type VehicleDef } from '@asl/rules';
 import { counterImage, cxMarker, markerImage } from '../game/assets';
 import { fortMarker } from '../panels/FortTray';
@@ -63,11 +64,19 @@ function statusOf(env: QueryEnv, p: Piece): { label: string; marker?: string }[]
   if (fire === 'first') out.push({ label: 'First Fire', marker: 'First' });
   if (fire === 'final') out.push({ label: 'Final Fire', marker: 'Final' });
   if (t['wounds']) out.push({ label: 'wounded', marker: 'Wound' });
-  if (t['ti']) out.push({ label: 'TI: fighting a Flame; no fire, movement or advance this Player Turn (ASLRB B24.72)', marker: 'TI' });
+  if (t['ti']) out.push({ label: 'TI: no fire, movement or advance this Player Turn; CC +1/-1 (ASLRB A4.8)', marker: 'TI' });
   const labor = parseLabor(t['labor']);
-  if (labor) out.push({ label: `Labor ${labor.drm} on the next attempt at ${labor.task.replace(/^flame:/, 'the Flame in ').replace(/^[a-z]/, '')} (ASLRB B24.8)`, marker: labor.drm <= -2 ? 'Labor2' : 'Labor1' });
+  if (labor) out.push({ label: `Labor ${labor.drm} on the next attempt at ${labor.task.replace(/^flame:/, 'the Flame in ').replace(/^entrench:/, 'entrenching in ').replace(/^[a-z]/, '')} (ASLRB B24.8)`, marker: labor.drm <= -2 ? 'Labor2' : 'Labor1' });
+  // Full ASL: beneath the foxhole or trench of the hex, or on top of it (ASLRB B27.1, B27.13).
+  if (p.loc.kind === 'hex' && defOf(env, p).kind !== 'vehicle') {
+    const ent = entrenchmentAt(env, p.loc.hex);
+    if (ent) out.push({ label: isEntrenched(p) ? `beneath the ${entrenchmentName(ent)}: +2 TEM, no FFMO (ASLRB B27.3)` : `on top of the ${entrenchmentName(ent)}: the hex TEM (ASLRB B27.1)` });
+  }
   // A leader relieved of command by SSR (LMA5 SSR 4): why he stays pinned.
   if (typeof t['relieved'] === 'string') out.push({ label: t['relieved'] });
+  // Halted by a card's once-per-game dr for this Game Turn: no action but routing or Close Combat.
+  const halt = haltedUnits(env).get(p.id);
+  if (halt) out.push({ label: `Halted (${halt}): no action this Game Turn but routing or Close Combat` });
   if (t['moved']) out.push({ label: 'moved' });
   if (t['advanced']) out.push({ label: 'advanced' });
   // SK2 Guns.

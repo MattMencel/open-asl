@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Engine, GameState } from '@asl/engine';
-import { ONCE_DR_DECISION, ONCE_DR_MODULE, RAIDER_AMBUSH_MODULE, concealmentModule, onceDrModule, onceDrRecord, raiderAmbushModule, setupDeployModule, sk2CoreModules, sk3CoreModules, usmcModule } from '../../src';
+import { ONCE_DR_DECISION, ONCE_DR_MODULE, RAIDER_AMBUSH_MODULE, concealmentModule, haltedUnits, onceDrModule, onceDrRecord, raiderAmbushModule, setupDeployModule, sk2CoreModules, sk3CoreModules, usmcModule } from '../../src';
 import { act, makeEngine, type PieceSpec } from '../fixtures';
 
 /**
@@ -125,7 +125,11 @@ describe('S64 SSR 3: the American dr that halts the 10-1', () => {
     const r = act(engine, s, { type: 'onceDr.roll', index: 0 });
     s = r.state;
     expect(onceDrRecord(engine.env(s), 0)).toEqual({ turn: 3, dr: 1, success: true });
+    // The event names the halted leader and his hex, for the log.
+    expect(r.events.find((e) => e.type === 'ssr.onceDr')!.payload).toMatchObject({ leader: 'L', hex: 'yK5', turn: 3, success: true });
     const env = engine.env(s);
+    // The halted units, for the stack card: the 10-1's stack, him included, and nobody else.
+    expect([...haltedUnits(env).entries()].sort()).toEqual([['L', 'SSR 3'], ['j1', 'SSR 3'], ['j2', 'SSR 3']]);
     // No action for the 10-1's stack (him included), any other unit is free.
     for (const u of ['L', 'j1']) expect(env.query('unit.actionIllegal', { unit: u }, null)).toMatch(/SSR 3: units stacked with the 10-1 leader/);
     expect(env.query('unit.actionIllegal', { unit: 'j3' }, null)).toBeNull();
@@ -142,6 +146,7 @@ describe('S64 SSR 3: the American dr that halts the 10-1', () => {
     // Game Turn 4: free again.
     s = advance(engine, s, 4, 'ja', 'PFPh');
     expect(engine.env(s).query('unit.actionIllegal', { unit: 'j1' }, null)).toBeNull();
+    expect(haltedUnits(engine.env(s)).size).toBe(0);
   });
 
   it('rallies the broken units stacked with him in each RPh of the Game Turn, without a roll', () => {

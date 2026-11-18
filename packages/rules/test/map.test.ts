@@ -90,6 +90,31 @@ describe('geomorphic board geometry', () => {
     expect(cut.roadHexside('yH10', 'yH11')).toBe(false);
   });
 
+  it('continues a path that ends at the map edge offboard in its own line, as roads extend offboard (SK1 3.3, SK4 8.2.1)', () => {
+    const jungle = (...f: string[]) => ({ terrain: 'jungle', features: f });
+    const m = new HexGridMap({
+      boards: [{ board: 'y', x: 0, y: 0, columns: ['A', 'V'] }],
+      terrain: {
+        // A path an SSR draws along the hex grain T3-U4-V4, ending at the cut hexrow V.
+        yT3: jungle('path:ssr'), yU4: jungle('path:ssr'), yV4: jungle('path:ssr'),
+        // A Woods-Road path ending in V8 at the cut: the board shows no road beyond, so it ends there.
+        yU8: jungle('path'), yV8: jungle('path'),
+        // A Woods-Road path down to the bottom edge, I9-I10: it goes on to I11.
+        yI9: jungle('path'), yI10: jungle('path'),
+        // A path hexside into a hex that is no path hex (a Woods-Road path's last hexside): nothing beyond.
+        yB10: jungle('path'), yC10: jungle(),
+      },
+      pathHexsides: [['yT3', 'yU4'], ['yU4', 'yV4'], ['yU8', 'yV8'], ['yI9', 'yI10'], ['yB10', 'yC10']],
+      losEffect: () => 'none',
+    });
+    expect(m.pathHexside('yV4', 'yW5')).toBe(true);
+    expect(m.pathHexside('yV4', 'yW4')).toBe(false);
+    expect(m.pathHexside('yV8', 'yW8')).toBe(false);
+    expect(m.pathHexside('yV8', 'yW9')).toBe(false);
+    expect(m.pathHexside('yI10', 'yI11')).toBe(true);
+    expect(m.pathHexside('yC10', 'yC11')).toBe(false);
+  });
+
   it('blocks LOS through obstacles but not along a hexside shared with open ground', () => {
     const m = testMap({ yO5: { terrain: 'woods' } });
     // N5 -> P5 runs exactly along the O5/O6 hexside.

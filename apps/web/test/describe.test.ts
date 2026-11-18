@@ -526,8 +526,8 @@ describe('fortification counters in the log (full ASL A12.33, B28.45, B28.47)', 
     const german = describeEvents(env, events, 'ge').map((l) => l.text).filter((t) => /fortification|Minefield|minefield|Dummy/i.test(t));
     expect(german).toHaveLength(1);
     const line = german[0]!;
-    expect(line).toMatch(/placed 10 fortification counters/);
-    for (const open of ['foxhole 1S O7', 'trench P6', 'Wire P9', 'minefield N9', 'minefield O10']) expect(line).toContain(open);
+    expect(line).toMatch(/placed 11 fortification counters/);
+    for (const open of ['trench O7', 'trench P6', 'Wire P9', 'minefield N9', 'minefield N10', 'foxhole 1S O10']) expect(line).toContain(open);
     expect(line).toMatch(/5 hidden or recorded/);
     for (const secret of ['O6', 'O4', 'P10', 'O9', 'O3', 'Dummy', 'Known', 'A-P', 'A-T', 'Secret dr', 'hidden)']) expect(line, secret).not.toContain(secret);
   });
@@ -535,7 +535,7 @@ describe('fortification counters in the log (full ASL A12.33, B28.45, B28.47)', 
     const { env, events } = placed();
     const russian = describeEvents(env, events, 'ru').map((l) => l.text);
     const line = russian.find((t) => /Russian placed:/.test(t))!;
-    for (const s of ['foxhole 2S O6 (hidden)', 'minefield (A-P 8 + A-T 1) P10 (recorded)', 'Known minefield (A-P 6) N9', 'Dummy minefield O10', 'roadblock O9 (hidden)', 'pillbox 1+3+5 O3 (hidden)', 'Wire O4 (hidden)']) expect(line, s).toContain(s);
+    for (const s of ['foxhole 2S O6 (hidden)', 'minefield (A-P 8 + A-T 1) P10 (recorded)', 'Known minefield (A-P 6) N9', 'Dummy minefield N10', 'roadblock O9 (hidden)', 'pillbox 1+3+5 O3 (hidden)', 'Wire O4 (hidden)']) expect(line, s).toContain(s);
     expect(russian.some((t) => /Dummy Minefield Secret dr/.test(t))).toBe(true);
   });
 });

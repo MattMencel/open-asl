@@ -113,13 +113,8 @@ export const fireLocations = (env: QueryEnv): LocId[] =>
     .sort();
 
 /** The Labor counter tag (B24.8): the Task it was earned for and its DRM, as "<task>@<drm>" (tags are scalars). */
-export const laborTag = (task: string, drm: number) => `${task}@${drm}`;
-export function parseLabor(v: unknown): { task: string; drm: number } | null {
-  if (typeof v !== 'string') return null;
-  const i = v.lastIndexOf('@');
-  if (i < 0) return null;
-  return { task: v.slice(0, i), drm: Number(v.slice(i + 1)) };
-}
+export { laborTag, parseLabor } from './labor';
+import { laborTag, parseLabor, tiIllegal } from './labor';
 
 const turnKey = (env: QueryEnv): TurnKey => ({ turn: env.state.turn, attacker: env.state.attacker });
 const sameTurn = (a: TurnKey, b: TurnKey) => a.turn === b.turn && a.attacker === b.attacker;
@@ -208,8 +203,7 @@ function canKindle(env: QueryEnv, p: Piece): string | null {
   if (!isInfantry(env, p)) return `${p.id} is not Infantry`;
   if (!isGoodOrder(env, p) || isPinned(p)) return `${p.id} must be unpinned and in Good Order (ASLRB B25.11)`;
   if (fireMarker(p) || p.tags[T.firedSw]) return `${p.id} has already fired this phase`;
-  if (p.tags['ti']) return `${p.id} is TI this Player Turn`;
-  return null;
+  return tiIllegal(p);
 }
 
 export function kindleIllegal(env: QueryEnv, a: { loc: LocId; attempts: KindleAttempt[]; side: SideId }): string | null {
@@ -554,7 +548,7 @@ export const aslFireModule: RuleModule = {
   id: 'asl.fire',
   ref: 'ASLRB B25.1–B25.7, B24.6, B24.72, B24.721, B24.8, A4.3, A4.44, A26.16',
   summary: 'Fire: Kindling, Flames and Blazes, spreading with the wind, the smoke of a Blaze, no entry, Flame clearance, Control forfeiture.',
-  requires: ['asl.wind', 'asl.locations', 'sk1.fire', 'sk1.firePhases', 'sk1.movement', 'sk1.advance', 'sk1.rout', 'sk1.scenario'],
+  requires: ['asl.labor', 'asl.wind', 'asl.locations', 'sk1.fire', 'sk1.firePhases', 'sk1.movement', 'sk1.advance', 'sk1.rout', 'sk1.scenario'],
   install(r) {
     r.event<{ loc: LocId; flame: FlameRecord; source: FireSource; from?: LocId }>({
       type: 'asl.fire.flame',
@@ -701,7 +695,6 @@ export const aslFireModule: RuleModule = {
         if (ev.payload.phase === 'AFPh' && Object.keys(fireState(ctx)).length) fireAfph(ctx);
         // A Hampered Flame rolls again next Player Turn (B24.721); Labor counters for a Task that is over come off (B24.8).
         if (ev.payload.phase === 'CCPh') {
-          for (const p of Object.values(ctx.state.pieces).sort(byId)) if (p.tags['ti'] !== undefined) setTags(ctx, p.id, { ti: null });
           for (const [loc, f] of Object.entries(fireState(ctx)).sort()) for (const fl of f.flames) if (fl.hampered) ctx.emit('asl.fire.hampered', { loc, id: fl.id, hampered: false });
           for (const p of Object.values(ctx.state.pieces).sort(byId)) {
             const labor = parseLabor(p.tags['labor']);
@@ -939,45 +932,6 @@ export const aslFireModule: RuleModule = {
         askPhaseOwner(ctx, side);
       },
     });
-    // TI: no fire, no movement, no advance for the Player Turn; +1 to its CC attacks and -1 against it (B24.7, B24.72).
-    const tiUnits = (env: QueryEnv, ids: PieceId[]) => ids.filter((u) => env.state.pieces[u]?.tags['ti'] === true);
-    r.contribute({
-      id: 'asl.fire.tiNoFire',
-      query: 'fire.illegal',
-      ref: 'ASLRB B24.72',
-      apply(v, { decl }, env) {
-        if (v) return v;
-        const holders = decl.sw.map((s) => env.state.pieces[s]?.loc).flatMap((l) => (l?.kind === 'held' ? [l.by] : []));
-        const ti = tiUnits(env, [...decl.units, ...holders, ...(decl.directors ?? [])]);
-        return ti.length ? `${ti[0]} is TI (fighting a Flame) this Player Turn and may not fire (ASLRB B24.72)` : null;
-      },
-    });
-    r.contribute({
-      id: 'asl.fire.tiNoMove',
-      query: 'move.cannotStart',
-      ref: 'ASLRB B24.72',
-      apply(v, { units }, env) {
-        if (v) return v;
-        const ti = tiUnits(env, units);
-        return ti.length ? `${ti[0]} is TI (fighting a Flame) this Player Turn and may not move (ASLRB B24.72)` : null;
-      },
-    });
-    r.contribute({
-      id: 'asl.fire.tiNoAdvance',
-      query: 'unit.cannotAdvance',
-      ref: 'ASLRB B24.72',
-      when: ({ unit }, env) => env.state.pieces[unit]?.tags['ti'] === true,
-      apply: () => 'is TI (fighting a Flame) this Player Turn and may not advance (ASLRB B24.72)',
-    });
-    r.contribute({
-      id: 'asl.fire.tiCc',
-      query: 'cc.drm',
-      ref: 'ASLRB B24.7',
-      label: ({ attackers }, env) => (tiUnits(env, attackers).length ? '+1 TI attacker' : '-1 TI defender'),
-      when: ({ attackers, targets }, env) => tiUnits(env, attackers).length > 0 || (targets.length > 0 && tiUnits(env, targets).length === targets.length),
-      apply: (v, { attackers }, env) => v + (tiUnits(env, attackers).length ? 1 : -1),
-    });
-
     // ---------------------------------------------------------------- A26.16: Control forfeited by Fire
     r.contribute({
       id: 'asl.fire.control',
@@ -1005,7 +959,7 @@ function clearerIllegal(env: QueryEnv, p: Piece): string | null {
   if (!isGoodOrder(env, p) || isPinned(p)) return `${p.id} must be unpinned and in Good Order (ASLRB B24.7)`;
   if (p.tags[T.moved]) return `${p.id} has moved this Player Turn (ASLRB B24.72)`;
   if (fireMarker(p) || p.tags[T.firedSw]) return `${p.id} has fired this Player Turn (ASLRB B24.72)`;
-  if (p.tags['ti']) return `${p.id} is already TI`;
+  if (p.tags['ti']) return tiIllegal(p);
   if (p.tags[T2.manhandled]) return `${p.id} is manhandling a Gun`;
   return null;
 }

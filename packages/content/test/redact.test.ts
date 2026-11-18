@@ -75,6 +75,16 @@ describe('redacted views on random play', () => {
               secretsSeen++;
             }
             if (realForts.length > allowed.length) secretsSeen++;
+            // A unit beneath a hidden entrenchment shows no position to the other side, nor does the moving stack's state
+            // or a move in or out of it (B27.13 positions; A12.33 free entry while hidden).
+            const hiddenEnt = new Set(realForts.filter((c) => (c.kind === 'foxhole' || c.kind === 'trench' || c.kind === 'ditch') && c.side !== viewer && !allowed.some((a) => a.id === c.id)).map((c) => c.hex));
+            if (hiddenEnt.size) {
+              for (const p of Object.values(snapshot.pieces)) if (p.loc.kind === 'hex' && hiddenEnt.has(p.loc.hex)) expect(p.loc.pos?.ent, `${viewer} sees ${p.id} beneath a hidden entrenchment`).toBeUndefined();
+              const ms = snapshot.ext['sk1.move'] as { hex?: string; ent?: true } | undefined;
+              if (ms?.hex && hiddenEnt.has(ms.hex)) expect(ms.ent, `${viewer} sees the moving stack beneath a hidden entrenchment`).toBeUndefined();
+              for (const e of stream) if (e.type === 'asl.entrench.move') expect(hiddenEnt.has((e.payload as { hex: string }).hex), `${viewer} sees a move beneath a hidden entrenchment`).toBe(false);
+              secretsSeen++;
+            }
           }
           // Scatter setup: the units are on the table for all to see; the plan (groups, rendezvous) is the secret.
           const plan = snapshot.ext['ssr.scatter'] as ScatterState | undefined;

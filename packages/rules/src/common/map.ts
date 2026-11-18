@@ -303,9 +303,29 @@ export class HexGridMap implements GameMap {
             if (!oh.features.includes('road:offboard')) oh.features.push('road:offboard');
             this.roads.add(this.pairKey(h.id, offId));
           }
+          if (this.pathContinues(h, c, cutAway)) this.paths.add(this.pairKey(h.id, offId));
         }
       }
     }
+  }
+
+  /**
+   * Whether a path that reaches edge hex `h` runs on into the offboard hex at cube `c`. Paths extend offboard as roads
+   * do (SK1 3.3, SK4 8.2.1). A path through `h` (a hex with the `path` feature) that ends there runs on in its own line:
+   * into the offboard hex straight on from the one path hexside by which it enters `h`. Beyond a cut hexrow the board
+   * data already gives a Woods-Road path's hexside into the hex cut away (`cutAway`), so one that ends there ends; a path
+   * an SSR draws along a hex grain (`path:ssr`) has no board data, and runs on.
+   */
+  private pathContinues(h: MapHex, c: Cube, cutAway: boolean): boolean {
+    if (!h.features.some((f) => f === 'path' || f.startsWith('path:'))) return false;
+    if (cutAway && !h.features.includes('path:ssr')) return false;
+    const along = cubeNeighbors(h.cube).filter((n) => {
+      const id = this.byCube.get(key(n))?.id ?? this.offByCube.get(key(n));
+      return !!id && this.paths.has(this.pairKey(id, h.id));
+    });
+    if (along.length !== 1) return false;
+    const n = along[0]!;
+    return key({ q: 2 * h.cube.q - n.q, r: 2 * h.cube.r - n.r, s: 2 * h.cube.s - n.s }) === key(c);
   }
 
   /**

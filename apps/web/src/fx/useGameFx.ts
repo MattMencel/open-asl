@@ -739,6 +739,14 @@ export function useGameFx(env: QueryEnv, log: LoggedEvent[], decision: Decision 
           }
           break;
         }
+        case 'asl.entrench.attempt': {
+          const dug = p['success'] as boolean;
+          if (lastToast) {
+            lastToast.results.push(`${labelOf(p['unit'] as string)}: needs ≤ ${5 - (p['drm'] as number)}: ${dug ? `a FOXHOLE ${p['capacity']}S` : `no${p['labor'] !== undefined ? ` · Labor ${p['labor']}` : ''}`} · TI`);
+            lastToast.tone = dug ? 'good' : 'neutral';
+          }
+          break;
+        }
         case 'asl.fire.kindle': {
           const flame = p['flame'] as boolean;
           if (lastToast) {

@@ -61,6 +61,8 @@ describe('end-of-phase confirmation', () => {
     expect(w?.title).toMatch(/DM/);
     expect(w?.units).toEqual(['a1']);
     expect(w?.lines.join(' ')).toMatch(/\+4/);
+    // It says where the choice is: the hex's menu.
+    expect(w?.lines.join(' ')).toMatch(/right-click the unit's hex and choose "Remove DM"/);
     s = act(engine, s, { type: 'rally.dmRemove', unit: 'a1' }).state;
     w = warn(engine, s);
     expect(w).toBeNull();

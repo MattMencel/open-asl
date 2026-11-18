@@ -94,7 +94,7 @@ describe('BPV (A./G. National Capabilities Chart)', () => {
 
 describe('Dev fixtures', () => {
   it('lists the test bed fixtures', () => {
-    expect(fixturesFor('asl-testbed').map((f) => f.id)).toEqual(['kindling', 'start', 'melee', 'building-assault', 'two-story-house', 'los-heights', 'orchard-road', 'bypass', 'fortified-breach', 'fortified-hidden', 'fort-setup', 'fort-owner', 'fort-placed', 'snap-shot']);
+    expect(fixturesFor('asl-testbed').map((f) => f.id)).toEqual(['kindling', 'start', 'melee', 'building-assault', 'two-story-house', 'los-heights', 'orchard-road', 'bypass', 'fortified-breach', 'fortified-hidden', 'fort-setup', 'fort-owner', 'fort-placed', 'entrench', 'foxhole-fight', 'trench-move', 'snap-shot']);
     expect(fixturesFor('asl-testbed-fire').map((f) => f.id)).toEqual(['blaze-spread', 'flame-clearance']);
     expect(DEV_FIXTURES.every((f) => f.title && f.description)).toBe(true);
   });

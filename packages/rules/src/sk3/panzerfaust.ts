@@ -1,8 +1,8 @@
 import type { Action, Ctx, HexId, PieceId, QueryEnv, RuleModule, SideId } from '@asl/engine';
 import { defOf, hexOf, otherSide, personnelAt, statics } from '../common/pieces';
 import { PHASE_DECISION, askPhaseOwner } from '../common/turn';
-import type { FireMode } from '../sk1/fire';
-import { PHASE_FIRE_MODE, fireTargets, phaseOwner } from '../sk1/firePhases';
+import { firedOwnFpThisPhase, type FireMode } from '../sk1/fire';
+import { PHASE_FIRE_MODE, fireTargets, phaseOwner, swUsedThisPhase } from '../sk1/firePhases';
 import { P, type CasualtyFn, type FlushFn, type UnitFn } from '../sk1/morale';
 import { FIRST_FIRE, finishDefensiveFire, firstFireTargets, moveLoc, moveState, movingInfo } from '../sk1/movement';
 import { T, gun, isCx, isGoodOrder, isPinned, mmc, pieceOf, setTags, smc } from '../sk1/status';
@@ -160,8 +160,21 @@ export function pfUnitIllegal(env: QueryEnv, side: SideId, unit: PieceId, mode: 
   const d = defOf(env, p);
   if (d.nationality !== 'ge' || !(mmc(env, p) || smc(env, p))) return 'Only German Infantry may fire a Panzerfaust';
   if (!isGoodOrder(env, p)) return 'The unit is not in Good Order';
-  if (p.tags[T.fire] || p.tags[T.firedSw]) return 'The unit has already fired';
-  if (p.tags[TRIED] === tryKey(env)) return 'The unit has already made a PF check this phase';
+  // "Units which can still fire (e.g., a leader, crew, or half-squad that has not fired or a squad that can still fire
+  // a SW at full strength)", and every PF check is a SW use whether or not it yields a shot (SK4 4.4.2, 4.0).
+  const used = swUsedThisPhase(env, p);
+  if (mmc(env, p)?.kind !== 'squad') {
+    if (p.tags[T.fire] || used >= 1 || p.tags[T.firedSw] || firedOwnFpThisPhase(env, p.id)) return 'The unit has already fired';
+    return null;
+  }
+  // A squad that fired its own FP in this phase still fires one SW at full strength (SK4 4.0): its marker from this
+  // phase's fire does not bar the PF. Any other marker (Prep Fire in the DFPh's eyes, First Fire in the DFPh) does.
+  const marker = p.tags[T.fire];
+  const thisPhase = (mode === 'prep' && marker === 'prep') || (mode === 'advancing' && marker === 'adv') || (mode === 'first' && marker === 'first');
+  if (marker && !thisPhase) return 'The unit has already fired';
+  if (used >= 2) return 'A squad may use at most two SW per phase';
+  // A second PF is the squad's second SW use, which costs its own FP: not once that FP has fired (SK4 4.4.2).
+  if (used >= 1 && (firedOwnFpThisPhase(env, p.id) || p.tags[T.ownFpForfeit])) return 'A squad that fired its own FP may use only one SW';
   return null;
 }
 
@@ -212,6 +225,32 @@ export function simplePfShots(env: QueryEnv, side: SideId, mode: FireMode, targe
   return out;
 }
 
+/**
+ * The PF check is the use of a SW whatever its result (SK4 4.4.2: "Even if a PF check fails to result in a shot, the
+ * PF check constitutes the use of a SW"). The PF counter is gone after it, so the use is counted on the unit as a
+ * destroyed SW's is: the unit has fired a SW, and a HS, crew or SMC has spent its one weapon use and its own FP; a
+ * squad's second use forfeits its own FP (SK4 4.0; ASLRB A7.35, A7.351). A shot fired has already marked the unit
+ * (`markFirers`), so then only the count is added.
+ */
+function recordPfUse(ctx: Ctx, unit: PieceId, mode: FireMode, fired: boolean) {
+  const p = ctx.state.pieces[unit];
+  if (!p || p.loc.kind !== 'hex') return;
+  const count = ((p.tags[T.swDestroyed] as number | undefined) ?? 0) + 1;
+  if (fired) {
+    setTags(ctx, unit, { [T.swDestroyed]: count });
+    return;
+  }
+  const used = swUsedThisPhase(ctx, p) + 1;
+  const kind = mmc(ctx, p)?.kind;
+  const marker = mode === 'prep' ? 'prep' : mode === 'advancing' ? 'adv' : mode === 'first' ? 'first' : 'final';
+  setTags(ctx, unit, {
+    [T.firedSw]: true,
+    ...(p.tags[T.firedSwAs] === undefined ? { [T.firedSwAs]: marker } : {}),
+    [T.swDestroyed]: count,
+    ...(kind === 'hs' || kind === 'crew' || (kind === 'squad' && used >= 2) ? { [T.ownFpForfeit]: true } : {}),
+  });
+}
+
 /** Make the PF check and, if the unit has one, fire it. Whether a PF was fired. */
 function resolvePf(ctx: Ctx, pf: PfShot, mode: FireMode, opts: { moving?: PieceId[]; movingInfo?: ReturnType<typeof movingInfo> } = {}): boolean {
   const p = pieceOf(ctx, pf.unit);
@@ -225,10 +264,12 @@ function resolvePf(ctx: Ctx, pf: PfShot, mode: FireMode, opts: { moving?: PieceI
     ctx.emit('sk3.pf.check', { unit: p.id, dr, drm, final, notes, result: broken ? 'broken' : 'pinned' });
     if (broken) ctx.proc<UnitFn>(P.breakUnit)(ctx, p.id, 'Panzerfaust check');
     else setTags(ctx, p.id, { [T.pinned]: true });
+    recordPfUse(ctx, p.id, mode, false);
     return false;
   }
   if (final >= 4) {
     ctx.emit('sk3.pf.check', { unit: p.id, dr, drm, final, notes, result: 'none' });
+    recordPfUse(ctx, p.id, mode, false);
     return false;
   }
   ctx.emit('sk3.pf.check', { unit: p.id, dr, drm, final, notes, result: 'pf' });
@@ -252,6 +293,7 @@ function resolvePf(ctx: Ctx, pf: PfShot, mode: FireMode, opts: { moving?: PieceI
     ctx.proc<FlushFn>(P.flushLeaderLoss)(ctx);
   }
   if (ctx.state.pieces[id] && ctx.state.pieces[id].loc.kind !== 'eliminated') ctx.emit('piece.eliminated', { id, reason: 'Panzerfaust fired' });
+  recordPfUse(ctx, p.id, mode, true);
   return true;
 }
 
@@ -323,8 +365,9 @@ export const panzerfaustModule: RuleModule = {
         const ms = moveState(ctx)!;
         const targets = firstFireTargets(ctx, ms);
         const fired = resolvePf(ctx, a.pf, 'first', { moving: targets, movingInfo: movingInfo(ctx, ms) });
-        // A unit that found no PF has not fired: it may still fire at this location.
-        finishDefensiveFire(ctx, fired ? [a.pf.unit, ...(a.pf.director !== undefined ? [a.pf.director] : [])] : []);
+        // The PF check is a SW use even when it yields no shot (SK4 4.4.2): the unit has fired at this location. A
+        // leader directs only a shot.
+        finishDefensiveFire(ctx, [a.pf.unit, ...(fired && a.pf.director !== undefined ? [a.pf.director] : [])]);
       },
     });
   },

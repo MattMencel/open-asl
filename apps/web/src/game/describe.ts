@@ -287,7 +287,9 @@ export function describeEvents(env: QueryEnv, events: LoggedEvent[], viewer: Sid
                 ? 'no Interdiction (Low Crawl)'
                 : step.interdiction === 'notOpen'
                   ? 'no Interdiction (not Open Ground)'
-                  : 'no Interdiction (no enemy able to interdict)';
+                  : step.interdiction === 'entrenched'
+                    ? 'no Interdiction (beneath the entrenchment, ASLRB B27.41)'
+                    : 'no Interdiction (no enemy able to interdict)';
           // Interdiction is decided along an unhindered LOS, already traced: clicking the line draws it as a shot's does.
           const interdictors = step.interdiction === 'checked' && step.byFrom?.length && !step.by!.some(hiddenFrom) ? [...new Set(step.byFrom)].filter((h) => h !== step.to) : [];
           out.push({ seq: e.seq, kind: 'info', text: `${step.lowCrawl ? 'Low Crawl' : 'Rout'}: ${name(step.unit)} to ${where} · ${why}`, ...(interdictors.length ? { los: { from: interdictors, to: step.to } } : {}) });
@@ -434,6 +436,21 @@ export function describeEvents(env: QueryEnv, events: LoggedEvent[], viewer: Sid
         break;
       case 'asl.wind.smokeGusted':
         out.push({ seq: e.seq, kind: 'info', text: `  Gusts (${p['when']}): Dispersed Smoke removed, the rest flipped to Dispersed (ASLRB A24.62)` });
+        break;
+      case 'asl.entrench.attempt': {
+        const ex = (p['explain'] as string[]).join(', ');
+        const drm = p['drm'] as number;
+        out.push({ seq: e.seq, kind: 'check', text: `  ⛏ ${name(p['unit'] as string)}${p['director'] ? ` (directed by ${name(p['director'] as string)})` : ''} tries to entrench in ${hexLabel(hexOfLoc(p['loc'] as string))}: DR ${drText(p['dr'] as number[])}${drm ? ` ${drm > 0 ? '+' : ''}${drm}` : ''}${ex ? ` (${ex})` : ''} ≤ 5? ${p['success'] ? `yes: a foxhole ${p['capacity']}S, beneath it` : `no${p['labor'] !== undefined ? `; Labor ${p['labor']} next time` : ''}`}; TI for the Player Turn (ASLRB B27.11, A4.8)` });
+        break;
+      }
+      case 'asl.entrench.move': {
+        const units = (p['units'] as string[]).map(name).join(', ');
+        const mf = p['mf'] as number;
+        out.push({ seq: e.seq, kind: 'move', text: `  ${units} ${p['beneath'] ? 'go beneath' : 'climb out of'} the entrenchment in ${hexLabel(p['hex'] as string)}${p['phase'] === 'MPh' ? ` (${mf ? `${mf} MF` : 'no MF: hidden'})` : p['phase'] === 'RtPh' ? ` (+${mf} MF, no Interdiction there)` : ''} (ASLRB ${p['phase'] === 'RtPh' ? 'B27.41' : p['phase'] === 'APh' ? 'B27.44' : 'B27.4'})` });
+        break;
+      }
+      case 'asl.fort.grown':
+        out.push({ seq: e.seq, kind: 'info', text: `  ▣ the foxhole grows to ${p['capacity']}S (ASLRB B27.12)` });
         break;
       case 'asl.fire.ntc':
         out.push({ seq: e.seq, kind: 'check', text: `  ${name(p['unit'] as string)} Kindling NTC: DR ${drText(p['dr'] as number[])} vs ${p['target']}: ${p['passed'] ? 'passed' : 'failed, no attempt'} (ASLRB B25.11)` });
@@ -641,7 +658,12 @@ export function describeEvents(env: QueryEnv, events: LoggedEvent[], viewer: Sid
       case 'ssr.onceDr': {
         // A card's once-per-game dr (S64 SSR 2, 3).
         const v = p as unknown as OnceDrEvent;
-        const what = v.effect === 'nmcConcealment' ? 'each Good Order MMC not stacked with a Good Order leader takes a NMC' : 'the leader’s stack is halted this Game Turn';
+        // The halted leader by name and hex, unless he is hidden from the reader (then only the card's own words).
+        const who = v.leader && !hiddenFrom(v.leader) ? `${name(v.leader)}${v.hex ? ` in ${hexLabel(v.hex)}` : ''}` : 'the leader';
+        const what =
+          v.effect === 'nmcConcealment'
+            ? 'each Good Order MMC not stacked with a Good Order leader takes a NMC'
+            : `${who} and every unit stacked with him are halted for Game Turn ${v.turn}: no action but routing or Close Combat`;
         out.push({ seq: e.seq, kind: 'info', text: `${v.rule}: dr ${v.dr} (needs < ${v.turn}) — ${v.success ? what : 'no effect; the dr is spent'}` });
         break;
       }
@@ -706,6 +728,11 @@ export function describeEvents(env: QueryEnv, events: LoggedEvent[], viewer: Sid
         // The owner's log names each counter; the other side's shows what it may see (its redacted event) and the count.
         const side = p['side'] as string;
         const counters = p['counters'] as { hex: string; hidden: boolean; kind: string; capacity?: number; pillbox?: unknown; mines?: { known?: true; dummy?: true } }[];
+        // One open foxhole on its own is one dug in play (ASLRB B27.11), not a setup placement.
+        if (counters.length === 1 && counters[0]!.kind === 'foxhole' && !counters[0]!.hidden) {
+          out.push({ seq: e.seq, kind: 'info', text: `  ▣ ${sideNameOf(env, side)} dig a foxhole 1S in ${hexLabel(counters[0]!.hex)} (ASLRB B27.11)` });
+          break;
+        }
         // Anyone else reads only what the board shows them (a hotseat log sees the unredacted event): no hidden counter's
         // hex, no Known minefield's strength, no Dummy (B28.45, B28.47: both are a blank Minefield counter to the enemy).
         const shown = counters.map((c) => shownCounter(c as FortRecord, viewer)).filter((c): c is FortRecord => !!c);

@@ -37,6 +37,10 @@ declare module '@asl/engine' {
     'rout.canInterdict': { ctx: { interdictor: PieceId; hex: HexId; from?: HexId }; value: boolean };
     /** The unit need not rout for being in Open Ground (SK4 3.6 "unemplaced": an emplaced Gun's crew is exempt). */
     'rout.exemptOpenGround': { ctx: { unit: PieceId }; value: boolean };
+    /** Full ASL: a rout step into `to` that goes straight beneath its entrenchment (ASLRB B27.41): the step's whole cost, a refusal, or null where there is none. */
+    'rout.beneath': { ctx: { unit: PieceId; from: HexId; to: LocId }; value: { cost: number } | string | null };
+    /** Full ASL: MF a routing unit pays on top of a step's cost to leave the entrenchment it stands beneath (ASLRB B27.41); 0 in the Starter Kit. */
+    'rout.exitCost': { ctx: { unit: PieceId; from: HexId; to: HexId }; value: number };
   }
 }
 
@@ -47,7 +51,7 @@ export type RoutAction =
    * `to` is the Location entered: a hex id at ground level; in full ASL it may be the level above or below in the
    * unit's own hex (the stairs) or the same floor of an adjacent hex of its building (see `stairStepCheck`).
    */
-  | (Action & { type: 'rout.step'; unit: PieceId; to: LocId; lowCrawl?: boolean; leaders?: PieceId[]; woods?: boolean })
+  | (Action & { type: 'rout.step'; unit: PieceId; to: LocId; lowCrawl?: boolean; leaders?: PieceId[]; woods?: boolean; beneath?: true })
   /** End the rout in a hex it may end in (a legal shelter) rather than going on into another shelter hex. */
   | (Action & { type: 'rout.stop'; unit: PieceId })
   /** A whole rout at once, kept for recordings made before routs were stepped hex by hex. */
@@ -121,7 +125,7 @@ export interface RoutStep {
   unit: PieceId;
   to: HexId;
   lowCrawl: boolean;
-  interdiction: 'checked' | 'lowCrawl' | 'notOpen' | 'none';
+  interdiction: 'checked' | 'lowCrawl' | 'notOpen' | 'none' | 'entrenched';
   by?: PieceId[];
   /** Where each interdicting unit stood (its Location), in the order of `by`: the log draws the LOS it interdicted along. */
   byFrom?: LocId[];
@@ -257,6 +261,21 @@ const routStepCost = (env: QueryEnv, unit: PieceId, from: LocId, to: LocId, wood
   special(env, from) || special(env, to)
     ? env.query('move.cost', { unit, from: hexOfLoc(from), to: hexOfLoc(to), viaRoad: false, ...(parseLoc(to).sub ? { loc: to } : {}) }, 1)
     : env.query('move.cost', { unit, from, to, viaRoad: !woods && (statics(env).map.roadHexside?.(from, to) ?? false) }, 1);
+
+/**
+ * A step's cost: beneath the entrenchment of the hex entered (full ASL, ASLRB B27.41: the module's whole cost, or its
+ * refusal), else the terrain's, plus what leaving the entrenchment the unit stands beneath costs (B27.41: combined with
+ * the next hex in the RtPh). Neither in-hex cost counts toward the nearest shelter (A10.5), so `planRout` never sees them.
+ */
+function beneathOrStepCost(env: QueryEnv, unit: PieceId, from: HexId, toLoc: LocId, woods: boolean, beneath: boolean): number | string {
+  if (beneath) {
+    const b = env.query('rout.beneath', { unit, from, to: toLoc }, null);
+    if (b === null) return 'No entrenchment to rout beneath there';
+    if (typeof b === 'string') return b;
+    return b.cost;
+  }
+  return routStepCost(env, unit, from, routNode(toLoc), woods) + env.query('rout.exitCost', { unit, from, to: hexOfLoc(toLoc) }, 0);
+}
 
 /** Is a single rout step legal given enemies already seen during this rout? */
 function stepIllegal(env: QueryEnv, side: SideId, from: HexId, toLoc: LocId, seen: Set<HexId>, unit: PieceId): string | null {
@@ -479,7 +498,7 @@ export function activeRoutEnds(env: QueryEnv): Set<HexId> | null {
 }
 
 /** Why the rout may not step into `to` next (null when it may). */
-function stepCheck(env: QueryEnv, v: RoutView, toLoc: LocId, lowCrawl: boolean, woods = false): string | null {
+function stepCheck(env: QueryEnv, v: RoutView, toLoc: LocId, lowCrawl: boolean, woods = false, beneath = false): string | null {
   // A pinned broken unit cannot rout (SK4 8.2.1: a hut collapsing pins even a broken unit, "unable to rout").
   if (isPinned(pieceOf(env, v.unit))) return 'A pinned unit cannot rout';
   const to = routNode(toLoc);
@@ -498,7 +517,8 @@ function stepCheck(env: QueryEnv, v: RoutView, toLoc: LocId, lowCrawl: boolean, 
     if (!v.plan.onTheWay.has(to) && !v.plan.destinations.has(to)) return headingRefusal(env, v, to, 'Low Crawl must head toward the nearest building or woods');
     return null;
   }
-  const cost = routStepCost(env, v.unit, v.at, to, woods);
+  const cost = beneathOrStepCost(env, v.unit, v.at, toLoc, woods, beneath);
+  if (typeof cost === 'string') return cost;
   if (v.spent + cost > v.mf) return `Not enough MF (${v.mf}) for that rout path`;
   if (v.reached && !isShelter(env, to)) return `Rout must stop in ${v.at}`;
   if (!finishReachable(env, afterStep(env, v, toLoc, cost))) return headingRefusal(env, v, to, 'Rout must head for the nearest legal building or woods hex');
@@ -603,11 +623,11 @@ function stepActionIllegal(env: QueryEnv, a: RoutAction & { type: 'rout.step' })
     if (a.leaders?.length) return 'Leaders join a rout at its first hex';
     const u = env.state.pieces[a.unit];
     if (!u || u.side !== a.side) return 'Not your unit to rout';
-    return stepCheck(env, activeView(env, act), a.to, false, !!a.woods);
+    return stepCheck(env, activeView(env, act), a.to, false, !!a.woods, !!a.beneath);
   }
   const err = startIllegal(env, st, a);
   if (err) return err;
-  return stepCheck(env, freshView(env, a.unit), a.to, !!a.lowCrawl, !!a.woods);
+  return stepCheck(env, freshView(env, a.unit), a.to, !!a.lowCrawl, !!a.woods, !!a.beneath);
 }
 
 /** Legal next steps for a unit: fresh (normal and Low Crawl) or continuing its rout. */
@@ -626,6 +646,8 @@ function stepOptions(env: QueryEnv, st: RoutState, unitId: PieceId): Omit<RoutAc
     if (!stepCheck(env, v, n, false)) out.push({ type: 'rout.step', unit: unitId, to: n });
     if (woodsRoadStep(env, v.at, n) && !stepCheck(env, v, n, false, true)) out.push({ type: 'rout.step', unit: unitId, to: n, woods: true });
     if (!act && !stepCheck(env, v, n, true)) out.push({ type: 'rout.step', unit: unitId, to: n, lowCrawl: true });
+    // Full ASL: straight beneath the entrenchment of the hex entered (ASLRB B27.41), where a module offers it.
+    if (env.query('rout.beneath', { unit: unitId, from: v.at, to: n }, null) !== null && !stepCheck(env, v, n, false, false, true)) out.push({ type: 'rout.step', unit: unitId, to: n, beneath: true });
   }
   return out;
 }
@@ -657,6 +679,7 @@ export const routModule: RuleModule = {
   install(r) {
     r.procedure<RoutStartSideFn>(ROUT_START_SIDE, () => (ctx, side) => startSide(ctx, side));
     r.procedure<RoutEnterFn>(ROUT_ENTER, () => () => true);
+    r.procedure<RoutEnteredFn>(ROUT_ENTERED, () => () => {});
     r.event<{ state: RoutState | null; step?: RoutStep }>({
       type: 'sk1.rout.state',
       apply(d, p) {
@@ -753,8 +776,9 @@ export const routModule: RuleModule = {
         let act = st.active?.unit === a.unit ? st.active : beginRout(ctx, a.unit, a.leaders ?? []);
         const v = activeView(ctx, act);
         const stairs = routNode(a.to) === v.at;
-        const cost = a.lowCrawl ? v.mf : stairs ? LEVEL_CHANGE_MF : routStepCost(ctx, a.unit, v.at, routNode(a.to), !!a.woods);
-        const r = enterHex(ctx, act, a.to, cost, !!a.lowCrawl, true, !stairs && !a.woods && woodsRoadStep(ctx, v.at, hexOfLoc(a.to)));
+        const costOrWhy = a.lowCrawl ? v.mf : stairs ? LEVEL_CHANGE_MF : beneathOrStepCost(ctx, a.unit, v.at, a.to, !!a.woods, !!a.beneath);
+        const cost = typeof costOrWhy === 'string' ? 0 : costOrWhy;
+        const r = enterHex(ctx, act, a.to, cost, !!a.lowCrawl, true, !stairs && !a.woods && woodsRoadStep(ctx, v.at, hexOfLoc(a.to)), !!a.beneath);
         act = r.act;
         // Upstairs is the last step of an (interim) full ASL rout: it climbs only where the rout may end.
         let over = r.over || (stairs && levelOfLoc(a.to) > v.level);
@@ -885,6 +909,9 @@ export const ROUT_START_SIDE = 'sk1.rout.startSide';
 export type RoutStartSideFn = (ctx: Ctx, side: SideId) => void;
 export const ROUT_ENTER = 'sk1.rout.enter';
 export type RoutEnterFn = (ctx: Ctx, unit: PieceId, hex: HexId) => boolean;
+/** Procedure run once a routing unit and its escort stand in the Location entered: (ctx, units, loc, beneath its entrenchment). A no-op in the Starter Kit. */
+export const ROUT_ENTERED = 'sk1.rout.entered';
+export type RoutEnteredFn = (ctx: Ctx, units: PieceId[], loc: LocId, beneath: boolean) => void;
 
 /**
  * Start a unit's rout: excess SW dropped, the escorting leaders restacked with it, its destinations fixed.
@@ -917,13 +944,14 @@ function beginRout(ctx: Ctx, unit: PieceId, leaders: PieceId[], record = true): 
  * Ground in the view of an enemy able to fire, unless Low Crawling. `over` when the rout ends here:
  * Low Crawl, a pin, the unit's loss, or a hex it turns out it cannot enter (SK2 HIP).
  */
-function enterHex(ctx: Ctx, act: ActiveRout, toLoc: LocId, cost: number, lowCrawl: boolean, record = true, onRoad = false): { act: ActiveRout; over: boolean; alive: boolean } {
+function enterHex(ctx: Ctx, act: ActiveRout, toLoc: LocId, cost: number, lowCrawl: boolean, record = true, onRoad = false, beneath = false): { act: ActiveRout; over: boolean; alive: boolean } {
   const side = pieceOf(ctx, act.unit).side;
   const from = nodeOf(ctx, pieceOf(ctx, act.unit))!;
   const to = routNode(toLoc);
   // A hex that turns out to hold a hidden enemy (SK2 HIP) ends the rout there.
   if (!ctx.proc<RoutEnterFn>(ROUT_ENTER)(ctx, act.unit, to)) return { act, over: true, alive: true };
   for (const id of [act.unit, ...act.escort]) ctx.emit('piece.moved', { id, loc: locationAt(toLoc) });
+  ctx.proc<RoutEnteredFn>(ROUT_ENTERED)(ctx, [act.unit, ...act.escort], toLoc, beneath);
   let next: ActiveRout = {
     ...act,
     path: [...act.path, toLoc],
@@ -936,7 +964,9 @@ function enterHex(ctx: Ctx, act: ActiveRout, toLoc: LocId, cost: number, lowCraw
   // Why this step was, or was not, open to Interdiction, for the log (SK1 3.6: a Low Crawl is never interdicted;
   // Interdiction needs Open Ground, or a road the unit routs along, in a Good Order enemy's Normal Range and clear LOS).
   let step: RoutStep = { unit: act.unit, to: hexOfLoc(toLoc), lowCrawl, interdiction: 'lowCrawl' };
-  if (!lowCrawl) {
+  // Beneath the entrenchment of the hex entered (full ASL, ASLRB B27.41) the foxhole "nullifies any Interdiction in that hex".
+  if (beneath) step = { ...step, interdiction: 'entrenched' };
+  else if (!lowCrawl) {
     const by = interdicted(ctx, side, to, from, onRoad);
     const byIds = by.map((e) => e.id).sort();
     step = {

@@ -7,7 +7,8 @@ import { sk3CoreModules } from '../src/sk3';
 import { caChangeDrm, inCoveredArc, nearestSpine, smoke58Counters, spineChange, statics, turretTurnFor } from '../src';
 import { T3, tcaOf } from '../src/sk3/status';
 import { T2 } from '../src/sk2/status';
-import { RU_VS_GE, act, makeEngine, type PieceSpec } from './fixtures';
+import { COUNTERS, RU_VS_GE, act, makeEngine, type PieceSpec } from './fixtures';
+import type { CounterDef } from '../src/common/statics';
 
 /*
  * Fire by vehicles (SK4 3.3.2.2, 3.5, 7.8): Bounding First Fire with its case 14 DRM by MP spent in
@@ -259,6 +260,36 @@ describe('vehicular machine guns (SK4 7.8)', () => {
 });
 
 describe('smoke dispensers and Motion attempts (SK4 7.5, 3.3.2.1)', () => {
+  it('a Smoke Mortar is offered at every hex 1 to 3 hexes away in the TCA and LOS, as validation accepts (SK4 7.5)', () => {
+    // A panzer carrying a Smoke Mortar (sM8) in yM8, hull and turret toward spine 0; woods in yM6 block the LOS beyond.
+    COUNTERS['test.smV'] = { ...COUNTERS['ge.pzivf2']!, id: 'test.smV', smoke: [{ kind: 'sM', n: 8 }] } as CounterDef;
+    for (const mg of ['bmg', 'cmg']) COUNTERS[`test.smV.${mg}`] = { ...COUNTERS[`ge.pzivf2.${mg}`]!, id: `test.smV.${mg}` };
+    const { engine, state } = makeEngine({
+      pieces: [{ id: 'm4', def: 'test.smV', side: 'ge', hex: 'yM8', tags: { vca: 0, ca: 0 } }],
+      scenario: { ...RU_VS_GE, firstSide: 'ge' },
+      extra,
+      startPhase: 'MPh',
+      terrain: { yM6: { terrain: 'woods' } },
+    });
+    const s = play(engine, state, { type: 'vmove.start', vehicle: 'm4' });
+    const env = engine.env(s);
+    const map = statics(env).map;
+    const targets = engine.legalActions(s, 'ge').filter((a) => a.type === 'vmove.smoke').map((a) => a['target'] as string);
+    expect(targets.some((h) => map.distance('yM8', h) === 3)).toBe(true);
+    expect(targets.some((h) => map.distance('yM8', h) === 2)).toBe(true);
+    const at = map.hex('yM8')!.cube;
+    for (const h of targets) {
+      expect(map.distance('yM8', h)).toBeGreaterThanOrEqual(1);
+      expect(map.distance('yM8', h)).toBeLessThanOrEqual(3);
+      expect(inCoveredArc(at, 0, map.hex(h)!.cube)).toBe(true);
+    }
+    // Every hex validation accepts is listed, and none it refuses.
+    const d = engine.currentDecision(s)!;
+    const accepted = [...map.hexes()].map((h) => h.id).filter((h) => !engine.validate(s, { type: 'vmove.smoke', target: h, side: 'ge', decisionId: d.id } as never));
+    expect(targets.sort()).toEqual(accepted.sort());
+    // yM5 lies behind the woods in yM6: out of LOS, so refused.
+    expect(engine.validate(s, { type: 'vmove.smoke', target: 'yM5', side: 'ge', decisionId: d.id } as never)).toMatch(/LOS/);
+  });
   it('a moving panzer dispenses sD smoke in its own hex for 1 MP on a DR ≤ 6 (+1 BU), once per turn and never after firing', () => {
     const { engine, state } = makeEngine({ pieces: [pziv('yM8', { ce: true })], scenario: { ...RU_VS_GE, firstSide: 'ge' }, extra, startPhase: 'MPh', dice: [3, 3] });
     let s = play(engine, state, { type: 'vmove.start', vehicle: 'pziv' });

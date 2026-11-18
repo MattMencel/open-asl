@@ -19,6 +19,8 @@ interface BoardJson {
 }
 
 const BOARDS = boards as unknown as Record<string, BoardJson>;
+/** The feature of a hex a path an SSR draws runs through (SK4 8.2.1). */
+const SSR_PATH = 'path:ssr';
 const RASTERS: Record<string, RasterSource> = { m: LOS_M, n: LOS_N, o: LOS_O, t: LOS_T, u: LOS_U, v: LOS_V, w: LOS_W, x: LOS_X, y: LOS_Y, z: LOS_Z };
 const decoded = new Map<string, BoardRaster>();
 
@@ -224,7 +226,15 @@ export function buildMap(
       if (!features.length) delete terrain[h]!.features;
     }
     if (!o.roads) roads = [];
-    for (const line of o.paths ?? []) for (let i = 1; i < line.length; i++) paths.push([line[i - 1]!, line[i]!]);
+    for (const line of o.paths ?? []) {
+      for (let i = 1; i < line.length; i++) paths.push([line[i - 1]!, line[i]!]);
+      // Each hex of the line is a path hex (`path:ssr`: no board data says where it goes beyond a cut hexrow, see
+      // HexGridMap's offboard paths).
+      for (const h of line) {
+        const spec = terrain[h] ?? { terrain: 'open' };
+        if (!spec.features?.includes(SSR_PATH)) terrain[h] = { ...spec, features: [...(spec.features ?? []), SSR_PATH] };
+      }
+    }
     if (o.interiorDense) {
       const grid = new HexGridMap({ boards: placements.map(({ board, x, y, rotation }) => ({ board, x, y, ...(rotation ? { rotation } : {}) })), terrain, losEffect: () => 'none' });
       const jungle = (h: string) => terrain[h]?.terrain === 'jungle' || terrain[h]?.terrain === 'jungle-light';

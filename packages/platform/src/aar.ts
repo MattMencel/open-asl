@@ -8,8 +8,15 @@ import type { Competition } from './lobby';
  * the recording replaying. Readable by anyone, written only by the server.
  */
 
-/** 2: control.byTurn rows became { holders } objects (Firestore rejects arrays of arrays). */
-export const AAR_VERSION = 2;
+/**
+ * 2: control.byTurn rows became { holders } objects (Firestore rejects arrays of arrays).
+ * 3: dice gained `byType` (DRs by what they were rolled for), `dr` (single-die rolls) and `rof`; the report gained `fire`
+ *    (attacks with and without effect per player turn). Older reports lack them.
+ */
+export const AAR_VERSION = 3;
+
+/** What a DR was rolled for: an IFT attack, To Hit, To Kill, a Morale Check, a Task Check, a rally, Close Combat, or anything else. */
+export type AarRollKind = 'IFT' | 'TH' | 'TK' | 'MC' | 'TC' | 'rally' | 'CC' | 'other';
 
 export interface AarPlayer {
   uid: string | null;
@@ -110,6 +117,22 @@ export interface AarDice {
   hob: number;
   /** Longest run of morale checks passed. */
   streak: number;
+  /** DRs by what they were rolled for: how many and their total (the mean is sum / n). Absent before version 3. */
+  byType?: Partial<Record<AarRollKind, { n: number; sum: number }>>;
+  /** Single-die rolls (drs): how many, their total, and the counts of 1 … 6. Absent before version 3. */
+  dr?: { n: number; sum: number; hist: number[] };
+  /** Shots by weapons with a Rate of Fire, and how many kept it. Absent before version 3. */
+  rof?: { fired: number; kept: number };
+}
+
+/**
+ * Fire attacks per player turn (the `labels` of the strength chart), by the side firing: those that pinned, broke,
+ * reduced or eliminated an enemy unit, or shocked, stunned, immobilized or wrecked a vehicle (`effect`), and those
+ * that did none of these (`none`). IFT attacks and ordnance shots; Residual FP is not a shot.
+ */
+export interface AarFire {
+  labels: string[];
+  sides: Record<string, { effect: number[]; none: number[] }>;
 }
 
 /** Running total of (7 − DR) per player turn, and the original 2s and 12s along the way. */
@@ -167,6 +190,8 @@ export interface AarDoc {
   race: AarRace | null;
   strength: AarStrength;
   dice: Record<string, AarDice>;
+  /** Absent before version 3. */
+  fire?: AarFire;
   luck: AarLuck;
   casualties: AarCasualty[];
   highlights: AarHighlight[];

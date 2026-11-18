@@ -8,6 +8,7 @@ import {
   drmNotes,
   type DrmNote,
   fireMarker,
+  finalFireMarker,
   hasDm,
   inMelee,
   isBroken,
@@ -62,7 +63,7 @@ export interface FireAttackCtx {
    * SK4 6.5; `from`: the hex the stack entered the target hex from, for the Crest Line exception;
    * `pinned`: every target was pinned by earlier Defensive First Fire here, so no FFNAM/FFMO, SK1 3.3.1).
    */
-  moving?: { assault: boolean; viaRoadIntoWoodsRoad: boolean; viaRoadIntoOrchardRoad?: boolean; hazardous?: boolean; from?: HexId | null; vehicle?: boolean; pinned?: boolean };
+  moving?: { assault: boolean; viaRoadIntoWoodsRoad: boolean; viaRoadIntoOrchardRoad?: boolean; hazardous?: boolean; from?: HexId | null; vehicle?: boolean; pinned?: boolean; /** Full ASL: a move between connecting trenches (ASLRB B27.54), never subject to FFNAM or FFMO. */ noFfnamFfmo?: boolean };
   /** Worst LOS hindrance among firers. */
   hindrance: number;
   /**
@@ -364,7 +365,8 @@ export const isSw = (env: QueryEnv, id: PieceId) => !!sw(env, pieceOf(env, id));
  */
 export function firingAgain(env: QueryEnv, attack: FireAttackCtx, piece: PieceId): boolean {
   if (attack.mode === 'prep' || attack.mode === 'advancing' || attack.residual) return false;
-  const m = fireMarker(pieceOf(env, piece));
+  // A crew's or HS's weapon in Final Fire is halved with its holder (SK4 3.3.3, `finalFireMarker`).
+  const m = attack.mode === 'final' ? finalFireMarker(env, pieceOf(env, piece)) : fireMarker(pieceOf(env, piece));
   return m === 'first' || m === 'final';
 }
 
@@ -460,12 +462,13 @@ const attackFirerLocs = (env: QueryEnv, attack: FireAttackCtx) => [...new Set(at
 const attackOnWoodsRoad = (env: QueryEnv, attack: FireAttackCtx) => onWoodsRoad(env, attack.moving, attackFirerLocs(env, attack), attack.target, !!attack.losBlind);
 
 /** FFNAM (SK1 3.3.1): Defensive First Fire at Infantry not using Assault Movement (nor all pinned there already). */
-const ffnamApplies = (attack: FireAttackCtx) => !!attack.moving && !attack.moving.assault && !attack.moving.vehicle && !attack.moving.pinned;
+export const ffnamApplies = (attack: FireAttackCtx) => !!attack.moving && !attack.moving.assault && !attack.moving.vehicle && !attack.moving.pinned && !attack.moving.noFfnamFfmo;
 /** FFMO (SK1 3.3.1): the same at a target in Open Ground, or on the road through a Woods-Road or Orchard-Road hex (SK1/SK4 1.1.1). */
-const ffmoApplies = (env: QueryEnv, attack: FireAttackCtx) =>
+export const ffmoApplies = (env: QueryEnv, attack: FireAttackCtx) =>
   !!attack.moving &&
   !attack.moving.vehicle &&
   !attack.moving.pinned &&
+  !attack.moving.noFfnamFfmo &&
   attack.hindrance === 0 &&
   (env.query('hex.openGround', { hex: attack.target }, false) || onRoadInTheOpen(env, attack.moving, attackFirerLocs(env, attack), attack.target, !!attack.losBlind));
 export function buildAttack(
@@ -990,7 +993,8 @@ function basicIllegal(env: QueryEnv, decl: FireDeclaration, mode: FireMode, side
   // Fire marker eligibility per mode.
   const pieces = [...decl.units, ...decl.sw];
   for (const id of pieces) {
-    const m = fireMarker(pieceOf(env, id));
+    // In Final Fire a crew's or HS's weapon, and a Gun, fire under the holder's First/Final Fire marker too (SK4 3.3.3).
+    const m = mode === 'final' ? finalFireMarker(env, pieceOf(env, id)) : fireMarker(pieceOf(env, id));
     switch (mode) {
       case 'prep':
       case 'advancing':

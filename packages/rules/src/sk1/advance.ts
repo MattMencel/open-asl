@@ -1,7 +1,9 @@
 declare module '@asl/engine' {
   interface QueryCatalog {
     /** Why these units may not advance into `to` beyond the base rules, or null (PTO: a CX unit into bamboo). */
-    'advance.illegal': { ctx: { units: PieceId[]; to: LocId; side: SideId }; value: string | null };
+    'advance.illegal': { ctx: { units: PieceId[]; to: LocId; side: SideId; beneath?: boolean }; value: string | null };
+    /** Full ASL: further advances a module offers (beneath an entrenchment, ASLRB B27.44; into or out of one within the hex, A4.7); none in the Starter Kit. */
+    'advance.variants': { ctx: { side: SideId; units: PieceId[]; to: LocId }; value: { type: 'advance'; units: PieceId[]; to: LocId; beneath: boolean }[] };
     /**
      * Why these units may not advance off the map into offboard hex `to` (ASLRB A2.6: units leave the mapboard "using
      * normal MPh/APh capabilities"; SK4 3.3: only Good Order units exiting as part of the VC). The scenario rules answer.
@@ -21,7 +23,7 @@ import { stackLimit } from './movement';
 import { inPlay } from './terrain';
 
 /** `to`: the ADJACENT Location advanced into (ASLRB A4.7, A.8; a hex id at ground level). */
-export type AdvanceAction = Action & { units: PieceId[]; to: LocId };
+export type AdvanceAction = Action & { units: PieceId[]; to: LocId; /** Full ASL: beneath the entrenchment of `to` (ASLRB B27.44), or, with `to` the stack's own Location, into (true) or out of (false) its entrenchment (A4.7). */ beneath?: boolean };
 
 export const AP = {
   /** (ctx, action) => void: move the advancing units (the vehicle rules put the PAATC in front). */
@@ -45,7 +47,7 @@ const offboardBeyond = (env: QueryEnv, hex: HexId): HexId[] => {
 };
 export type PaatcFn = (ctx: Ctx, unit: PieceId, vehicle: PieceId, reason: 'advance' | 'dc' | 'reactionFire') => boolean;
 
-function advanceIllegal(env: QueryEnv, a: { units: PieceId[]; to: LocId; side: string }): string | null {
+function advanceIllegal(env: QueryEnv, a: { units: PieceId[]; to: LocId; side: string; beneath?: boolean }): string | null {
   if (env.state.phase !== 'APh') return 'Not the Advance Phase';
   if (a.units.length === 0) return 'Select units to advance';
   const map = statics(env).map;
@@ -88,7 +90,8 @@ function advanceIllegal(env: QueryEnv, a: { units: PieceId[]; to: LocId; side: s
     }
     const h = locOf(env.state, p);
     if (!h) return `${id} is not on the map`;
-    if (!adjacentLocs(env, h).includes(a.to)) return 'Advance is one hex';
+    // Full ASL: within its own Location, into or out of its entrenchment, as the APh's one change of Location (ASLRB A4.7).
+    if (!adjacentLocs(env, h).includes(a.to) && !(a.to === h && a.beneath !== undefined)) return 'Advance is one hex';
     froms.add(h);
   }
   if (froms.size > 1) return 'Units advancing together must start together';
@@ -98,7 +101,7 @@ function advanceIllegal(env: QueryEnv, a: { units: PieceId[]; to: LocId; side: s
     const mf = env.query('unit.mf', { unit: id, stack: a.units, doubleTime: false }, 0);
     const from = hexOf(env.state, p);
     // Up or down the stairs of its own hex: one MF (full ASL, ASLRB B23.4; never in the Starter Kit).
-    const cost = from === toHex ? LEVEL_CHANGE_MF : env.query('move.cost', { unit: id, from, to: toHex, viaRoad: false, ...(isGroundLoc(a.to) ? {} : { loc: a.to }) }, 1);
+    const cost = locOf(env.state, p) === a.to ? 0 : from === toHex ? LEVEL_CHANGE_MF : env.query('move.cost', { unit: id, from, to: toHex, viaRoad: false, ...(isGroundLoc(a.to) ? {} : { loc: a.to }) }, 1);
     if (cost >= mf && isCx(p)) return `${id} is CX and cannot advance into a hex costing all its MF`;
   }
   // Stacking limits.
@@ -108,7 +111,7 @@ function advanceIllegal(env: QueryEnv, a: { units: PieceId[]; to: LocId; side: s
   const limit = stackLimit(env, a.to, a.side);
   if (se > limit.se) return `Stacking limit: ${limit.se} squad-equivalents${limit.note ? ` (${limit.note})` : ''}`;
   if (all.filter((p) => smc(env, p)).length > limit.smc) return `Stacking limit: ${limit.smc} SMC${limit.note ? ` (${limit.note})` : ''}`;
-  return actionIllegal(env, a.units) ?? env.query('advance.illegal', { units: a.units, to: a.to, side: a.side }, null);
+  return actionIllegal(env, a.units) ?? env.query('advance.illegal', { units: a.units, to: a.to, side: a.side, ...(a.beneath !== undefined ? { beneath: a.beneath } : {}) }, null);
 }
 
 export const advanceModule: RuleModule = {
@@ -173,10 +176,12 @@ export const advanceModule: RuleModule = {
         for (const [, ids, near] of stacks) {
           for (const n of [...near].sort()) {
             for (const units of ids.length > 1 ? [ids, ...ids.map((i) => [i])] : [ids]) {
-              if (!advanceIllegal(env, { units, to: n, side })) out.push({ type: 'advance', units, to: n });
+              if (!advanceIllegal(env, { units, to: n, side })) out.push({ type: 'advance', units, to: n }, ...env.query('advance.variants', { side, units, to: n }, []));
             }
           }
         }
+        // Full ASL: a change of position within the stack's own Location (ASLRB A4.7), where a module offers it.
+        for (const [h, ids] of byHex) for (const units of ids.length > 1 ? [ids, ...ids.map((i) => [i])] : [ids]) out.push(...env.query('advance.variants', { side, units, to: h }, []));
         return out;
       },
       validate: (env, a) => advanceIllegal(env, a),
@@ -216,7 +221,7 @@ function advanceEnter(ctx: Ctx, a: AdvanceAction) {
   for (const id of [...units].sort()) {
     const p = pieceOf(ctx, id);
     const mf = ctx.query('unit.mf', { unit: id, stack: units, doubleTime: false }, 0);
-    const cost = ctx.query('move.cost', { unit: id, from: hexOf(ctx.state, p), to: hexOfLoc(a.to), viaRoad: false, ...(isGroundLoc(a.to) ? {} : { loc: a.to }) }, 1);
+    const cost = locOf(ctx.state, p) === a.to ? 0 : ctx.query('move.cost', { unit: id, from: hexOf(ctx.state, p), to: hexOfLoc(a.to), viaRoad: false, ...(isGroundLoc(a.to) ? {} : { loc: a.to }) }, 1);
     ctx.emit('piece.moved', { id, loc: locationAt(a.to) });
     setTags(ctx, id, {
       advanced: true,

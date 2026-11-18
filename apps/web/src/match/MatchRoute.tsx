@@ -281,7 +281,7 @@ function OnlineMatch({ matchId, match, scenario }: { matchId: string; match: Mat
 }
 
 function ViewsMatch({ matchId, match, scenario, mySide, seat }: { matchId: string; match: MatchDoc; scenario: ScenarioDef; mySide: string | null; seat: string | null }) {
-  const session = useOnlineGame(matchId, scenario, seat);
+  const session = useOnlineGame(matchId, scenario, seat, mySide);
   return <OnlineMatchBody matchId={matchId} match={match} scenario={scenario} mySide={mySide} session={session} />;
 }
 

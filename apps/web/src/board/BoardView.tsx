@@ -76,6 +76,8 @@ function viewTransform(placements: Placement[], rotation: number): ViewTransform
 
 export interface BoardOverlay {
   selectedHex?: HexId | null;
+  /** Online play: the hex the other player has selected, ringed in their side's colour. */
+  theirSelection?: { hex: HexId; color: number } | null;
   /** hex → highlight color */
   highlights?: Map<HexId, number>;
   /** Pieces to emphasise (selected units). */
@@ -1729,11 +1731,14 @@ export function BoardView({
   /** Hex under a view-space point (picking runs in map space, where hexes are axis-aligned). */
   function hexAt(vx: number, vy: number): HexId | null {
     const { x, y } = xf.current.toMap(vx, vy);
+    const dead = new Set(latest.current.outOfPlay);
     let best: HexId | null = null;
     let bd = Infinity;
     for (const c of centers.current) {
       const d = ((x - c.x) / GEO.px.hexWidth) ** 2 * 2.25 + ((y - c.y) / GEO.px.hexHeight) ** 2 * 3;
-      if (d < bd) {
+      // A staging hex (`<hex>~`, the offboard ring of a playing area an SSR shrinks) sits on the out-of-play map hex
+      // under it, at the same centre: the staging hex is the one in the game there.
+      if (d < bd || (d === bd && best !== null && dead.has(best) && c.id === `${best}~`)) {
         bd = d;
         best = c.id;
       }
@@ -2159,6 +2164,15 @@ export function BoardView({
       const poly = hexPolygon(c.x, c.y, xf.current);
       L.highlights.poly(poly).fill({ color, alpha: 0.26 }).stroke({ color, width: 5, alpha: 0.25 });
       L.highlights.poly(poly).stroke({ color, width: 2, alpha: 0.95 });
+    }
+    if (o.theirSelection) {
+      const h = anyHex(o.theirSelection.hex);
+      if (h) {
+        const c = hexCenter(h, placements);
+        const poly = hexPolygon(c.x, c.y, xf.current);
+        L.highlights.poly(poly).fill({ color: o.theirSelection.color, alpha: 0.14 }).stroke({ color: o.theirSelection.color, width: 7, alpha: 0.3 });
+        L.highlights.poly(poly).stroke({ color: o.theirSelection.color, width: 3, alpha: 0.95 });
+      }
     }
     if (o.selectedHex) {
       const h = anyHex(o.selectedHex);

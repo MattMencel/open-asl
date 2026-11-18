@@ -1,5 +1,5 @@
 import { useState, type PointerEvent, type ReactNode } from 'react';
-import type { AarLuck, AarRace, AarStrength } from '@asl/platform';
+import type { AarFire, AarLuck, AarRace, AarStrength } from '@asl/platform';
 
 /*
  * The report's charts, drawn to scale as inline SVG with the app's tokens: 2px lines, a 10%
@@ -127,6 +127,58 @@ export function DiceChart({ hist, sideName }: { hist: Record<string, { hist: num
           <circle key={i} cx={x(i)} cy={y((w / 36) * 100)} r={2.5} fill="var(--line-hi)" />
         ))}
         <text x={W - R} y={H - 4} textAnchor="end">dice result</text>
+      </svg>
+      {node}
+    </div>
+  );
+}
+
+/**
+ * Fire attacks per player turn, one bar per side: the attacks that had an effect (solid) under those that had none
+ * (faded), so the height is how much a side fired and the solid part how much of it told.
+ */
+export function FireChart({ data, sideName }: { data: AarFire; sideName(side: string): string }) {
+  const { bind, node } = useTip();
+  const L = 34, R = 12, T = 14, B = 34;
+  const sides = Object.keys(data.sides);
+  const n = data.labels.length;
+  const total = (s: string, i: number) => (data.sides[s]?.effect[i] ?? 0) + (data.sides[s]?.none[i] ?? 0);
+  const top = Math.max(4, ...sides.flatMap((s) => data.labels.map((_, i) => total(s, i))));
+  const step = top > 20 ? 5 : top > 8 ? 2 : 1;
+  const ymax = niceCeil(top, step);
+  const slot = (W - L - R) / Math.max(1, n);
+  const bw = Math.max(4, Math.min(14, (slot - 6) / Math.max(1, sides.length) - 2)), gap = 2;
+  const x = (i: number) => L + slot * i + slot / 2;
+  const y = (v: number) => T + (1 - v / ymax) * (H - T - B);
+  const grid: number[] = [];
+  for (let g = 0; g <= ymax; g += step) grid.push(g);
+  const groupW = sides.length * bw + (sides.length - 1) * gap;
+  const every = Math.ceil(n / 14);
+  return (
+    <div className="aar-chart-wrap">
+      <svg className="aar-chart" viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Fire attacks per player turn with and without effect, by side">
+        {grid.map((g) => (
+          <g key={g}>
+            <line x1={L} x2={W - R} y1={y(g)} y2={y(g)} className={g === 0 ? 'axis' : 'grid'} />
+            <text x={L - 6} y={y(g) + 4} textAnchor="end">{g}</text>
+          </g>
+        ))}
+        {data.labels.map((lab, i) => (i % every === 0 ? <text key={i} x={x(i)} y={H - B + 16} textAnchor="middle" className="lbl">{lab}</text> : null))}
+        {data.labels.map((lab, i) =>
+          sides.map((s, k) => {
+            const eff = data.sides[s]?.effect[i] ?? 0;
+            const none = data.sides[s]?.none[i] ?? 0;
+            if (eff + none === 0) return null;
+            const bx = x(i) - groupW / 2 + k * (bw + gap);
+            const tip = <><b>{sideName(s)} · {lab}</b><br />{eff + none} attack{eff + none === 1 ? '' : 's'}: {eff} with effect, {none} without</>;
+            return (
+              <g key={`${s}${i}`} className={`side-${s}`} {...bind(tip)}>
+                <rect x={bx} y={y(eff)} width={bw} height={Math.max(0, y(0) - y(eff))} fill="var(--side)" />
+                <rect x={bx} y={y(eff + none)} width={bw} height={Math.max(0, y(eff) - y(eff + none))} fill="var(--side)" opacity={0.3} />
+              </g>
+            );
+          }),
+        )}
       </svg>
       {node}
     </div>

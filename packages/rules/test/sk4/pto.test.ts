@@ -174,3 +174,36 @@ describe('PTO Terrain (SK4 8.2.1): huts', () => {
     expect(steps(ce.engine, cs, 'ru')).not.toContain('yM4');
   });
 });
+
+describe('PTO Terrain (SK4 8.2.1): stacking in Dense jungle', () => {
+  const terrain = {
+    yK5: { terrain: 'jungle' },
+    yL5: { terrain: 'jungle', features: ['road:dirt'] },
+    yM5: { terrain: 'jungle', features: ['path'] },
+    yN5: { terrain: 'bamboo' },
+  };
+  const limit = (engine: Engine, state: GameState, hex: string) => engine.env(state).query('stack.limit', { hex, side: 'ru' }, { se: 3, smc: 4 });
+
+  it('two squad equivalents plus the SMC allowance, except in a hex that also holds a road', () => {
+    const { engine, state } = makeEngine({ scenario: RU_VS_GE, extra, terrain, pieces: [] });
+    expect(limit(engine, state, 'yK5')).toEqual({ se: 2, smc: 4 });
+    expect(limit(engine, state, 'yL5')).toEqual({ se: 3, smc: 4 });
+    // A path is not a road; bamboo is Dense jungle unless stated otherwise.
+    expect(limit(engine, state, 'yM5')).toEqual({ se: 2, smc: 4 });
+    expect(limit(engine, state, 'yN5')).toEqual({ se: 2, smc: 4 });
+  });
+
+  it('a third squad may enter a jungle road hex holding two, but not a plain jungle hex', () => {
+    const { engine, state } = makeEngine({
+      scenario: RU_VS_GE,
+      extra,
+      startPhase: 'MPh',
+      terrain: { ...terrain, yL4: { terrain: 'jungle', features: ['road:dirt'] } },
+      pieces: [sq('a', 'yK5'), sq('b', 'yK5'), sq('c', 'yL4'), sq('d', 'yL4'), sq('e', 'yK4')],
+    });
+    const s = play(engine, state, { type: 'move.start', units: ['e'] });
+    const to = steps(engine, s, 'ru');
+    expect(to).toContain('yL4');
+    expect(to).not.toContain('yK5');
+  });
+});

@@ -1,7 +1,7 @@
 import { COUNTERS, newGame } from '@asl/content';
 import type { Action, GameEvent, GameState, Piece, QueryEnv } from '@asl/engine';
 import { PHASE_NAME, achieved, casualtyVp, controlState, defLabel, defOf, exitVp, hexLabel, hexOfLoc, humanize, isWeaponDef, pieceLabel, statics, vpTally, type Casualty, type ScenarioDef, type VictoryCondition } from '@asl/rules';
-import { AAR_VERSION, type AarCasualty, type AarControl, type AarDice, type AarDoc, type AarHighlight, type AarLuck, type AarPlayer, type AarRace, type AarStrength, type AarVictory, type Competition, type MatchMode, type Timestamp } from '@asl/platform';
+import { AAR_VERSION, type AarCasualty, type AarControl, type AarDice, type AarDoc, type AarFire, type AarRollKind, type AarHighlight, type AarLuck, type AarPlayer, type AarRace, type AarStrength, type AarVictory, type Competition, type MatchMode, type Timestamp } from '@asl/platform';
 import { buildingLabel, conditionText, leaves, list, plural, sideName, victoryStandings, winningClause } from './vc';
 
 /** What the recording cannot tell: who played, how the match was classified, and a server-side ending. */
@@ -110,6 +110,41 @@ function causeText(env: QueryEnv, c: Casualty, ctx: { fire?: Ev; cc?: Ev }): str
   return text;
 }
 
+/**
+ * What a DR was rolled for: by its label where that is unambiguous ("To Hit", "To Kill", "CC ge in", "Rally"), else by
+ * the first typed event that follows it (an IFT attack, an ordnance shot, a To Kill, a check and its kind), else by the
+ * label again ("NMC: MC for", "PTC for") when the unit was eliminated before its check was recorded.
+ */
+function rollKind(label: string, rest: Ev[]): AarRollKind {
+  if (/^To Hit\b/.test(label)) return 'TH';
+  if (/^To Kill\b/.test(label)) return 'TK';
+  if (/^CC \w+ in /.test(label)) return 'CC';
+  if (/^Rally\b/.test(label)) return 'rally';
+  const byLabel = (): AarRollKind => (/\b(PTC|TC|LLTC|PAATC)\b/.test(label) ? 'TC' : /\b(\d?MC|NMC|LLMC)\b/.test(label) ? 'MC' : 'other');
+  for (const e of rest) {
+    switch (e.type) {
+      case 'sk1.fire.attack':
+      case 'sk1.fire.noLos':
+        return 'IFT';
+      case 'sk2.ordnance.shot':
+      case 'sk2.ordnance.noLos':
+        return 'TH';
+      case 'sk3.toKill':
+        return 'TK';
+      case 'sk1.cc.attack':
+        return 'CC';
+      case 'sk1.check':
+        return e.payload['kind'] === 'rally' ? 'rally' : e.payload['kind'] === 'MC' ? 'MC' : 'TC';
+      case 'dice.rolled':
+        return byLabel();
+    }
+  }
+  return byLabel();
+}
+
+/** A weapon worth naming when it breaks down: a Gun, a vehicle's armament, a MMG or HMG (SK1 4.1). */
+const heavyWeapon = (d: { kind: string; type?: string }) => d.kind === 'gun' || d.kind === 'vehicle' || d.type === 'MMG' || d.type === 'HMG';
+
 /** Everything the fold needs to remember about one event's moment in the game. */
 interface Moment {
   turn: number;
@@ -138,6 +173,7 @@ export function buildAar(scenario: ScenarioDef, seed: string, actions: Action[],
   const race: Record<string, number[]> = {};
   const cum: Record<string, number> = {};
   const dice: Record<string, AarDice> = {};
+  const fireFx: Record<string, { effect: number[]; none: number[] }> = {};
   const marks: Record<string, { at: number; v: 2 | 12 }[]> = {};
   const streak: Record<string, number> = {};
   for (const s of sides) {
@@ -146,7 +182,8 @@ export function buildAar(scenario: ScenarioDef, seed: string, actions: Action[],
     luck[s] = [];
     race[s] = [];
     cum[s] = 0;
-    dice[s] = { drs: 0, avg: 0, hist: Array(11).fill(0) as number[], twos: 0, twelves: 0, mc: { passed: 0, failed: 0 }, rally: { made: 0, failed: 0 }, elr: 0, hob: 0, streak: 0 };
+    dice[s] = { drs: 0, avg: 0, hist: Array(11).fill(0) as number[], twos: 0, twelves: 0, mc: { passed: 0, failed: 0 }, rally: { made: 0, failed: 0 }, elr: 0, hob: 0, streak: 0, byType: {}, dr: { n: 0, sum: 0, hist: Array(6).fill(0) as number[] }, rof: { fired: 0, kept: 0 } };
+    fireFx[s] = { effect: [], none: [] };
     marks[s] = [];
     streak[s] = 0;
   }
@@ -230,6 +267,22 @@ export function buildAar(scenario: ScenarioDef, seed: string, actions: Action[],
     const lastRoll = new Map<string, number>();
     const ccKills = new Map<Ev, string[]>();
     let ptChanged = false;
+    // The attack being followed: who fired, and whether an enemy unit or vehicle has felt it yet.
+    let shot: { side: string; pt: number; effect: boolean } | null = null;
+    const closeShot = () => {
+      if (!shot) return;
+      const row = fireFx[shot.side]![shot.effect ? 'effect' : 'none'];
+      row[shot.pt] = (row[shot.pt] ?? 0) + 1;
+      shot = null;
+    };
+    const openShot = (side: string | undefined) => {
+      closeShot();
+      if (side && sides.includes(side)) shot = { side, pt: m.pt, effect: false };
+    };
+    /** Something happened to `unit`: an effect of the attack being followed when the unit is the enemy's. */
+    const felt = (unit: unknown) => {
+      if (shot && typeof unit === 'string' && pre.pieces[unit] && pre.pieces[unit]!.side !== shot.side) shot.effect = true;
+    };
     for (let i = 0; i < events.length; i++) {
       const e = events[i]!;
       const p = e.payload;
@@ -269,11 +322,22 @@ export function buildAar(scenario: ScenarioDef, seed: string, actions: Action[],
           const ds = p['dice'] as number[];
           const label = String(p['label']);
           const id = label.match(ID_RE)?.[0]?.replace(/\.+$/, '');
+          if (ds.length === 1) {
+            const dr = dice[sideOf(pre, label, events.slice(i + 1))]!.dr!;
+            dr.n++;
+            dr.sum += ds[0]!;
+            dr.hist[ds[0]! - 1]!++;
+            break;
+          }
           if (ds.length !== 2) break;
           const total = ds[0]! + ds[1]!;
           if (id) lastRoll.set(id, total);
           const s = sideOf(pre, label, events.slice(i + 1));
           const d = dice[s]!;
+          const kind = rollKind(label, events.slice(i + 1));
+          const t = (d.byType![kind] ??= { n: 0, sum: 0 });
+          t.n++;
+          t.sum += total;
           d.drs++;
           d.hist[total - 2]!++;
           if (total === 2) {
@@ -287,8 +351,46 @@ export function buildAar(scenario: ScenarioDef, seed: string, actions: Action[],
           cum[s]! += 7 - total;
           break;
         }
-        case 'sk1.fire.attack':
+        case 'sk1.fire.attack': {
           lastFire = e;
+          // Residual FP has no firer: not a shot.
+          const firer = (p['attack']?.parts as string[] | undefined)?.[0];
+          if (firer) openShot(pre.pieces[firer]?.side);
+          else closeShot();
+          break;
+        }
+        case 'sk1.fire.noLos': {
+          const firer = (p['attack']?.parts as string[] | undefined)?.[0];
+          openShot(firer ? pre.pieces[firer]?.side : undefined);
+          break;
+        }
+        case 'sk2.ordnance.noLos':
+          openShot((pre.pieces[p['firer']] ?? pre.pieces[p['weapon']])?.side);
+          break;
+        case 'sk1.fire.rof': {
+          for (const k of (p['kept'] as { sw: string }[] | undefined) ?? []) {
+            const r = dice[pre.pieces[k.sw]?.side ?? '']?.rof;
+            if (r) (r.fired++, r.kept++);
+          }
+          for (const k of (p['lost'] as { sw: string }[] | undefined) ?? []) {
+            const r = dice[pre.pieces[k.sw]?.side ?? '']?.rof;
+            if (r) r.fired++;
+          }
+          break;
+        }
+        case 'sk2.ordnance.rof': {
+          const r = dice[pre.pieces[p['weapon']]?.side ?? '']?.rof;
+          if (r) {
+            r.fired++;
+            if (p['kept'] === true) r.kept++;
+          }
+          break;
+        }
+        case 'sk3.toKill':
+          if (['kill', 'immobilized', 'shock', 'stun'].includes(String(p['result'])) || (p['result'] === 'possibleShock' && p['shocked'] === true)) felt(p['target']);
+          break;
+        case 'sk1.casualtyReduced':
+          felt(p['unit']);
           break;
         case 'sk1.fire.result':
           if (p['critical'] === true) {
@@ -297,6 +399,7 @@ export function buildAar(scenario: ScenarioDef, seed: string, actions: Action[],
           }
           break;
         case 'sk2.ordnance.shot':
+          openShot((pre.pieces[p['firer']] ?? pre.pieces[p['weapon']])?.side);
           if (p['outcome'] === 'ch') {
             const f = pre.pieces[p['firer']] ?? pre.pieces[p['weapon']];
             if (f) hl(f.side, m, 'Critical Hit', `${pieceLabel(preEnv, f)} scores a Critical Hit on ${hexLabel(String(p['target']))}.`, 8);
@@ -314,6 +417,7 @@ export function buildAar(scenario: ScenarioDef, seed: string, actions: Action[],
           const outcome = String(p['outcome']);
           const dr = Number(p['dr']);
           const reason = tidy(String(p['reason']));
+          if (kind !== 'rally' && outcome !== 'passed') felt(p['unit']);
           if (kind === 'rally') {
             if (outcome === 'rallied') d.rally.made++;
             else d.rally.failed++;
@@ -352,11 +456,21 @@ export function buildAar(scenario: ScenarioDef, seed: string, actions: Action[],
           break;
         }
         case 'piece.eliminated': {
+          felt(p['id']);
+          const gone = pre.pieces[p['id']];
+          const goneDef = gone ? defOf(preEnv, gone) : undefined;
+          const reason = String(p['reason'] ?? '');
+          if (gone && goneDef && isWeaponDef(goneDef) && /breakdown|removed|X#/.test(reason)) {
+            hl(other(gone.side), m, heavyWeapon(goneDef) ? `${defLabel(goneDef)} lost` : 'Weapon lost', `${name(gone.side)} ${defLabel(goneDef)} in ${hexOfUnit(pre, gone.id) ?? '?'} breaks down for good and is removed.`, heavyWeapon(goneDef) ? 7 : 5);
+          } else if (gone && goneDef?.kind === 'gun') {
+            hl(other(gone.side), m, 'Gun knocked out', `${name(gone.side)} ${defLabel(goneDef)} in ${hexOfUnit(pre, gone.id) ?? '?'} is destroyed.`, 7);
+          }
           if (lastCc && lastCc.payload['attack']?.targets?.includes(p['id']) && p['reason'] === 'Close Combat') ccKills.get(lastCc)?.push(p['id']);
           break;
         }
         case 'sk1.casualty': {
           const c = p as Casualty;
+          felt(c.unit);
           const u = pre.pieces[c.unit];
           const def = COUNTERS[c.defId];
           const fire = lastFire && u && lastFire.payload['attack']?.target && hexOfUnit(pre, u.id) === hexLabel(String(lastFire.payload['attack'].target)) ? lastFire : undefined;
@@ -392,6 +506,19 @@ export function buildAar(scenario: ScenarioDef, seed: string, actions: Action[],
           break;
         }
       }
+    }
+    closeShot();
+    // Weapons that broke down in this action: a SW or Gun malfunctioned (B# reached), a vehicle's MA or MGs disabled.
+    for (const w of Object.values(post.pieces)) {
+      const was = pre.pieces[w.id];
+      if (!was || was.loc.kind === 'eliminated') continue;
+      const d = defOf(postEnv, w);
+      const broke = (w.tags['malf'] === true && was.tags['malf'] !== true) || (w.tags['maDisabled'] === true && was.tags['maDisabled'] !== true);
+      if (!broke || !(isWeaponDef(d) || d.kind === 'vehicle')) continue;
+      const what = d.kind === 'vehicle' ? `${defLabel(d)}'s Main Armament` : defLabel(d);
+      const holder = w.loc.kind === 'held' ? post.pieces[w.loc.by] : undefined;
+      const by = holder && d.kind !== 'vehicle' ? ` of the ${defLabel(defOf(postEnv, holder))}` : '';
+      hl(other(w.side), m, heavyWeapon(d) ? `${d.kind === 'vehicle' ? 'Main Armament' : defLabel(d)} breaks down` : 'Weapon breaks down', `The ${name(w.side)} ${what}${by} in ${hexOfUnit(post, w.id) ?? '?'} ${w.tags['maDisabled'] === true ? 'is disabled' : 'malfunctions'}.`, heavyWeapon(d) ? 6 : 4);
     }
     for (const [cc, ids] of ccKills) {
       const leader = ids.some((id) => COUNTERS[pre.pieces[id]?.defId ?? '']?.kind === 'leader');
@@ -466,6 +593,7 @@ export function buildAar(scenario: ScenarioDef, seed: string, actions: Action[],
   const seriesOf = (rec: Record<string, number[]>): Record<string, number[]> => Object.fromEntries(sides.map((s) => [s, labels.map((_, i) => rec[s]![i] ?? rec[s]![i - 1] ?? 0)]));
   const strengthDoc: AarStrength = { labels, sides: seriesOf(strength), losses: Object.fromEntries(sides.map((s) => [s, [...lossAt[s]!].sort((a, b) => a - b)])) };
   const luckDoc: AarLuck = { labels, sides: seriesOf(luck), marks };
+  const fireDoc: AarFire = { labels, sides: Object.fromEntries(sides.map((s) => [s, { effect: labels.map((_, i) => fireFx[s]!.effect[i] ?? 0), none: labels.map((_, i) => fireFx[s]!.none[i] ?? 0) }])) };
 
   let control: AarControl | null = null;
   let raceDoc: AarRace | null = null;
@@ -526,6 +654,7 @@ export function buildAar(scenario: ScenarioDef, seed: string, actions: Action[],
     race: raceDoc,
     strength: strengthDoc,
     dice,
+    fire: fireDoc,
     luck: luckDoc,
     casualties,
     highlights: top,

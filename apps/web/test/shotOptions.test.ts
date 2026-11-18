@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { sk2CoreModules, sk3CoreModules } from '@asl/rules';
-import { GE_VS_BR, RU_VS_GE, makeEngine, type PieceSpec } from '../../../packages/rules/test/fixtures';
+import { GE_VS_BR, RU_VS_GE, act, makeEngine, type PieceSpec } from '../../../packages/rules/test/fixtures';
 import { shotOptions } from '../src/game/ordnance';
 
 const extra = [...sk2CoreModules, ...sk3CoreModules];
@@ -26,6 +26,23 @@ describe('vehicle Main Armament fire options', () => {
     for (const o of noTank.filter((o) => o.type === 'VTT')) expect(o.hint).toMatch(/No enemy vehicle/);
     const tank = options([t34(), { id: 'pziv', def: 'ge.pzivf2', side: 'ge', hex: 'yM5', tags: { vca: 3, ca: 3 } }]);
     expect(tank.find((o) => o.type === 'VTT')?.available).toBe(true);
+  });
+});
+
+describe('Smoke options after other fire (SK4 6.2)', () => {
+  it("once the vehicle's MGs fire, its MA's Smoke entry stays listed but disabled, saying why; HE stays available", () => {
+    const { engine, state } = makeEngine({
+      pieces: [{ id: 'pz', def: 'ge.pzivf2', side: 'ge', hex: 'yM8', tags: { vca: 0, ca: 0 } }, { id: 'r', def: 'ru.447', side: 'ru', hex: 'yM6' }],
+      scenario: { ...RU_VS_GE, firstSide: 'ge' },
+      extra,
+      startPhase: 'PFPh',
+      dice: [3, 4],
+    });
+    const smokeOf = (s: typeof state) => shotOptions(engine.env(s), 'pz', 'prep').find((o) => o.ammo === 'SMOKE')!;
+    expect(smokeOf(state).available).toBe(true);
+    const s = act(engine, state, { type: 'fire', decl: { units: [], sw: ['pz.bmg', 'pz.cmg'], target: 'yM6' } }).state;
+    expect(smokeOf(s)).toMatchObject({ available: false, hint: expect.stringMatching(/Smoke must be fired before the firer fires anything else/) });
+    expect(shotOptions(engine.env(s), 'pz', 'prep').find((o) => o.type === 'ITT' && o.ammo === undefined)?.available).toBe(true);
   });
 });
 

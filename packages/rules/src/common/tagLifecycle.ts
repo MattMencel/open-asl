@@ -39,6 +39,8 @@ export const TAG_LIFECYCLE: Record<string, 'playerTurn' | 'lasting'> = {
   stackedOn: 'lasting',
   portaged: 'playerTurn',
   lastHex: 'playerTurn',
+  /** Full ASL: the entrenchment an eliminated unit stood beneath, for the weapons it drops (ASLRB B27.13). */
+  lastEnt: 'playerTurn',
   secretSw: 'lasting',
   prepared: 'lasting',
   // Scenario setup and entry

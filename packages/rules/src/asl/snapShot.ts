@@ -50,6 +50,8 @@ interface SnapRecord {
 export function snapSide(env: QueryEnv, target: LocId): [HexId, HexId] | null {
   const ms = moveState(env);
   if (!ms?.hex || ms.off || !ms.from || ms.from === ms.hex || moveLoc(ms) !== target) return null;
+  // No Snap Shot at Infantry moving from one connecting trench to another (ASLRB B27.54).
+  if (ms.trenchMove) return null;
   const map = statics(env).map;
   if (!map.hex(ms.from) || !map.hex(ms.hex) || sideToward(map, ms.hex, ms.from) === null) return null;
   const last = ms.trail?.[ms.trail.length - 1];

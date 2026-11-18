@@ -165,7 +165,8 @@ export const piecesModule: RuleModule = {
       apply(d, p) {
         const piece = d.pieces[p.id]!;
         // Keep where it died so possessed SW can be left in that Location (its LocId: the hex id at ground level).
-        piece.tags = piece.loc.kind === 'hex' ? { lastHex: locKey(piece.loc) } : {};
+        // Full ASL: and its entrenchment position, so a dropped weapon stays beneath the foxhole (ASLRB B27.13).
+        piece.tags = piece.loc.kind === 'hex' ? { lastHex: locKey(piece.loc), ...(piece.loc.pos?.ent ? { lastEnt: piece.loc.pos.ent } : {}) } : {};
         piece.loc = { kind: 'eliminated' };
       },
     });
@@ -185,9 +186,10 @@ export const piecesModule: RuleModule = {
       handler(ctx, ev) {
         for (const sw of swHeldBy(ctx.state, ev.payload.id).sort(byId)) {
           const loc = lastLocOf(ctx.state, ev.payload.id);
+          const ent = ctx.state.pieces[ev.payload.id]?.tags['lastEnt'] as 'foxhole' | 'trench' | 'ditch' | undefined;
           ctx.emit('piece.moved', {
             id: sw.id,
-            loc: loc ? locationAt(loc) : { kind: 'eliminated' },
+            loc: loc ? { ...locationAt(loc), ...(ent ? { pos: { ent } } : {}) } : { kind: 'eliminated' },
           });
         }
       },

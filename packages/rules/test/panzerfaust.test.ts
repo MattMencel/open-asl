@@ -101,6 +101,8 @@ describe('Panzerfausts (SK4 4.4.2)', () => {
     expect(ev(r1, 'sk3.pf.check')[0]).toMatchObject({ result: 'none' });
     expect(ev(r1, 'sk2.ordnance.shot')).toHaveLength(0);
     expect(pfUsed(none.engine.env(r1.state), 'ge')).toBe(0);
+    // No shot, but a SW use all the same (SK4 4.4.2).
+    expect(r1.state.pieces['g']!.tags).toMatchObject({ firedSw: true, swDestroyed: 1 });
     const six = game({ dice: [6] });
     const r2 = act(six.engine, six.state, { type: 'fire.pf', pf: { unit: 'g', target: 'yK6', targetType: 'VTT' } });
     expect(ev(r2, 'sk3.pf.check')[0]).toMatchObject({ result: 'pinned' });
@@ -160,8 +162,9 @@ describe('Panzerfausts (SK4 4.4.2)', () => {
 });
 
 describe('Panzerfausts as Defensive First Fire', () => {
-  it('a unit that finds no PF has not fired and may still fire at the moving AFV', () => {
-    // Russians move: the T-34 enters K6 next to the German squad, which tries a PF (dr 5: none).
+  it('a PF check that finds none is still a SW use: the squad has fired at this location, and its own FP waits for the next MP', () => {
+    // Russians move: the T-34 enters K6 next to the German squad, which tries a PF (dr 5: none). SK4 4.4.2: "Even if a
+    // PF check fails to result in a shot, the PF check constitutes the use of a SW." A squad's one SW is free (4.0).
     const { engine, state } = makeEngine({
       scenario: { ...scenario('10 October 1944', 10), firstSide: 'ru' },
       extra,
@@ -178,8 +181,14 @@ describe('Panzerfausts as Defensive First Fire', () => {
     expect(engine.currentDecision(s)?.kind).toBe('firstFire');
     const r = act(engine, s, { type: 'defFire.pf', pf: { unit: 'g', target: 'yK6', targetType: 'VTT' } });
     expect(ev(r, 'sk3.pf.check')[0]).toMatchObject({ result: 'none' });
-    const d = engine.currentDecision(r.state)!;
+    expect(r.state.pieces['g']!.tags).toMatchObject({ firedSw: true, swDestroyed: 1 });
+    expect(r.state.pieces['g']!.tags['ownFpForfeit']).toBeUndefined();
+    // No First Fire is open to it at this MP: the mover carries on.
+    expect(engine.currentDecision(r.state)).toMatchObject({ owner: 'ru' });
+    // The T-34 stops (another MP in K6): the squad may fire its own FP at it now.
+    s = act(engine, r.state, { type: 'vmove.stop' }).state;
+    const d = engine.currentDecision(s)!;
     expect(d.kind).toBe('firstFire');
-    expect(engine.validate(r.state, { type: 'defFire', decl: { units: ['g'], sw: [], target: 'yK6' }, side: 'ge', decisionId: d.id } as never)).toBeNull();
+    expect(engine.validate(s, { type: 'defFire', decl: { units: ['g'], sw: [], target: 'yK6' }, side: 'ge', decisionId: d.id } as never)).toBeNull();
   });
 });

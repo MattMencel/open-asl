@@ -5,6 +5,9 @@ import { signOut, useAuth } from '../auth/AuthProvider';
 import { api, auth, errorOf, googleProvider } from '../firebase';
 import { Emblem } from '../ui/Emblem';
 
+const GOOGLE_BLOCKED =
+  'Google sign-in could not load. An extension or privacy setting may be blocking it: try a private window with extensions off, or another browser or network.';
+
 const MESSAGES: Record<string, string> = {
   'invalid-credential': 'Wrong email or password.',
   'user-not-found': 'Wrong email or password.',
@@ -13,6 +16,12 @@ const MESSAGES: Record<string, string> = {
   'too-many-requests': 'Too many attempts. Try again in a few minutes.',
   'popup-closed-by-user': 'The sign-in window was closed.',
   'popup-blocked': 'The browser blocked the sign-in window.',
+  // Firebase reports these when the Google sign-in window cannot load or hand back to this page: an ad or
+  // privacy blocker, strict cookie settings, an in-app browser, or a network that filters Google.
+  'internal-error': GOOGLE_BLOCKED,
+  'network-request-failed': 'Could not reach the sign-in service. Check your connection, or try another browser or network.',
+  'web-storage-unsupported': GOOGLE_BLOCKED,
+  'operation-not-supported-in-this-environment': GOOGLE_BLOCKED,
 };
 
 /** Sign in. There is no sign-up: the game is invite-only, and claimProfile decides who gets through. */

@@ -2,7 +2,7 @@ import type { Ctx, HexId, PieceId, QueryEnv, RuleModule } from '@asl/engine';
 import { defOf, hexOf, isVehicleDef, personnelAt, statics } from '../common/pieces';
 import { hexOfLoc } from '../common/location';
 import { isBroken, isCx, isPinned, mmc, pieceOf, setTags, smc, T } from '../sk1/status';
-import { terrainOf } from '../sk1/terrain';
+import { isRoadHex, terrainOf } from '../sk1/terrain';
 import { MOVE_ENTER, MOVE_ENTERED, MOVE_FINISH, type MoveEnterFn, type MoveEnteredFn, type MoveFinishFn, type MoveState } from '../sk1/movement';
 import { moveState } from '../sk1/moveState';
 import { AP, type AdvanceEnterFn } from '../sk1/advance';
@@ -77,7 +77,9 @@ export const ptoModule: RuleModule = {
       layer: 1,
       ref: 'SK4 8.2.1',
       label: 'along a path',
-      when: ({ from, to, unit }, env) => !!from && !!statics(env).map.pathHexside?.(from, to) && terrainOf(env, to).id.startsWith('jungle') && isInfantry(env, pieceOf(env, unit)),
+      // Paths extend offboard as roads do (SK1 3.3): a stack entering the map from an offboard hex the path runs into
+      // enters along it.
+      when: ({ from, off, to, unit }, env) => !!(from ?? off) && !!statics(env).map.pathHexside?.((from ?? off)!, to) && terrainOf(env, to).id.startsWith('jungle') && isInfantry(env, pieceOf(env, unit)),
       apply: () => 1,
     });
 
@@ -157,13 +159,18 @@ export const ptoModule: RuleModule = {
       apply: () => 'A Gun in bamboo cannot change its Covered Arc and fire in the same Player Turn',
     });
 
-    // ---------------------------------------------------------------- stacking (8.2.1): two squad equivalents in Dense jungle/bamboo
+    // ---------------------------------------------------------------- stacking (8.2.1): two squad equivalents in Dense jungle/bamboo,
+    // "in hexes that do not also contain a road/building" (a path is not a road). Bamboo is Dense jungle unless stated otherwise.
     r.contribute({
       id: 'sk4.pto.stacking',
       query: 'stack.limit',
       ref: 'SK4 8.2.1',
       label: 'two squad equivalents (Dense jungle / bamboo)',
-      when: ({ hex }, env) => terrainOf(env, hex).stackingSe !== undefined && !statics(env).map.hex(hexOfLoc(hex))?.buildingId,
+      when: ({ hex }, env) => {
+        const t = terrainOf(env, hex);
+        const h = hexOfLoc(hex);
+        return t.stackingSe !== undefined && !statics(env).map.hex(h)?.buildingId && !((t.id === 'jungle' || t.id === 'bamboo') && isRoadHex(env, h));
+      },
       apply: (v, { hex }, env) => ({ ...v, se: Math.min(v.se, terrainOf(env, hex).stackingSe!) }),
     });
 

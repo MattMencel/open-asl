@@ -125,6 +125,18 @@ service cloud.firestore {
         allow delete: if member() && seated();
       }
 
+      // The hex a seated player has selected (or null), so the opponent sees where they are looking. Not the recording.
+      match /focus/{side} {
+        function parent() { return get(/databases/$(database)/documents/matches/$(matchId)).data; }
+        function seated() { return parent().mode == 'online' && parent().status == 'active' && parent().seats[side] != null && parent().seats[side].uid == me(); }
+        allow read: if member() && me() in parent().playerIds;
+        allow create, update: if member() && seated()
+          && request.resource.data.keys().hasOnly(['side', 'hex', 'at'])
+          && request.resource.data.side == side
+          && (request.resource.data.hex == null || (request.resource.data.hex is string && request.resource.data.hex.size() <= 16));
+        allow delete: if member() && seated();
+      }
+
       // A seated player's last ping (a hex pointed out to the opponent), overwritten by each ping. Not the recording.
       match /pings/{side} {
         function parent() { return get(/databases/$(database)/documents/matches/$(matchId)).data; }

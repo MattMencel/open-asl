@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { collection, deleteDoc, doc, onSnapshot, serverTimestamp, setDoc } from 'firebase/firestore';
-import { COL, type DraftDoc, type PingDoc } from '@asl/platform';
+import { COL, type DraftDoc, type FocusDoc, type PingDoc } from '@asl/platform';
 import { db } from '../firebase';
-import type { Draft, MapPoint, Ping } from './session';
+import type { Draft, Focus, MapPoint, Ping } from './session';
 
 /**
  * The parts of an online table that are not the recording: each seat's work in progress on a decision (setup
@@ -69,5 +69,35 @@ export function useOnlineExtras(matchId: string, mySide: string | null) {
     },
     [matchId, mySide],
   );
-  return { publishDraft, theirDraft, sendPing, pings };
+
+  // Focus: the hex each seat has selected. Theirs arrives as they click; ours goes out a moment after it settles, once
+  // per change, so a flurry of clicks is one write.
+  const [theirFocus, setTheirFocus] = useState<Focus | null>(null);
+  useEffect(() => {
+    setTheirFocus(null);
+    if (!mySide) return;
+    return onSnapshot(collection(doc(db, COL.matches, matchId), COL.focus), (snap) => {
+      const theirs = snap.docs.map((d) => d.data() as FocusDoc).find((d) => d.side !== mySide);
+      setTheirFocus(theirs && typeof theirs.hex === 'string' ? { side: theirs.side, hex: theirs.hex } : null);
+    });
+  }, [matchId, mySide]);
+  const focusTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const focusSent = useRef<string | null | undefined>(undefined);
+  const sendFocus = useCallback(
+    (hex: string | null) => {
+      if (!mySide) return;
+      if (focusTimer.current) clearTimeout(focusTimer.current);
+      focusTimer.current = setTimeout(() => {
+        focusTimer.current = null;
+        if (focusSent.current === hex) return;
+        focusSent.current = hex;
+        setDoc(doc(db, COL.matches, matchId, COL.focus, mySide), { side: mySide, hex, at: serverTimestamp() }).catch(() => {});
+      }, 150);
+    },
+    [matchId, mySide],
+  );
+  useEffect(() => () => {
+    if (focusTimer.current) clearTimeout(focusTimer.current);
+  }, []);
+  return { publishDraft, theirDraft, sendPing, pings, sendFocus, theirFocus };
 }

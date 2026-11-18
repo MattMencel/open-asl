@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { doc, getDoc, onSnapshot } from 'firebase/firestore';
 import { Link, useLocation, useParams } from 'react-router';
-import { COL, COMPUTER_NAME, type AarCasualty, type AarDoc, type AarHighlight, type AarSide, type MatchDoc } from '@asl/platform';
+import { COL, COMPUTER_NAME, type AarCasualty, type AarDoc, type AarFire, type AarRollKind, type AarHighlight, type AarSide, type MatchDoc } from '@asl/platform';
 import { useAuth } from '../auth/AuthProvider';
 import { db } from '../firebase';
 import { Emblem as NationEmblem } from '../fx/TurnChit';
@@ -9,7 +9,7 @@ import { counterImage } from '../game/assets';
 import { PHASE_NAME } from '../game/describe';
 import { Emblem } from '../ui/Emblem';
 import { toDate } from '../ui/time';
-import { DiceChart, LuckChart, RaceChart, StrengthChart } from './charts';
+import { DiceChart, FireChart, LuckChart, RaceChart, StrengthChart } from './charts';
 import { SITE_HOST } from '../siteConfig';
 import { loginPath, replayPath } from './links';
 
@@ -206,6 +206,20 @@ function Report({ report }: { report: AarDoc }) {
         </section>
       </div>
 
+      {report.fire && (
+        <section className="aar-card">
+          <div className="card-head">
+            <h2>Fire effectiveness</h2>
+            <span className="muted">
+              Attacks per player turn · an effect is an enemy unit pinned, broken, reduced or eliminated, or a vehicle hurt ·{' '}
+              {report.sides.map((s) => fireShare(report.fire!, s.side, sideName(s.side))).join(' · ')}
+            </span>
+          </div>
+          <FireChart data={report.fire} sideName={sideName} />
+          <Legend sides={report.sides} extra={<><span><i className="sq solid" />with effect</span><span><i className="sq faded" />no effect</span></>} />
+        </section>
+      )}
+
       <section className="aar-card">
         <div className="card-head"><h2>Dice luck</h2><span className="muted">What the dice did for each side</span></div>
         <div className="dice-cols">
@@ -303,9 +317,57 @@ function DiceTiles({ side, dice }: { side: AarSide; dice: AarDoc['dice'][string]
         <div className="tile"><span className="k">ELR failures</span><span className="v">{dice.elr}</span><span className="s">units replaced</span></div>
         <div className="tile"><span className="k">Heat of Battle</span><span className="v">{dice.hob}</span><span className="s">leaders created</span></div>
         <div className="tile"><span className="k">Best streak</span><span className="v">{dice.streak}</span><span className="s">checks passed in a row</span></div>
+        {dice.rof && (
+          <div className="tile"><span className="k">Rate of Fire</span><span className="v">{dice.rof.kept}<small>/ {dice.rof.fired}</small></span><span className="s">{dice.rof.fired ? `kept on ${Math.round((dice.rof.kept / dice.rof.fired) * 100)}% of shots` : 'no ROF weapon fired'}</span></div>
+        )}
+        {dice.dr && (
+          <div className={`tile ${dice.dr.n ? (dice.dr.sum / dice.dr.n < 3.5 ? 'lucky' : dice.dr.sum / dice.dr.n > 3.5 ? 'unlucky' : '') : ''}`}>
+            {/* "dr" is a single die in ASL notation: kept in lower case under the label's capitals. */}
+            <span className="k">Average <span className="lc">dr</span></span>
+            <span className="v">{dice.dr.n ? (dice.dr.sum / dice.dr.n).toFixed(2) : '—'}</span>
+            <span className="s">{dice.dr.n ? `vs 3.50 · ${dice.dr.n} single-die rolls` : 'no drs'}</span>
+          </div>
+        )}
       </div>
+      {dice.byType && Object.keys(dice.byType).length > 0 && (
+        <table className="roll-types">
+          <thead><tr><th>Rolled for</th><th>DRs</th><th>Average</th></tr></thead>
+          <tbody>
+            {ROLL_KINDS.filter(([k]) => dice.byType![k]?.n).map(([k, label]) => {
+              const t = dice.byType![k]!;
+              const avg = t.sum / t.n;
+              return (
+                <tr key={k}>
+                  <td>{label}</td>
+                  <td>{t.n}</td>
+                  <td className={avg < 7 ? 'lucky' : avg > 7 ? 'unlucky' : ''}>{avg.toFixed(2)}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
     </div>
   );
+}
+
+/** What each roll kind is called in the table, in its order. */
+const ROLL_KINDS: [AarRollKind, string][] = [
+  ['IFT', 'IFT attacks'],
+  ['TH', 'To Hit'],
+  ['TK', 'To Kill'],
+  ['MC', 'Morale Checks'],
+  ['TC', 'Task Checks (PTC, PAATC…)'],
+  ['rally', 'Rallies'],
+  ['CC', 'Close Combat'],
+  ['other', 'Other'],
+];
+
+/** "German 18/62 told (29%)": a side's attacks with an effect. */
+function fireShare(fire: AarFire, side: string, name: string): string {
+  const eff = fire.sides[side]?.effect.reduce((a, b) => a + b, 0) ?? 0;
+  const all = eff + (fire.sides[side]?.none.reduce((a, b) => a + b, 0) ?? 0);
+  return all ? `${name} ${eff} of ${all} (${Math.round((eff / all) * 100)}%)` : `${name} none`;
 }
 
 function CounterImage({ c }: { c: AarCasualty }) {

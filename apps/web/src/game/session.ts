@@ -41,6 +41,10 @@ export interface Session {
   sendPing?(hex: string, at?: MapPoint): void;
   /** Online play: pings received from the other player, oldest first; the screen draws each once by its id. */
   pings?: Ping[];
+  /** Online play: tell the opponent which hex this player has selected (null: none, or one it may not show). */
+  sendFocus?(hex: string | null): void;
+  /** Online play: the hex the other player has selected, if any. */
+  theirFocus?: Focus | null;
   /**
    * A replay: rises each time the watcher jumps (a scrub, a step back, a turn skipped). The screen then shows the new
    * position at once, without playing the dice, effects or phase wheel of the actions jumped over.
@@ -55,6 +59,12 @@ export interface MapPoint {
 }
 
 /** A spot the other player pointed out. */
+/** The hex the other player has selected (online play). */
+export interface Focus {
+  side: string;
+  hex: string;
+}
+
 export interface Ping {
   /** Rises with each ping received, so the screen knows which it has already shown. */
   id: number;

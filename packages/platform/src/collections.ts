@@ -19,6 +19,8 @@ export const COL = {
   drafts: 'drafts',
   /** Subcollection of a match, one doc per side: the hex that player last pinged, so the opponent's board pulses there. */
   pings: 'pings',
+  /** Subcollection of a match, one doc per side: the hex that player has selected, so the opponent sees where they are looking. */
+  focus: 'focus',
   invites: 'invites',
   publicProfiles: 'publicProfiles',
   nicknames: 'nicknames',

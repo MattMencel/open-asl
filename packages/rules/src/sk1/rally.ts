@@ -33,6 +33,8 @@ declare module '@asl/engine' {
     'recover.drm': { ctx: { unit: PieceId; hex: HexId }; value: number };
     /** DRM for a rally attempt. */
     'rally.drm': { ctx: { unit: PieceId; leader: PieceId | null; self: boolean }; value: number };
+    /** Full ASL: why a broken unit may not keep its DM beyond the terrain rule (beneath a trench, ASLRB A10.62); null in the Starter Kit. */
+    'rally.dmKeepIllegal': { ctx: { unit: PieceId }; value: string | null };
     /** Why a repair attempt on the SW is not allowed now (an SSR may forbid it), or null. */
     'sw.repairIllegal': { ctx: { unit: PieceId; sw: PieceId }; value: string | null };
     /** How many SW the unit may try to repair this RPh: one, its one RPh action (SK1/SK4 3.1); full ASL more (asl/swRepair.ts). */
@@ -114,7 +116,7 @@ export function dmChoiceIllegal(env: QueryEnv, side: string, unit: PieceId): str
   if (!loc) return 'Not on the map';
   if (adjacentToKnownEnemy(env, side, loc)) return 'Adjacent to a Known enemy unit: it keeps its DM (SK1 3.1 g)';
   if (terrainOf(env, hexOf(env.state, p)!).routShelter) return 'In woods or a building: its DM comes off at the end of the RPh (SK1 3.1 g)';
-  return null;
+  return env.query('rally.dmKeepIllegal', { unit }, null);
 }
 
 /** Whether `unit`'s DM counter stays on at the end of this RPh: beside a Known enemy, or kept by its owner's choice (the default). */
@@ -399,6 +401,8 @@ export const rallyModule: RuleModule = {
         if (gun(env, pieceOf(env, a.sw)) && !mmc(env, u)) return 'Only a MMC may possess a Gun';
         // ASLRB A4.44 (SK4 4.0 is silent): no Recovery in the same Location as an enemy unit, i.e. in a Melee hex.
         if (personnelAt(env, loc, otherSide(env.state, u.side)).length) return 'No Recovery in a hex with an enemy unit';
+        const across = env.query('recover.illegal', { unit: a.unit, sw: a.sw }, null);
+        if (across) return across;
         return null;
       },
       resolve(ctx, a) {

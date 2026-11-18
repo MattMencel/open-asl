@@ -165,7 +165,8 @@ export const startScheduledGame = onCall(async (req) => {
     const hostSide = listing.side === RANDOM_SIDE ? drawSide(scenario) : listing.side;
     const seats = { [hostSide]: { uid: listing.hostUid, displayName: listing.hostNickname }, [otherSide(scenario, hostSide)]: { uid: listing.opponentUid, displayName: listing.opponentNickname ?? opponent.data.displayName } };
     const { doc, seed } = forViews(baseMatch(scenario, balance, versionHash, listing.hostUid, listing.competition, listing.visibility));
-    const match: MatchDoc = { ...doc, mode: 'online', status: 'active', playerIds: listing.playerIds, seats, pace: 'live', deadline: null };
+    // The table opens early, but the clock waits for the scheduled start.
+    const match: MatchDoc = { ...doc, mode: 'online', status: 'active', playerIds: listing.playerIds, seats, pace: 'live', deadline: null, clockFrom: listing.scheduledAt };
     match.deadline = firstDeadline(match, scenario);
     tx.create(matchDocument, match);
     seedNewOnlineMatch(tx, matchDocument, scenario, seed, match);

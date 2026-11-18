@@ -166,7 +166,7 @@ export const elevationModule: RuleModule = {
       query: 'ordnance.thDrm',
       ref: 'case 17',
       label: '+1 Height Advantage TEM',
-      when: (sc, env) => sc.shot.targetType === 'ITT' && sc.def.type !== 'MTR' && emplacementThDrm(env, sc.target, sc.side) === 0 && heightAdvantageHex(env, sc.target, [sc.loc ?? sc.hex], sc.movingInfo),
+      when: (sc, env) => (sc.shot.targetType === 'ITT' || sc.shot.targetType === 'VTT') && sc.def.type !== 'MTR' && emplacementThDrm(env, sc.target, sc.side) === 0 && heightAdvantageHex(env, sc.target, [sc.loc ?? sc.hex], sc.movingInfo),
       apply: (v) => v + 1,
     });
     r.suppress<'ordnance.thDrm'>({

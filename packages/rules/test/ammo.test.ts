@@ -109,7 +109,7 @@ describe('Ordnance Smoke (SK4 1.2.5, 6.2)', () => {
     const t = act(engine, state, { type: 'fire.ordnance', shot: { weapon: 'g', target: 'yN5', targetType: 'ITT' } });
     expect(ev(t.events, 'sk2.ordnance.shot')[0]).toMatchObject({ ammo: 'HE', outcome: 'miss' });
     expect(t.state.pieces['g']!.tags['fire']).toBeUndefined();
-    expect(illegal(engine, t.state, { weapon: 'g', target: 'yN5', targetType: 'ATT', ammo: 'SMOKE' })).toMatch(/before the Gun fires anything else/);
+    expect(illegal(engine, t.state, { weapon: 'g', target: 'yN5', targetType: 'ATT', ammo: 'SMOKE' })).toMatch(/before the firer fires anything else/);
   });
 });
 

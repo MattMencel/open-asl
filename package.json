@@ -18,6 +18,7 @@
     "test:e2e:cc": "node apps/web/e2e/closeCombat.mjs",
     "test:e2e:devices": "node apps/web/e2e/twoDevices.mjs",
     "test:e2e:ping": "node apps/web/e2e/ping.mjs",
+    "test:e2e:focus": "node apps/web/e2e/onlineFocus.mjs",
     "test:e2e:opponent": "node apps/web/e2e/opponentView.mjs",
     "test:e2e:undo": "node apps/web/e2e/undo.mjs",
     "typecheck": "pnpm -r typecheck",

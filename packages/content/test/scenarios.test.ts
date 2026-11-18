@@ -122,7 +122,47 @@ describe('catalogued scenarios', () => {
       expect(state.result, `seed ${seed} reached no result in ${steps} steps`).not.toBeNull();
     }
     expect(counts['fort.place'] ?? 0).toBe(2);
-    expect(counts['asl.fort.placed'] ?? 0).toBe(2);
+    // The two setup placements, plus any foxhole dug in play (B27.11).
+    expect(counts['asl.fort.placed'] ?? 0).toBeGreaterThanOrEqual(2);
+  });
+
+  it('asl-testbed: weighted random play entrenches, moves in and out of foxholes and routs beneath them, and every Player Turn boundary is clean', () => {
+    const scenario = scenarioById('asl-testbed')!;
+    const counts: Record<string, number> = {};
+    const bump = (k: string, n = 1) => (counts[k] = (counts[k] ?? 0) + n);
+    // Dig whenever the PFPh offers it, go in and out of entrenchments and beneath them in the RtPh, else play as usual.
+    const weigh = weightedPicker((a) => (a.type === 'fort.place' ? 400 : a.type === 'entrench.attempt' ? 80 : a.type === 'move.entrenchment' ? 30 : a['beneath'] !== undefined ? 30 : a.type === 'endPhase' ? 4 : 1));
+    for (const seed of [11, 12, 13]) {
+      const check = turnBoundaryCheck(`asl-testbed entrench seed ${seed}`);
+      const { state, steps } = playRandom(scenario, `entrench-${seed}`, {
+        rand: mulberry(seed),
+        maxSteps: 9000,
+        pick: weigh,
+        onStep: (st, events, a) => {
+          bump(a.type);
+          if (a['beneath'] !== undefined) bump(`${a.type}:beneath`);
+          for (const ev of events) {
+            if (ev.type === 'asl.entrench.attempt') bump((ev.payload as { success: boolean }).success ? 'dug' : 'failed');
+            if (ev.type === 'asl.entrench.move') bump(`move:${(ev.payload as { phase: string }).phase}`);
+            if (ev.type === 'asl.fort.grown') bump('grown');
+          }
+          check(st, events);
+          // Every unit beneath an entrenchment stands in a hex that holds one, and a Labor counter names the Location its unit is in.
+          const forts = (st.ext['asl.fortifications'] as { counters: { kind: string; hex: string }[] } | undefined)?.counters ?? [];
+          for (const p of Object.values(st.pieces)) {
+            if (p.loc.kind !== 'hex') continue;
+            if (p.loc.pos?.ent) expect(forts.some((c) => c.hex === (p.loc as { hex: string }).hex && (c.kind === 'foxhole' || c.kind === 'trench' || c.kind === 'ditch')), `${p.id} beneath nothing in ${p.loc.hex}`).toBe(true);
+            const labor = typeof p.tags['labor'] === 'string' ? p.tags['labor'] : null;
+            if (labor) expect(labor.replace(/^[a-z]+:/, '').replace(/@.*$/, ''), `${p.id} carries Labor away`).toBe(p.loc.hex);
+          }
+        },
+      });
+      expect(state.result, `seed ${seed} reached no result in ${steps} steps`).not.toBeNull();
+    }
+    expect(counts['entrench.attempt'] ?? 0, JSON.stringify(counts)).toBeGreaterThan(0);
+    expect(counts['dug'] ?? 0, JSON.stringify(counts)).toBeGreaterThan(0);
+    expect(counts['move.entrenchment'] ?? 0, JSON.stringify(counts)).toBeGreaterThan(0);
+    expect((counts['move:MPh'] ?? 0) + (counts['move:RtPh'] ?? 0) + (counts['move:APh'] ?? 0), JSON.stringify(counts)).toBeGreaterThan(0);
   }, 120_000);
 
   for (const s of PLAYABLE_SCENARIOS) {

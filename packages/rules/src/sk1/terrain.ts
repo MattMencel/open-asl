@@ -14,7 +14,8 @@ declare module '@asl/engine' {
     'hex.openGround': { ctx: { hex: LocId }; value: boolean };
     /** Infantry MF to enter `to` from `from`. */
     /** `loc`: the Location entered in `to` when it is not the ground level (an upper floor, a cave). */
-    'move.cost': { ctx: { unit: PieceId; from: HexId | null; to: HexId; viaRoad: boolean; loc?: LocId }; value: number };
+    /** `off`: the offboard hex a step onto the map comes from (`from` is null then), for terrain that extends offboard (a path). */
+    'move.cost': { ctx: { unit: PieceId; from: HexId | null; to: HexId; viaRoad: boolean; loc?: LocId; off?: HexId }; value: number };
     /**
      * Whether roads give their road movement rate (the Infantry road bonus, a vehicle's road MP): true unless a rule
      * treats them as Open Ground (LMA5 SSR 3: snow-covered roads).
@@ -236,13 +237,21 @@ export const terrainModule: RuleModule = {
           if (level > lo && map.losMode !== 'pixel') {
             return { clear: false, hindrance: 0, parts: [], blockedBy: `higher ground in ${c.hex} (Crest Line)` };
           }
-          const t = terrainOf(env, c.hex);
+          const printed = statics(env).map.hex(c.hex)?.terrain;
+          const hexTerrain = terrainOf(env, c.hex);
+          // Pixel LOS has already judged the art under the thread: an obstacle depiction it met blocked it, and a hex
+          // listed here was crossed only through the depiction recorded. A hex whose terrain at its centre is woods may
+          // be crossed through its brush (a board-edge hex drawn half woods on one board, half brush on the other):
+          // woods block only where the LOS crosses the woods depiction (ASLRB A6.1, B13), brush hinders where the LOS
+          // crosses the Brush depiction (SK4 1.1.1 Brush). Terrain a rule changes for the whole hex (an SSR, a
+          // collapsed hut, rubble) is not in the art, so the hex's terrain decides there.
+          const t = map.losMode === 'pixel' && hexTerrain.id === printed ? (statics(env).terrain[c.terrain] ?? hexTerrain) : hexTerrain;
           if (t.los === 'obstacle') {
             return { clear: false, hindrance: 0, parts: [], blockedBy: `${t.name} in ${c.hex}` };
           }
           // The hex's own terrain hinders, or (pixel LOS) a hindrance depiction the thread crossed
           // inside a hex whose terrain at its centre is something else: grain spilling into open ground.
-          const depicted = c.terrain !== statics(env).map.hex(c.hex)?.terrain ? statics(env).terrain[c.terrain] : undefined;
+          const depicted = c.terrain !== printed ? statics(env).terrain[c.terrain] : undefined;
           const hind = t.los === 'hindrance' ? t : depicted?.los === 'hindrance' ? depicted : null;
           if (hind) {
             seen.add(c.hex);

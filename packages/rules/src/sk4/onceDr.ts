@@ -1,4 +1,4 @@
-import type { Action, Ctx, Decision, Piece, PieceId, QueryEnv, RuleModule, SideId } from '@asl/engine';
+import type { Action, Ctx, Decision, HexId, Piece, PieceId, QueryEnv, RuleModule, SideId } from '@asl/engine';
 import { byId, statics } from '../common/pieces';
 import { locOf } from '../common/location';
 import { isHidden } from '../sk2/status';
@@ -56,6 +56,9 @@ export interface OnceDrEvent extends OnceDrRecord {
   side: SideId;
   rule: string;
   effect: OnceDrEffect['kind'];
+  /** A `leaderHalt` rule: the leader whose stack is halted and the hex he stands in, when he is on the map. */
+  leader?: PieceId;
+  hex?: HexId;
 }
 
 export interface OnceDrNmcEvent {
@@ -104,6 +107,16 @@ function halted(env: QueryEnv, q: OnceDrParams): Piece[] {
   const loc = l && locOf(env.state, l);
   if (!l || !loc) return [];
   return Object.values(env.state.pieces).filter((p) => p.side === l.side && (mmc(env, p) || smc(env, p)) && locOf(env.state, p) === loc);
+}
+
+/**
+ * The units halted this Game Turn by a `leaderHalt` dr, each with the rule's name: those stacked with the leader now
+ * (him included), as `unit.actionIllegal` judges them. Empty once the Game Turn of the dr is over.
+ */
+export function haltedUnits(env: QueryEnv): Map<PieceId, string> {
+  const out = new Map<PieceId, string>();
+  for (const { q } of haltsNow(env)) for (const p of halted(env, q)) if (!out.has(p.id)) out.set(p.id, ruleName(q));
+  return out;
 }
 
 /** The `leaderHalt` rules whose dr succeeded this Game Turn. */
@@ -192,7 +205,9 @@ export const onceDrModule: RuleModule = {
         const turn = ctx.state.turn;
         const dr = ctx.roll(`${ruleName(q)}: dr (needs < ${turn})`, 1).dice[0]!;
         const success = dr < turn;
-        ctx.emit('ssr.onceDr', { index, side: q.side, rule: ruleName(q), effect: q.effect.kind, turn, dr, success } satisfies OnceDrEvent);
+        const l = haltLeader(ctx, q);
+        const at = l && l.loc.kind === 'hex' ? { leader: l.id, hex: l.loc.hex } : {};
+        ctx.emit('ssr.onceDr', { index, side: q.side, rule: ruleName(q), effect: q.effect.kind, turn, dr, success, ...at } satisfies OnceDrEvent);
         ctx.popDecision(d.id);
         if (!success) return;
         if (q.effect.kind === 'nmcConcealment') nmcConcealment(ctx, q, q.effect.side);

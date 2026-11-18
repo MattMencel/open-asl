@@ -200,32 +200,33 @@ function testbedSetupWith(f: FixtureBuilder, fortified: string[], moved: Record<
 
 /**
  * The test bed's fortification counters (SSR 3), one of every kind, open and hidden, on the village's eastern edge:
- * a hidden 2S foxhole in O6 and an open 1S one in O7, the trench in P6, Wire hidden in O4 and open in P9, 8 A-P
- * factors with one A-T factor recorded in P10, a Known 6 in N9 and the Dummy in O10, the roadblock on the O9–P8 road
- * hexside (hidden) and the 1+3+5 pillbox in O3 facing east (hidden).
+ * a hidden 2S foxhole in O6 and an open 1S one in O10, the two trenches in O7 and P6 (connecting, ASLRB B27.54), Wire
+ * hidden in O4 and open in P9, 8 A-P factors with one A-T factor recorded in P10, a Known 6 in N9 and the Dummy in N10,
+ * the roadblock on the O9–P8 road hexside (hidden) and the 1+3+5 pillbox in O3 facing east (hidden).
  */
 export function testbedForts(f: FixtureBuilder): FortPlacement[] {
   const map = statics(f.engine.env(f.state)).map;
   return [
     { kind: 'foxhole', hex: 'uO6', hidden: true, capacity: 2 },
-    { kind: 'foxhole', hex: 'uO7', hidden: false, capacity: 1 },
+    { kind: 'trench', hex: 'uO7', hidden: false },
     { kind: 'trench', hex: 'uP6', hidden: false },
     { kind: 'wire', hex: 'uO4', hidden: true },
     { kind: 'wire', hex: 'uP9', hidden: false },
     { kind: 'mines', hex: 'uP10', hidden: true, mines: { ap: 8, at: 1 } },
     { kind: 'mines', hex: 'uN9', hidden: false, mines: { ap: 6, known: true } },
-    { kind: 'mines', hex: 'uO10', hidden: false, mines: { known: true, dummy: true } },
+    { kind: 'mines', hex: 'uN10', hidden: false, mines: { known: true, dummy: true } },
     { kind: 'roadblock', hex: 'uO9', hidden: true, hexside: sideToward(map, 'uO9', 'uP8')! },
     { kind: 'pillbox', hex: 'uO3', hidden: true, ca: 0, pillbox: { capacity: 1, ca: 3, nca: 5 } },
+    { kind: 'foxhole', hex: 'uO10', hidden: false, capacity: 1 },
   ];
 }
 
 /**
  * The test bed setup with the counters of `testbedForts` down and the Russians in them: a 4-5-8 inside the pillbox,
- * a 4-4-7 beneath the O6 foxhole, the Conscripts beneath the O7 foxhole, the other 4-5-8 beneath the trench, the
- * 5-2-7 on top of the Wire in P9; the Germans as usual.
+ * a 4-4-7 beneath the O6 foxhole, the Conscripts beneath the O7 trench, the other 4-5-8 beneath the P6 trench, the
+ * 5-2-7 on top of the Wire in P9; the Germans as usual, or (`germans`) where given.
  */
-function fortsSetup(f: FixtureBuilder, opts: { germans?: boolean } = {}) {
+function fortsSetup(f: FixtureBuilder, opts: { germans?: boolean | Record<string, string> } = {}) {
   const ru = (def: string, n = 1) => f.unit('ru', def, n);
   f.fortify(TESTBED_FORTIFIED);
   f.fortPlace(testbedForts(f));
@@ -243,6 +244,10 @@ function fortsSetup(f: FixtureBuilder, opts: { germans?: boolean } = {}) {
   }, {}, { beneath: [ru('ru.447', 1), ru('ru.458', 2), ru('ru.426', 1)] });
   if (opts.germans === false) return;
   const ge = (def: string, n = 1) => f.unit('ge', def, n);
+  if (typeof opts.germans === 'object') {
+    f.setup('ge', Object.fromEntries(Object.entries(opts.germans).map(([k, hex]) => [f.unit('ge', k.split('#')[0]!, Number(k.split('#')[1] ?? 1)), hex])));
+    return;
+  }
   f.setup('ge', {
     [ge('ge.L92')]: 'uT3',
     [ge('ge.838')]: 'uT3',
@@ -605,7 +610,7 @@ export const DEV_FIXTURES: DevFixture[] = [
     scenarioId: 'asl-testbed',
     title: 'Fortifications: the counters down, the units to place',
     description:
-      "Russian setup with every counter placed (one of each kind, open and hidden: a hidden 2S foxhole in O6, an open 1S in O7, the trench in P6, Wire hidden in O4 and open in P9, recorded mines in P10, a Known 6 in N9 and the Dummy in O10, the roadblock on O9–P8, the pillbox in O3 facing east). The units are still in the tray: drop a squad on O6, O7, P6, P9 or O3 and the wheel offers the foxhole, trench, Wire and pillbox.",
+      "Russian setup with every counter placed (one of each kind, open and hidden: a hidden 2S foxhole in O6, an open 1S in O10, the connecting trenches in O7 and P6, Wire hidden in O4 and open in P9, recorded mines in P10, a Known 6 in N9 and the Dummy in N10, the roadblock on O9–P8, the pillbox in O3 facing east). The units are still in the tray: drop a squad on O6, O7, P6, O10, P9 or O3 and the wheel offers the foxhole, trench, Wire and pillbox.",
     build(f) {
       f.fortify(TESTBED_FORTIFIED);
       f.fortPlace(testbedForts(f));
@@ -616,9 +621,57 @@ export const DEV_FIXTURES: DevFixture[] = [
     scenarioId: 'asl-testbed',
     title: "Fortifications: the German's view",
     description:
-      'German setup. The Russians have set up with their counters (fort-owner) and their units in them: a 4-5-8 in the pillbox, a 4-4-7 beneath the O6 foxhole, the Conscripts beneath the O7 foxhole, a 4-5-8 beneath the trench, the 5-2-7 on the Wire in P9. The German sees the open counters (O7, P6, P9), two blank Known Minefield counters (N9, O10) and nothing of the hidden ones until a Good Order German has a LOS to them (A12.33) when the first Player Turn begins.',
+      'German setup. The Russians have set up with their counters (fort-owner) and their units in them: a 4-5-8 in the pillbox, a 4-4-7 beneath the O6 foxhole, the Conscripts beneath the O7 trench, a 4-5-8 beneath the P6 trench, the 5-2-7 on the Wire in P9. The German sees the open counters (O7, P6, O10, P9), two blank Known Minefield counters (N9, N10) and nothing of the hidden ones until a Good Order German has a LOS to them (A12.33) when the first Player Turn begins.',
     build(f) {
       fortsSetup(f, { germans: false });
+    },
+  },
+  {
+    id: 'entrench',
+    scenarioId: 'asl-testbed',
+    title: 'Entrenching: the Russian PFPh',
+    description:
+      'Russian Turn 1 Prep Fire Phase with diggers ready (ASLRB B27.11): the 4-4-7 and the 7-0 in the open at M10 (right-click: Entrench…, the leader directs at -1 and the Russians take -1 more), the Conscripts standing on top of the open 1S foxhole in O10 (an attempt there grows it to 2S). Every participant is TI for the Player Turn; a failure earns Labor -1 for the next try there.',
+    build(f) {
+      const ru = (def: string, n = 1) => f.unit('ru', def, n);
+      f.fortify(TESTBED_FORTIFIED);
+      f.fortPlace(testbedForts(f));
+      f.setup('ru', {
+        [ru('ru.L91')]: 'uK4',
+        [ru('ru.458', 1)]: 'uO3:pb',
+        [ru('ru.447', 1)]: 'uO6',
+        [ru('ru.458', 2)]: 'uP6',
+        [ru('ru.447', 2)]: 'uM5',
+        [ru('ru.447', 3)]: 'uM10',
+        [ru('ru.L70')]: 'uM10',
+        [ru('ru.527')]: 'uP9',
+        [ru('ru.426', 1)]: 'uO7',
+        [ru('ru.426', 2)]: 'uO10',
+      }, {}, { beneath: [ru('ru.447', 1), ru('ru.458', 2), ru('ru.426', 1)] });
+      f.setup('ge', {});
+      f.until('PFPh', { turn: 1, attacker: 'ru' });
+    },
+  },
+  {
+    id: 'foxhole-fight',
+    scenarioId: 'asl-testbed',
+    title: 'Foxholes: the German Movement Phase',
+    description:
+      'German Turn 1 Movement Phase with the Germans close in: the 9-2 with the 8-3-8 and the 5-4-8 in S6, the 4-6-7s in S5, S7 and T5. The Russians sit beneath their counters (a 4-4-7 under the O6 foxhole, the Conscripts and a 4-5-8 under the O7 and P6 trenches), the open 1S foxhole in O10 is empty. Move at them: their Defensive First Fire comes from beneath (+2 TEM against your return fire, no FFMO for them); an Assault Moving stack clicking O10 may go straight beneath its foxhole; the stack card shows who is beneath.',
+    build(f) {
+      fortsSetup(f, { germans: { 'ge.L92': 'uS6', 'ge.838': 'uS6', 'ge.548': 'uS6', 'ge.467#1': 'uS5', 'ge.467#2': 'uS7', 'ge.467#3': 'uT5', 'ge.L80': 'uS4', 'ge.447#1': 'uS4', 'ge.447#2': 'uS4' } });
+      f.until('MPh', { turn: 1, attacker: 'ge' });
+    },
+  },
+  {
+    id: 'trench-move',
+    scenarioId: 'asl-testbed',
+    title: 'Trenches: moving along the line',
+    description:
+      'Russian Turn 1 Movement Phase. The 4-5-8 beneath the P6 trench and the Conscripts beneath the O7 trench are in connecting trenches (ASLRB B27.54): a step from one to the other costs one MF, stays beneath, and draws no FFNAM, FFMO or Snap Shot. A stack beneath sees "Out of the trench (1 MF)" on its wheel; the 4-4-7 beneath the O6 foxhole likewise.',
+    build(f) {
+      fortsSetup(f);
+      f.until('MPh', { turn: 1, attacker: 'ru' });
     },
   },
   {

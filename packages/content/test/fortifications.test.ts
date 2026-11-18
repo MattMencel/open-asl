@@ -44,7 +44,7 @@ describe('placing the counters in the setup', () => {
     f.fortPlace(testbedForts(f));
     const env = f.engine.env(f.state);
     expect(fortCounters(env).map((c) => `${c.kind}@${c.hex}${c.hidden ? '?' : ''}`)).toEqual([
-      'foxhole@uO6?', 'foxhole@uO7', 'trench@uP6', 'wire@uO4?', 'wire@uP9', 'mines@uP10?', 'mines@uN9', 'mines@uO10', 'roadblock@uO9?', 'pillbox@uO3?',
+      'foxhole@uO6?', 'trench@uO7', 'trench@uP6', 'wire@uO4?', 'wire@uP9', 'mines@uP10?', 'mines@uN9', 'mines@uN10', 'roadblock@uO9?', 'pillbox@uO3?', 'foxhole@uO10',
     ]);
     expect(f.engine.legalActions(f.state, 'ru').map((a) => a.type)).toEqual(['setup.place']);
     expect(() => f.fortPlace([])).toThrow(/already placed/);
@@ -79,9 +79,9 @@ describe('what each side sees', () => {
   it("the German's snapshot holds the open counters and two blank Known minefields, no hidden hex, strength or arc, and no pillbox Location", () => {
     const f = fixture('fort-placed');
     const env = f.engine.env(f.state);
-    expect(fortificationView(env, 'ru')).toHaveLength(10);
+    expect(fortificationView(env, 'ru')).toHaveLength(11);
     const theirs = fortificationView(env, 'ge');
-    expect(theirs.map((c) => `${c.kind}@${c.hex}`)).toEqual(['foxhole@uO7', 'trench@uP6', 'wire@uP9', 'mines@uN9', 'mines@uO10']);
+    expect(theirs.map((c) => `${c.kind}@${c.hex}`)).toEqual(['trench@uO7', 'trench@uP6', 'wire@uP9', 'mines@uN9', 'mines@uN10', 'foxhole@uO10']);
     expect(theirs.filter((c) => c.kind === 'mines').map((c) => c.mines)).toEqual([{ known: true }, { known: true }]);
     const seen = redactState(f.engine, f.state, 'ge');
     const json = JSON.stringify(seen.ext['asl.fortifications']);
@@ -91,10 +91,10 @@ describe('what each side sees', () => {
     // hidden pillbox stands on the ground of O3; the Conscripts beneath the open O7 foxhole keep theirs.
     expect(seen.pieces[f.unit('ru', 'ru.447', 1)]!.loc).toEqual({ kind: 'hex', hex: 'uO6' });
     expect(seen.pieces[f.unit('ru', 'ru.458', 1)]!.loc).toEqual({ kind: 'hex', hex: 'uO3' });
-    expect(seen.pieces[f.unit('ru', 'ru.426', 1)]!.loc).toEqual({ kind: 'hex', hex: 'uO7', pos: { ent: 'foxhole' } });
+    expect(seen.pieces[f.unit('ru', 'ru.426', 1)]!.loc).toEqual({ kind: 'hex', hex: 'uO7', pos: { ent: 'trench' } });
     expect(redactState(f.engine, f.state, 'ru').pieces[f.unit('ru', 'ru.447', 1)]!.loc).toEqual({ kind: 'hex', hex: 'uO6', pos: { ent: 'foxhole' } });
     // A hotseat screen between the players shows what the German sees.
-    expect(fortificationView(env, null).map((c) => c.hex)).toEqual(['uO7', 'uP6', 'uP9', 'uN9', 'uO10']);
+    expect(fortificationView(env, null).map((c) => c.hex)).toEqual(['uO7', 'uP6', 'uP9', 'uN9', 'uN10', 'uO10']);
   });
   it('as the first Player Turn begins, hidden counters in Open Ground a Good Order German sees are revealed; the recorded minefield never (A12.33, B28.1)', () => {
     const f = fixture('fort-placed');
@@ -140,8 +140,17 @@ describe('across the turns', () => {
     until(f, 'MPh', 1, 'ru');
     const mover = f.state.pieces[ru('ru.447', 1)]!;
     if (mover.tags['broken'] !== true && mover.tags['pinned'] !== true) {
-      f.move([ru('ru.447', 1)], ['uN6']);
-      expect(locOf(f.state, ru('ru.447', 1))).toEqual({ kind: 'hex', hex: 'uN6' });
+      // Out of the foxhole first (a separate MF the German may fire at, ASLRB B27.4), then into the next hex.
+      f.act({ type: 'move.start', units: [ru('ru.447', 1)] });
+      expect(f.engine.validate(f.state, { type: 'move.step', to: 'uP6', side: 'ru', decisionId: f.decision.id } as Action)).toMatch(/Leave the foxhole 2S first/);
+      f.act({ type: 'move.entrenchment', beneath: false });
+      f.settle('ru');
+      // Into the next hex on top of its trench (the plain step), not beneath it.
+      f.act({ type: 'move.step', to: 'uP6' });
+      f.settle('ru');
+      if (f.engine.legalActions(f.state, 'ru').some((a) => a.type === 'move.end')) f.act({ type: 'move.end' });
+      f.settle('ru');
+      expect(locOf(f.state, ru('ru.447', 1))).toEqual({ kind: 'hex', hex: 'uP6' });
     }
     // Into the next Game Turn: the counters are all still there, the unit that stayed beneath the trench still has its position.
     until(f, 'RPh', 2, 'ge');

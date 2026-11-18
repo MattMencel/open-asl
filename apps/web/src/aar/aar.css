@@ -149,3 +149,12 @@
 .recent-results .lobby-result .l2 { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .recent-results .lobby-result .side-badge .side-emblem { width: 30px; height: 30px; }
 .waiting-aar { margin-top: 10px; }
+.aar-page .legend i.sq { width: 10px; height: 10px; border-radius: 2px; background: var(--muted); }
+.aar-page .legend i.sq.faded { opacity: .3; }
+.dice-side .roll-types { width: 100%; margin-top: 10px; border-collapse: collapse; font-size: 13px; }
+.dice-side .roll-types th { font: 600 11px var(--font-head); letter-spacing: .11em; text-transform: uppercase; color: var(--muted); text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--line); }
+.dice-side .roll-types td { padding: 4px 8px; border-bottom: 1px solid var(--line); color: var(--text); }
+.dice-side .roll-types th:not(:first-child), .dice-side .roll-types td:not(:first-child) { text-align: right; font-variant-numeric: tabular-nums; }
+.dice-side .roll-types td.lucky { color: var(--green); }
+.dice-side .roll-types td.unlucky { color: var(--red-hi); }
+.dice-side .tile .k .lc { text-transform: none; }

@@ -169,6 +169,11 @@ export interface MatchDoc {
   pace?: Pace;
   /** Online matches: the clock on the pending decision; null when the match is over or no seat is filled. */
   deadline?: Deadline | null;
+  /**
+   * A scheduled session's start time. Its table opens a quarter of an hour early, but no clock runs before the
+   * start: every deadline counts from this time while it is still to come.
+   */
+  clockFrom?: Timestamp;
   /** Online matches: the last request to take back an action, while it is pending or once answered. Cleared by the next action. */
   undo?: UndoRequest | null;
   /** Computer matches: the side the computer plays and which bot. */
@@ -241,6 +246,17 @@ export interface DraftDoc {
   /** Piece id -> hex it is placed in. */
   placements: Record<string, string>;
   updatedAt: Timestamp;
+}
+
+/**
+ * matches/{matchId}/focus/{side}: the hex a seated player has selected on their board, or null when nothing is, so the
+ * opponent's board rings it in that side's colour while they act. Every hex, a hidden unit's included (withholding some
+ * would point them out); nothing during setup. Not part of the recording.
+ */
+export interface FocusDoc {
+  side: string;
+  hex: string | null;
+  at: Timestamp;
 }
 
 /**

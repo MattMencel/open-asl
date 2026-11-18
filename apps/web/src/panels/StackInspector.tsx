@@ -1,6 +1,7 @@
 import type { CSSProperties } from 'react';
 import type { HexId, Piece, PieceId, QueryEnv } from '@asl/engine';
-import { AMMO_NAME, hexOfLoc, isCaveLoc, ppOf, terrainOf, acquisitionsAt, ammoOut, coveredArc, defOf, fireMarker, gunIdent, isWeaponDef, levelOfLoc, locOf, locationsOf, moveState, shownFireMarker, smokeDrm, smokeGrenades, stackOrder, swHeldBy, unitsInHex, unpossessedWeaponsAt, unpossessedWeaponsInHex, type Statics } from '@asl/rules';
+import { entrenchmentAt, entrenchmentName, entrenchmentRoom, isEntrenched } from '@asl/rules';
+import { AMMO_NAME, haltedUnits, hexOfLoc, isCaveLoc, ppOf, terrainOf, acquisitionsAt, ammoOut, coveredArc, defOf, fireMarker, gunIdent, isWeaponDef, levelOfLoc, locOf, locationsOf, moveState, shownFireMarker, smokeDrm, smokeGrenades, stackOrder, swHeldBy, unitsInHex, unpossessedWeaponsAt, unpossessedWeaponsInHex, type Statics } from '@asl/rules';
 import { counterImage, markerImage } from '../game/assets';
 import { defLabel, nationName, pieceLabel } from '../game/describe';
 import { smoke58Chits } from '../game/smoke';
@@ -36,6 +37,8 @@ const STATUS: [string, string][] = [
   ['banzai', 'Banzai Charge (SK4 8.1.8.6)'],
   ['caLocked', 'Turned (cannot move)'],
   ['hazardous', 'Hazardous Movement'],
+  // Full ASL: Temporarily Immobilized for the Player Turn (ASLRB A4.8).
+  ['ti', 'TI'],
   ['manhandled', 'Manhandled'],
   // SK3 vehicles.
   ['ce', 'CE'],
@@ -80,6 +83,8 @@ export function StackInspector({ env, hex, selected, onToggle, actingSide, swWit
   // Read from the top of each side's stack down, as the board stacks it: a vehicle at the bottom, a leader on
   // the MMC he is stacked on (SK1 3.8), and each unit's SW above it (ASLRB A4.43: a SW belongs to the unit beneath it).
   const isVeh = (p: Piece) => defOf(env, p).kind === 'vehicle';
+  // Units halted for this Game Turn by a card's once-per-game dr, with the rule's name.
+  const halted = haltedUnits(env);
   const units = [...new Set(here.map((p) => p.side))]
     .sort()
     .flatMap((side) => {
@@ -153,6 +158,18 @@ export function StackInspector({ env, hex, selected, onToggle, actingSide, swWit
                 Gun {gunIdent(env, p)} · {d.rof ? `ROF${d.rof} ` : ''}{d.ife ? `IFE ${d.ife} ` : ''}· CA {SPINE_NAME[coveredArc(p)]}{p.tags['acqHex'] ? ` · has acquired ${String(p.tags['acqHex']).replace(/^[a-z]/, '')} (-${p.tags['acqLevel']})` : ''}
               </span>
             )}
+            {p.loc.kind === 'hex' && d.kind !== 'vehicle' && (() => {
+              // Full ASL: beneath the foxhole or trench of the hex, or on top of it (ASLRB B27.1, B27.13; the counter as this viewer knows it).
+              const ent = entrenchmentAt(env, p.loc.hex);
+              if (!ent) return null;
+              const room = entrenchmentRoom(env, p.loc.hex, p.side);
+              return (
+                <span className={`muted small ent ${isEntrenched(p) ? 'beneath' : 'ontop'}`}>
+                  {' '}
+                  · {isEntrenched(p) ? `beneath the ${entrenchmentName(ent)} (+2 TEM)` : `on top of the ${entrenchmentName(ent)}${room && room.se > 0 ? ` · room for ${room.se} squad${room.se === 1 ? '' : 's'}` : ' · full for this side'}`}{typeof p.tags['labor'] === 'string' ? ` · Labor ${String(p.tags['labor']).replace(/^.*@/, '')}` : ''}
+                </span>
+              );
+            })()}
           </span>
         </label>
         <span className="tags">
@@ -171,6 +188,11 @@ export function StackInspector({ env, hex, selected, onToggle, actingSide, swWit
             </span>
           )}
           {ammoOut(p).length > 0 && <span className="tag tag-malf">Out of {ammoOut(p).map((k) => AMMO_NAME[k]).join(', ')}</span>}
+          {halted.has(p.id) && (
+            <span className="tag tag-pinned" title="Halted by a once-per-game dr: no action this Game Turn but routing or Close Combat">
+              Halted ({halted.get(p.id)})
+            </span>
+          )}
           {/* A unit that fired only its SW keeps its own FP until the phase ends (SK4 4.0), when the marker goes on. */}
           {fire && fire !== 'bff' && (fireMarker(p) || d.kind === 'sw' ? <span className={`tag tag-fire-${fire}`}>{FIRE_LABEL[fire]}</span> : <span className={`tag tag-fire-${fire}`} title="Its SW has fired; its own FP may still fire this phase">SW fired</span>)}
         </span>

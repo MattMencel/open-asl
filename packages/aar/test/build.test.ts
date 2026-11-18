@@ -27,14 +27,19 @@ function play(seed: string, scenario: ScenarioDef = LMA6) {
 /** Replay with the engine to count two-dice rolls and the final casualty VP, independently of the builder. */
 function ground(scenario: ScenarioDef, seed: string, actions: Action[]) {
   const { engine, state: s0, events: e0 } = newGame(scenario, seed, { los: 'grid' });
-  let drs = e0.filter((e) => e.type === 'dice.rolled' && (e.payload as { dice: number[] }).dice.length === 2).length;
+  const rolls = (events: { type: string; payload: unknown }[], n: number) => events.filter((e) => e.type === 'dice.rolled' && (e.payload as { dice: number[] }).dice.length === n).length;
+  let drs = rolls(e0, 2);
+  let singles = rolls(e0, 1);
+  let malfunctions = 0;
   let state: GameState = s0;
   for (const a of actions) {
     const t = engine.submit(state, a);
-    drs += t.events.filter((e) => e.type === 'dice.rolled' && (e.payload as { dice: number[] }).dice.length === 2).length;
+    drs += rolls(t.events, 2);
+    singles += rolls(t.events, 1);
+    malfunctions += Object.values(t.state.pieces).filter((p) => p.tags['malf'] === true && state.pieces[p.id]?.tags['malf'] !== true).length;
     state = t.state;
   }
-  return { drs, state, env: engine.env(state) };
+  return { drs, singles, malfunctions, state, env: engine.env(state) };
 }
 
 /**
@@ -90,11 +95,25 @@ describe('buildAar', () => {
         expect(d.twos).toBe(d.hist[0]);
         expect(d.twelves).toBe(d.hist[10]);
         if (d.drs) expect(d.avg).toBeGreaterThan(2);
+        // Every DR has a kind (IFT, To Hit, MC …), every dr a face, every ROF weapon fired a ROF outcome.
+        expect(Object.values(d.byType!).reduce((a, t) => a + t!.n, 0)).toBe(d.drs);
+        expect(d.dr!.hist.reduce((a, b) => a + b, 0)).toBe(d.dr!.n);
+        expect(d.rof!.kept).toBeLessThanOrEqual(d.rof!.fired);
+        expect(doc.fire!.sides[s]!.effect.length).toBe(doc.fire!.labels.length);
+        expect(doc.fire!.sides[s]!.none.length).toBe(doc.fire!.labels.length);
         // Casualties agree with the rules' own ledger.
         expect(doc.casualties.filter((c) => c.side === s).reduce((a, c) => a + c.cvp, 0)).toBe(casualtyVp(truth.env, s));
       }
-      // Every two-dice roll went to one side or the other.
+      // Every two-dice roll went to one side or the other, and every single-die roll.
       expect(doc.dice['ge']!.drs + doc.dice['br']!.drs).toBe(truth.drs);
+      expect(doc.dice['ge']!.dr!.n + doc.dice['br']!.dr!.n).toBe(truth.singles);
+      // Both sides fired, and some of it told.
+      const shots = (k: 'effect' | 'none') => ['ge', 'br'].reduce((a, s) => a + doc.fire!.sides[s]![k].reduce((x, y) => x + y, 0), 0);
+      expect(shots('effect')).toBeGreaterThan(0);
+      expect(shots('none')).toBeGreaterThan(0);
+      // Each weapon that broke down is a highlight (a MMG/HMG or Gun weighs more), while the eight places last.
+      if (doc.highlights.length < 8) expect(doc.highlights.filter((h) => /breaks down/.test(h.title)).length).toBe(truth.malfunctions);
+      expect(truth.malfunctions).toBeGreaterThan(0);
       for (const c of doc.casualties) {
         expect(c.label).not.toMatch(/^(br|ge)\./);
         expect(c.cause).not.toMatch(/\b(br|ge)\.\d/);

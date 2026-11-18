@@ -13,19 +13,20 @@ export function requirePace(pace: unknown): Pace {
   return p.id;
 }
 
-/** The clock for a decision, counted from now. */
-export function deadlineFor(match: Pick<MatchDoc, 'pace'>, decision: Decision, seq: number): Deadline {
-  return { at: Timestamp.fromMillis(Date.now() + allowanceMs(match.pace, decision.deadlineClass)), class: decision.deadlineClass, side: decision.owner, seq };
+/** The clock for a decision, counted from now, or from a scheduled session's start while that is still to come. */
+export function deadlineFor(match: Pick<MatchDoc, 'pace' | 'clockFrom'>, decision: Decision, seq: number, at = Date.now()): Deadline {
+  const from = Math.max(at, match.clockFrom ? (match.clockFrom as Timestamp).toMillis() : 0);
+  return { at: Timestamp.fromMillis(from + allowanceMs(match.pace, decision.deadlineClass)), class: decision.deadlineClass, side: decision.owner, seq };
 }
 
 /** The clock on a position: null once the game is over. */
-export function deadlineAfter(match: Pick<MatchDoc, 'pace'>, engine: Engine, state: GameState, seq: number): Deadline | null {
+export function deadlineAfter(match: Pick<MatchDoc, 'pace' | 'clockFrom'>, engine: Engine, state: GameState, seq: number): Deadline | null {
   const d = state.result ? null : engine.currentDecision(state);
   return d ? deadlineFor(match, d, seq) : null;
 }
 
 /** The clock that starts when both seats are filled: the game's first decision, from the opening position. */
-export function firstDeadline(match: Pick<MatchDoc, 'pace' | 'seed'>, scenario: ScenarioDef): Deadline | null {
+export function firstDeadline(match: Pick<MatchDoc, 'pace' | 'seed' | 'clockFrom'>, scenario: ScenarioDef): Deadline | null {
   // The opening decision is the same whatever the dice: a views-model match (no seed on the document) needs none.
   const g = newSk1Game(scenario, match.seed ?? 'opening');
   return deadlineAfter(match, g.engine, g.state, 0);

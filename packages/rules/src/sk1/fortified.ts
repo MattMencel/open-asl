@@ -326,14 +326,14 @@ export const fortifiedModule: RuleModule = {
       secret: ({ target }, env) => !fortifiedRevealed(env, target),
       apply: (v) => v + 1,
     });
-    // Ordnance takes the TEM on its To Hit DR against the Infantry Target Type (SK4 3.2.4 case 17; ASLRB C3.5 case
-    // 17), so the +1 goes there too; the ordnance module tells of it only when it changes the hit or the Critical Hit.
+    // Ordnance takes the TEM on its To Hit DR against the Infantry and Vehicle Target Types (SK4 3.2.4 case 17; ASLRB
+    // C3.5 case 17, C6.8), so the +1 goes there too; the ordnance module tells of it only when it changes the hit or the Critical Hit.
     r.contribute({
       id: FORTIFIED_TH_DRM,
       query: 'ordnance.thDrm',
       ref: 'B23.921',
       label: '+1 Fortified Building',
-      when: (sc, env) => sc.shot.targetType === 'ITT' && isFortified(env, sc.shot.target),
+      when: (sc, env) => (sc.shot.targetType === 'ITT' || sc.shot.targetType === 'VTT') && isFortified(env, sc.shot.target),
       secret: (sc, env) => !fortifiedRevealed(env, sc.shot.target),
       apply: (v) => v + 1,
     });

@@ -32,6 +32,7 @@ import {
   T,
   drmNotes,
   fireMarker,
+  finalFireMarker,
   gun,
   gunHeldBy,
   hasDm,
@@ -244,6 +245,22 @@ export function enemyVehicleAt(env: QueryEnv, hex: HexId, side: SideId): Piece |
     .sort(byId)[0];
 }
 
+/**
+ * Whether the target's TEM is a To Hit DRM (case 17 "TEM (NA for ATT)"; ASLRB C6.8 Case Q): on the Infantry and the
+ * Vehicle Target Type, a vehicle in Motion included. On the Area Target Type it modifies the IFT DR instead.
+ */
+export const temOnToHit = (sc: ShotCtx) => sc.shot.targetType === 'ITT' || sc.shot.targetType === 'VTT';
+
+/**
+ * Who a Woods-Road hex's TEM is judged for: the moving Infantry unit that entered it along the road, or, on the Vehicle
+ * Target Type, the vehicle, which is always on the road there (ASLRB B13.31): either has the woods TEM only against a
+ * firer whose LOS crosses the woods art.
+ */
+export function woodsRoadMover(env: QueryEnv, sc: ShotCtx): ShotCtx['movingInfo'] {
+  if (sc.shot.targetType === 'VTT' && isWoodsRoad(env, hexOfLoc(sc.target))) return { ...sc.movingInfo, assault: !!sc.movingInfo?.assault, viaRoadIntoWoodsRoad: true };
+  return sc.movingInfo;
+}
+
 /** The To Hit number and Critical Hit number of a shot, or null when the chart has no entry. */
 export function toHitNumber(env: QueryEnv, sc: ShotCtx): { th: number; ch: number; red: boolean } | null {
   if (sc.shot.targetType === 'IFE') return null;
@@ -351,6 +368,26 @@ function ownFpSpent(env: QueryEnv, manner: Piece, what: string): string | null {
   return `A ${kind === 'hs' ? 'half-squad' : 'crew'} that fired its own FP this phase may not also fire its ${what}`;
 }
 
+/**
+ * A unit's weapon uses this phase other than this weapon: weapons it holds that fired (marked, or unmarked with ROF
+ * kept) and uses whose weapon is gone (a SW destroyed, a PF check; SK4 4.4.2). A HS, crew or SMC fires one weapon a
+ * phase and a squad at most two, the second only while its own FP is unspent (SK4 4.0; ASLRB A7.35, A7.351). The
+ * same weapon firing again with ROF is not another use. A squad manning a Gun is left to the Gun rules: only its SW
+ * (a Mortar, a LATW, a MG fired as ordnance) count against it here.
+ */
+function otherWeaponUsed(env: QueryEnv, manner: Piece, g: Piece, light: boolean, what: string): string | null {
+  const others = swHeldBy(env.state, manner.id).filter((w) => w.id !== g.id && (fireMarker(w) !== undefined || w.tags[T.rofFired] !== undefined)).length;
+  const used = others + ((manner.tags[T.swDestroyed] as number | undefined) ?? 0);
+  if (used === 0) return null;
+  const kind = mmc(env, manner)?.kind;
+  if (kind === 'hs' || kind === 'crew' || smc(env, manner)) return `A ${kind === 'hs' ? 'half-squad' : kind === 'crew' ? 'crew' : 'SMC'} that used another weapon this phase may not also fire its ${what}`;
+  if (kind === 'squad' && light) {
+    if (used >= 2) return 'A squad may use at most two SW per phase';
+    if (firedOwnFpThisPhase(env, manner.id) || manner.tags[T.ownFpForfeit]) return 'A squad that fired its own FP may use only one SW';
+  }
+  return null;
+}
+
 export function ordnanceWeaponIllegal(env: QueryEnv, weapon: PieceId, mode: FireMode, side: SideId): string | null {
   const g = env.state.pieces[weapon];
   const def = g ? shotWeaponOf(env, g) : null;
@@ -361,7 +398,7 @@ export function ordnanceWeaponIllegal(env: QueryEnv, weapon: PieceId, mode: Fire
   const manner = pieceOf(env, g.loc.by);
   if (!mmc(env, manner) && !(def.light && smc(env, manner))) return 'Only a MMC may fire a Gun';
   if (!isGoodOrder(env, manner)) return `The ${def.light ? 'possessing' : 'manning'} unit is not in Good Order`;
-  const spent = ownFpSpent(env, manner, what);
+  const spent = ownFpSpent(env, manner, what) ?? otherWeaponUsed(env, manner, g, !!def.light, what);
   if (spent) return spent;
   if (isMalf(g)) return `The ${what} is malfunctioned`;
   const halved = isMgOrdnance(def) ? mgHalvedFp(env, manner, mode, side) : null;
@@ -409,7 +446,7 @@ function ordnanceIllegal(env: QueryEnv, shot: OrdnanceShot, mode: FireMode, side
     manner = pieceOf(env, g.loc.by);
     // A Light Mortar is fired by a squad, HS or SMC (SK4 4.5); a Gun by a MMC.
     if (!mmc(env, manner) && !(def.light && smc(env, manner))) return 'Only a MMC may fire a Gun';
-    const spent = ownFpSpent(env, manner, what);
+    const spent = ownFpSpent(env, manner, what) ?? otherWeaponUsed(env, manner, g, !!def.light, what);
     if (spent) return spent;
     // A BAZ is fired by any unbroken Infantry MMC, or by two SMC; never by a single SMC (SK4 4.4.1). A PIAT
     // may be used by a SMC at full effect (4.4.5), a PF by a SMC that passes its PF check (+2, 4.4.2).
@@ -464,7 +501,9 @@ function ordnanceIllegal(env: QueryEnv, shot: OrdnanceShot, mode: FireMode, side
   if (hasBackblast(sc.def) && backblastHex(env, sc.hex) && isPinned(manner) && shot.backblast === false) return 'A pinned firer cannot take the +2 to avoid Backblast';
   // SK4 4.4.5: "A PIAT may not fire at a unit one level lower and in an adjacent hex."
   if (sc.def.type === 'PIAT' && sc.range === 1 && (map.hex(hexOfLoc(shot.target))!.elevation ?? 0) === (map.hex(sc.hex)!.elevation ?? 0) - 1) return 'A PIAT may not fire at an adjacent unit one level lower';
-  const marker = fireMarker(g);
+  // In Final Fire a Gun fires under its manning unit's First or Final Fire marker as well as its own (SK4 3.3.3), so a
+  // crew marked First Fire in the MPh leaves its unfired Gun only Intensive Fire at an adjacent hex.
+  const marker = mode === 'final' && !def.vehicle ? finalFireMarker(env, g) : fireMarker(g);
   if (shot.targetType === 'IFE') {
     if (!sc.def.ife) return 'The Gun has no Infantry Firepower Equivalent';
     if (shot.ammo !== undefined) return 'IFE fires no ammunition';
@@ -482,6 +521,8 @@ function ordnanceIllegal(env: QueryEnv, shot: OrdnanceShot, mode: FireMode, side
     if (sc.def.noIntensive) return 'This Gun may not use Intensive Fire ("No IF" on the counter)';
     if (!marker) return 'Intensive Fire is only possible after the Gun has fired and lost ROF';
     if (mode === 'advancing') return 'No Intensive Fire in the AFPh';
+    // "A unit already marked with Final Fire cannot fire during Final Fire" (SK4 3.3.3).
+    if (mode === 'final' && marker === 'final') return 'The Gun is marked Final Fire';
     if (mode === 'final' && sc.range > 1) return 'Intensive Fire in the DFPh is only possible against an adjacent hex';
     if (isPinned(manner)) return 'A pinned Gun cannot use Intensive Fire';
   } else {
@@ -495,6 +536,10 @@ function ordnanceIllegal(env: QueryEnv, shot: OrdnanceShot, mode: FireMode, side
       case 'fpf':
         return def.light ? 'A Light Mortar marked First Fire cannot fire again this MPh' : 'A Gun marked First Fire may only fire again as Intensive Fire';
       case 'final':
+        if (marker === 'first' && !fireMarker(g))
+          return def.light
+            ? `The possessing unit is marked First Fire, and its ${what} with it: no more fire at full strength this Player Turn (SK4 3.3.3)`
+            : 'The manning unit is marked First Fire: its Gun may fire only as Intensive Fire at an adjacent hex (SK4 3.3.3)';
         if (marker) return 'The Gun has already fired this Player Turn';
         break;
       case 'bounding':
@@ -549,10 +594,25 @@ export function ammoUseIllegal(env: QueryEnv, g: Piece, def: GunDef, ammo: AmmoK
   } else if (isSmokeAmmo(ammo)) return `${AMMO_NAME[ammo]} is fired on the Area Target Type`;
   if (ammo === 'SMOKE' && mode !== 'prep' && mode !== 'final') return 'Smoke is fired at the start of the PFPh or DFPh';
   if (ammo === 'WP' && mode === 'advancing') return 'WP is fired at the start of the PFPh or DFPh, or as Defensive First Fire';
-  if (isSmokeAmmo(ammo) && (mode === 'prep' || mode === 'final') && g.tags[T2.firedNonSmoke]) return `${AMMO_NAME[ammo]} must be fired before the Gun fires anything else this phase`;
+  if (isSmokeAmmo(ammo) && (mode === 'prep' || mode === 'final') && firerFiredNonSmoke(env, g)) return `${AMMO_NAME[ammo]} must be fired before the firer fires anything else this phase (SK4 6.2)`;
   if (targetType === 'VTT') return null;
   if (!isSmokeAmmo(ammo) && ammoColumn(env, def, ammo, targetType, false) === null) return `This Gun has no ${targetType} column`;
   return null;
+}
+
+/**
+ * Whether the firer of a Smoke shot has fired anything other than Smoke this phase (SK4 6.2: "Once the firer has
+ * fired anything other than Smoke during that PFPh/DFPh no more Smoke may be fired in that phase"). SK4 says "the
+ * firer" where ASLRB C8.5 says "any unit", so the bar is per firer, not side-wide: the Gun or vehicle with
+ * everything that fires with it. A vehicle with its MG, a Gun with its manning crew, a Mortar with the unit that
+ * possesses it and that unit's other weapons. A MG burst, the crew's own FP or the MA's IFE ends the Smoke for all.
+ */
+function firerFiredNonSmoke(env: QueryEnv, g: Piece): boolean {
+  const holder = g.loc.kind === 'held' ? env.state.pieces[g.loc.by] : undefined;
+  const group = [g, ...swHeldBy(env.state, g.id), ...(holder ? [holder, ...swHeldBy(env.state, holder.id)] : [])];
+  // An ordnance shot other than Smoke marks its weapon; an IFT attack (a MG, a unit's own FP, IFE) is never Smoke, and
+  // the phase's fire log names every unit and weapon that made one.
+  return group.some((p) => !!p.tags[T2.firedNonSmoke] || firedOwnFpThisPhase(env, p.id));
 }
 
 /** The ammunition check of a shot: `ammoUseIllegal`, and HEAT only at Infantry in a building or at a Gun. */
@@ -1089,7 +1149,7 @@ export const ordnanceModule: RuleModule = {
     th('apcr-range', 'case 11', (sc) => `+1 ${AMMO_NAME[sc.ammo]} at 13 hexes or more`, (sc) => (sc.ammo === 'APCR' || sc.ammo === 'APDS') && sc.range >= 13, () => 1);
     th('intensive', 'case 9', '+2 Intensive Fire', (sc) => !!sc.shot.intensive, () => 2);
     th('backblast', 'SK4 4.4.3', '+2 firing from a building (no Backblast)', (sc, env) => hasBackblast(sc.def) && !sc.shot.backblast && backblastHex(env, sc.hex), () => 2);
-    th('tem', 'case 17', (sc, env) => `+${env.query('hex.tem', { hex: sc.target }, 0)} TEM (${terrainOf(env, sc.target).name})`, (sc, env) => sc.shot.targetType === 'ITT' && env.query('hex.tem', { hex: sc.target }, 0) !== 0 && !onWoodsRoad(env, sc.movingInfo, [sc.loc ?? sc.hex], sc.target, !!sc.losBlind), (sc, env) => env.query('hex.tem', { hex: sc.target }, 0));
+    th('tem', 'case 17', (sc, env) => `+${env.query('hex.tem', { hex: sc.target }, 0)} TEM (${terrainOf(env, sc.target).name})`, (sc, env) => temOnToHit(sc) && env.query('hex.tem', { hex: sc.target }, 0) !== 0 && !onWoodsRoad(env, woodsRoadMover(env, sc), [sc.loc ?? sc.hex], sc.target, !!sc.losBlind), (sc, env) => env.query('hex.tem', { hex: sc.target }, 0));
     th('emplacement', 'SK4 6.3', (sc, env) => `+${emplacementThDrm(env, sc.target, sc.side)} Emplacement TEM`, (sc, env) => sc.shot.targetType === 'ITT' && emplacementThDrm(env, sc.target, sc.side) > 0, (sc, env) => emplacementThDrm(env, sc.target, sc.side));
     th('hindrance', 'case 18', (sc) => `+${sc.hindrance} LOS Hindrance`, (sc) => sc.hindrance > 0, (sc) => sc.hindrance);
     th('ffnam', 'case 19', '-1 FFNAM', (sc) => !!sc.movingInfo && !sc.movingInfo.assault && !sc.movingInfo.pinned && !hazardousMover(sc), () => -1);

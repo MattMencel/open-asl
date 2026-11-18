@@ -510,17 +510,24 @@ export function roadblockExtension(env: QueryEnv, c: Pick<FortPlacement, 'hex' |
 
 // ---------------------------------------------------------------- the module
 
-export const fortificationsModule: RuleModule = {
-  id: 'ssr.fortifications',
+/**
+ * The counters themselves, in every full ASL game: the record, its events and redactor, the reveal by enemy LOS (A12.33),
+ * the pillbox Location and what the other side may see of a unit's position. A scenario's `fortifications` special rule
+ * (`fortificationsModule`) adds the setup pools and placement; Entrenching (B27.11, `asl/entrenchments.ts`) adds foxholes
+ * in play, which is why the record lives here and not in the special rule.
+ */
+export const aslFortificationsModule: RuleModule = {
+  id: 'asl.fortifications',
   ref: 'ASLRB A12.33, B26–B30',
-  summary: 'Fortification counters a side places at setup, openly or hidden; minefields recorded (SSR, full ASL).',
+  summary: 'Fortification counters: the record, what each side sees of it, the reveal by enemy LOS, the pillbox Location.',
   requires: ['sk1.scenario', 'sk1.movement', 'asl.rubble', 'asl.levels'],
   install(r) {
     r.event<{ side: SideId; counters: FortRecord[] }>({
       type: 'asl.fort.placed',
       apply(d, p) {
         const st = (d.ext[FORT_EXT] as FortState | undefined) ?? { counters: [] };
-        d.ext[FORT_EXT] = { ...st, counters: [...st.counters.filter((c) => c.side !== p.side), ...p.counters] };
+        // A side's setup placement comes once; a foxhole dug in play (B27.11) joins the counters already down.
+        d.ext[FORT_EXT] = { ...st, counters: [...st.counters.filter((c) => !p.counters.some((n) => n.id === c.id)), ...p.counters] };
       },
     });
     r.event<{ counter: FortRecord; reason: string }>({
@@ -556,8 +563,12 @@ export const fortificationsModule: RuleModule = {
       id: 'asl.fort.redact',
       ext: FORT_EXT,
       redactExt: (slice, viewer) => shownState(slice as FortState, viewer),
-      events: ['asl.fort.placed', 'asl.fort.revealed', 'asl.fort.dummies'],
-      redactEvent(ev, viewer) {
+      events: ['asl.fort.placed', 'asl.fort.revealed', 'asl.fort.dummies', 'asl.fort.grown'],
+      redactEvent(ev, viewer, env) {
+        if (ev.type === 'asl.fort.grown') {
+          const c = fortCounters(env).find((x) => x.id === (ev.payload as { id: string }).id);
+          return c && shownCounter(c, viewer) ? ev : null;
+        }
         if (ev.type === 'asl.fort.placed') {
           const p = ev.payload as { side: SideId; counters: FortRecord[] };
           return { ...ev, payload: { side: p.side, counters: p.counters.map((c) => shownCounter(c, viewer)).filter((c): c is FortRecord => !!c) } };
@@ -572,68 +583,14 @@ export const fortificationsModule: RuleModule = {
       },
     });
 
-    // The Dummy Minefield Secret dr (B28.47): a side allotted at least one Dummy gains half a dr more, rounded down.
-    r.setup({
-      id: 'asl.fort.dummies',
-      priority: 9,
-      run(ctx) {
-        for (const s of statics(ctx).scenario.ssr) {
-          if (s.module !== FORTIFICATIONS_MODULE) continue;
-          const p = s.params as unknown as FortificationsParams;
-          if (!(p.mines?.dummies ?? 0)) continue;
-          const dr = ctx.roll(`${p.side}: Dummy Minefield Secret dr (ASLRB B28.47)`, 1).total;
-          ctx.emit('asl.fort.dummies', { side: p.side, dr, extra: Math.floor(dr / 2) });
-        }
+    // A foxhole dug beside an existing one grows it: 1S to 2S to 3S (B27.12).
+    r.event<{ id: string; capacity: 1 | 2 | 3 }>({
+      type: 'asl.fort.grown',
+      apply(d, p) {
+        const st = d.ext[FORT_EXT] as FortState | undefined;
+        if (st) d.ext[FORT_EXT] = { ...st, counters: st.counters.map((c) => (c.id === p.id ? { ...c, capacity: p.capacity } : c)) };
       },
     });
-
-    // The placement: part of the side's setup, once; the units may then be set up beneath or inside the counters.
-    r.action<FortPlaceAction>({
-      type: 'fort.place',
-      decisionKinds: [SETUP_DECISION],
-      legal(env, d) {
-        const p = fortificationsParams(env, d.owner);
-        if (!p || fortCounters(env).some((c) => c.side === d.owner)) return [];
-        const counters = defaultFortPlacement(env, d.owner);
-        return counters.length ? [{ type: 'fort.place', counters }] : [];
-      },
-      validate: (env, a, d) => fortPlaceIllegal(env, d.owner, a.counters),
-      resolve(ctx, a, d: Decision) {
-        const side = d.owner;
-        const counters: FortRecord[] = a.counters.map((c, i) => ({ ...c, id: `${side}.fort${i + 1}`, side, hidden: c.hidden }));
-        ctx.emit('asl.fort.placed', { side, counters });
-      },
-    });
-
-    // Units set up beneath a counter or inside a pillbox: the capacities (B27.12, B27.51, B30.111).
-    r.contribute({
-      id: 'asl.fort.setup',
-      query: 'setup.illegal',
-      ref: 'B27.12, B27.51, B30.111',
-      apply: (v, { side, action }, env) => v ?? fortSetupIllegal(env, side, action as SetupAction),
-    });
-    // After the placements: the units beneath go under their counter (a position within the Location, B27.13); a unit set
-    // up in a Wire hex and not beneath it starts on top, as one entering would (B26.4).
-    r.procedure<SetupPlacedFn>(SETUP_PLACED, (next) => (ctx, action, decision: Decision) => {
-      next?.(ctx, action, decision);
-      const side = decision.owner;
-      const beneath = new Set(action.beneath ?? []);
-      for (const [id, loc] of Object.entries(action.placements).sort()) {
-        const u = ctx.state.pieces[id];
-        if (!u || u.loc.kind !== 'hex' || isPillboxLoc(loc)) continue;
-        const hex = hexOfLoc(loc);
-        const ent = fortificationsAt(ctx, hex).find((c) => c.side === side && ENTRENCHMENTS.includes(c.kind));
-        const wire = wireAt(ctx, hex);
-        if (!ent && !wire) continue;
-        const pos: { ent?: 'foxhole' | 'trench' | 'ditch'; wire?: 'on' | 'beneath' } = {};
-        if (beneath.has(id)) {
-          if (ent) pos.ent = ent.kind as 'foxhole' | 'trench' | 'ditch';
-          if (wire) pos.wire = 'beneath';
-        } else if (wire) pos.wire = 'on';
-        if (Object.keys(pos).length) ctx.emit('piece.moved', { id, loc: { ...u.loc, pos } });
-      }
-    });
-
     // A pillbox is a Location of its own in its hex (B30.1), ADJACENT to the ground outside it (B30.6).
     r.contribute({
       id: 'asl.fort.pillbox.locations',
@@ -704,6 +661,77 @@ export const fortificationsModule: RuleModule = {
         for (const c of fortificationsAt(ctx, ev.payload.hex)) if (c.hidden && !c.revealed && c.kind !== 'mines') revealFortification(ctx, c.id, 'concealment');
       },
     });
+  },
+};
+
+export const fortificationsModule: RuleModule = {
+  id: 'ssr.fortifications',
+  ref: 'ASLRB A12.33, B26–B30',
+  summary: 'Fortification counters a side places at setup, openly or hidden; minefields recorded (SSR, full ASL).',
+  requires: ['asl.fortifications'],
+  install(r) {
+    // The Dummy Minefield Secret dr (B28.47): a side allotted at least one Dummy gains half a dr more, rounded down.
+    r.setup({
+      id: 'asl.fort.dummies',
+      priority: 9,
+      run(ctx) {
+        for (const s of statics(ctx).scenario.ssr) {
+          if (s.module !== FORTIFICATIONS_MODULE) continue;
+          const p = s.params as unknown as FortificationsParams;
+          if (!(p.mines?.dummies ?? 0)) continue;
+          const dr = ctx.roll(`${p.side}: Dummy Minefield Secret dr (ASLRB B28.47)`, 1).total;
+          ctx.emit('asl.fort.dummies', { side: p.side, dr, extra: Math.floor(dr / 2) });
+        }
+      },
+    });
+
+    // The placement: part of the side's setup, once; the units may then be set up beneath or inside the counters.
+    r.action<FortPlaceAction>({
+      type: 'fort.place',
+      decisionKinds: [SETUP_DECISION],
+      legal(env, d) {
+        const p = fortificationsParams(env, d.owner);
+        if (!p || fortCounters(env).some((c) => c.side === d.owner)) return [];
+        const counters = defaultFortPlacement(env, d.owner);
+        return counters.length ? [{ type: 'fort.place', counters }] : [];
+      },
+      validate: (env, a, d) => fortPlaceIllegal(env, d.owner, a.counters),
+      resolve(ctx, a, d: Decision) {
+        const side = d.owner;
+        const counters: FortRecord[] = a.counters.map((c, i) => ({ ...c, id: `${side}.fort${i + 1}`, side, hidden: c.hidden }));
+        ctx.emit('asl.fort.placed', { side, counters });
+      },
+    });
+
+    // Units set up beneath a counter or inside a pillbox: the capacities (B27.12, B27.51, B30.111).
+    r.contribute({
+      id: 'asl.fort.setup',
+      query: 'setup.illegal',
+      ref: 'B27.12, B27.51, B30.111',
+      apply: (v, { side, action }, env) => v ?? fortSetupIllegal(env, side, action as SetupAction),
+    });
+    // After the placements: the units beneath go under their counter (a position within the Location, B27.13); a unit set
+    // up in a Wire hex and not beneath it starts on top, as one entering would (B26.4).
+    r.procedure<SetupPlacedFn>(SETUP_PLACED, (next) => (ctx, action, decision: Decision) => {
+      next?.(ctx, action, decision);
+      const side = decision.owner;
+      const beneath = new Set(action.beneath ?? []);
+      for (const [id, loc] of Object.entries(action.placements).sort()) {
+        const u = ctx.state.pieces[id];
+        if (!u || u.loc.kind !== 'hex' || isPillboxLoc(loc)) continue;
+        const hex = hexOfLoc(loc);
+        const ent = fortificationsAt(ctx, hex).find((c) => c.side === side && ENTRENCHMENTS.includes(c.kind));
+        const wire = wireAt(ctx, hex);
+        if (!ent && !wire) continue;
+        const pos: { ent?: 'foxhole' | 'trench' | 'ditch'; wire?: 'on' | 'beneath' } = {};
+        if (beneath.has(id)) {
+          if (ent) pos.ent = ent.kind as 'foxhole' | 'trench' | 'ditch';
+          if (wire) pos.wire = 'beneath';
+        } else if (wire) pos.wire = 'on';
+        if (Object.keys(pos).length) ctx.emit('piece.moved', { id, loc: { ...u.loc, pos } });
+      }
+    });
+
   },
 };
 

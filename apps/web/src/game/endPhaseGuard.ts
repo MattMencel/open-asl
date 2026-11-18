@@ -42,7 +42,7 @@ export function endPhaseWarning(env: QueryEnv, legal: Omit<Action, 'side' | 'dec
       );
     if (dm.size)
       lines.push(
-        `${n(dm.size, 'broken unit')} ${dm.size === 1 ? 'keeps its' : 'keep their'} DM counter. Out of woods and buildings a broken unit may keep DM (SK1 3.1 g), so it may still rout in this turn's Rout Phase, but its next rally attempt is at +4. Choose "Remove DM" on ${dm.size === 1 ? 'it' : 'any of them'} to take it off.`,
+        `${n(dm.size, 'broken unit')} ${dm.size === 1 ? 'keeps its' : 'keep their'} DM counter. Out of woods and buildings a broken unit may keep DM (SK1 3.1 g), so it may still rout in this turn's Rout Phase, but its next rally attempt is at +4. To take it off, right-click ${dm.size === 1 ? "the unit's hex" : 'the hex of any of them'} and choose "Remove DM" (also on the unit's own menu in the stack).`,
       );
     lines.push('End the Rally Phase anyway?');
     return {

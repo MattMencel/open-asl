@@ -246,6 +246,7 @@ export const TERRAIN_NOTES: Record<string, string> = {
   brush: 'No FFMO.',
   'building-stone': 'Rout and rally shelter. No mortar fire from inside.',
   'building-wood': 'Rout and rally shelter.',
+  jungle: 'Stacking limit two squad equivalents (plus SMC) unless the hex also holds a road or building.',
 };
 
 export const TERRAIN_EXTRA: { name: string; mf: string; tem: string; los: string; notes: string }[] = [

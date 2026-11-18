@@ -666,6 +666,18 @@ export const vehicleMoveModule: RuleModule = {
 
     // ---------------------------------------------------------------- vehicular smoke dispensers (SK4 7.5)
     r.event<{ vehicle: PieceId; kind: 'sD' | 'sM' | 'sP' | 'sN'; dr: [number, number]; drm: number; n: number; placed: boolean; hex: HexId }>({ type: 'sk3.vehicle.smoke', apply() {} });
+    const SM_NO_TARGET = 'Choose a hex for the Smoke Mortar';
+    // "any hex of the firer's choice that is at a range of 1-3 hexes from the AFV within its LOS and TCA"; "An AFV may
+    // not fire a sM from inside a building" (SK4 7.5). The cheap tests first: the LOS is traced last.
+    const smTargetIllegal = (env: QueryEnv, p: Piece, at: HexId, target: HexId): string | null => {
+      const map = statics(env).map;
+      const dist = map.distance(at, target);
+      if (!map.hex(target) || dist < 1 || dist > 3) return 'A Smoke Mortar reaches 1 to 3 hexes';
+      if (!inCoveredArc(map.hex(at)!.cube, tcaOf(env, p), map.hex(target)!.cube)) return 'A Smoke Mortar fires within the TCA';
+      if (isBuildingHex(env, at)) return 'A Smoke Mortar cannot fire from inside a building';
+      if (!env.query('los.trace', { from: at, to: target }, { clear: true, hindrance: 0, parts: [] }).clear) return "The Smoke Mortar's target hex is out of the AFV's LOS";
+      return null;
+    };
     const smokeIllegal = (env: QueryEnv, id: PieceId, side: string, target: HexId | undefined, defending: boolean): string | null => {
       const p = env.state.pieces[id];
       const d = p && vehicle(env, p);
@@ -686,12 +698,8 @@ export const vehicleMoveModule: RuleModule = {
         if (!disp || remaining(ms) < 1) return 'Dispensing smoke costs 1 MP';
       }
       if (disp.kind === 'sM') {
-        if (!target) return 'Choose a hex for the Smoke Mortar';
-        const map = statics(env).map;
-        const dist = map.distance(at, target);
-        if (dist < 1 || dist > 3) return 'A Smoke Mortar reaches 1 to 3 hexes';
-        if (!inCoveredArc(map.hex(at)!.cube, tcaOf(env, p), map.hex(target)!.cube)) return 'A Smoke Mortar fires within the TCA';
-        if (isBuildingHex(env, at)) return 'A Smoke Mortar cannot fire from inside a building';
+        if (!target) return SM_NO_TARGET;
+        return smTargetIllegal(env, p, at, target);
       } else if (target && target !== at) return 'This dispenser smokes its own hex';
       return null;
     };
@@ -732,7 +740,16 @@ export const vehicleMoveModule: RuleModule = {
         const d = vehicle(env, m.p)!;
         if (!d.smoke?.length) return [];
         if (d.smoke[0]!.kind !== 'sM') return smokeIllegal(env, m.p.id, m.p.side, undefined, false) ? [] : [{ type: 'vmove.smoke' as const }];
-        return statics(env).map.neighbors(m.ms.hex).filter((h) => !smokeIllegal(env, m.p.id, m.p.side, h, false)).map((target) => ({ type: 'vmove.smoke' as const, target }));
+        // A Smoke Mortar's target: any hex 1 to 3 hexes away (SK4 7.5), as validation accepts. The vehicle's own
+        // conditions are judged once, then each hex.
+        if (smokeIllegal(env, m.p.id, m.p.side, undefined, false) !== SM_NO_TARGET) return [];
+        const map = statics(env).map;
+        const at = m.ms.hex;
+        const near = new Set<HexId>([at]);
+        let ring: HexId[] = [at];
+        for (let i = 0; i < 3; i++) ring = ring.flatMap((h) => map.neighbors(h)).filter((h) => !near.has(h) && !!near.add(h));
+        near.delete(at);
+        return [...near].sort().filter((h) => !smTargetIllegal(env, m.p, at, h)).map((target) => ({ type: 'vmove.smoke' as const, target }));
       },
       validate(env, a) {
         const m = movingVehicle(env);
